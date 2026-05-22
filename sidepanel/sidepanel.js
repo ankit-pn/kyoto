@@ -95,6 +95,7 @@
     reloadCtxBtn: $('reloadCtxBtn'),
     useContext: $('useContext'),
     visionBtn: $('visionBtn'),
+    slashPalette: $('slashPalette'),
     toolsEnabled: $('toolsEnabled'),
     maxAgentSteps: $('maxAgentSteps'),
     maxAutoContinues: $('maxAutoContinues'),
@@ -491,6 +492,105 @@
       }
       return;
     }
+  }
+
+  // ── Slash command palette ────────────────────────────
+  // Live dropdown above the composer. Appears when the input starts
+  // with "/" and the user hasn't typed a space yet (which would mean
+  // the command is committed and they're typing args).
+  function allSlashCommands() {
+    const out = [];
+    for (const [k, v] of Object.entries(BUILTIN_SLASH)) {
+      out.push({
+        name: k.slice(1),
+        template: v,
+        builtin: true,
+        action: typeof v === 'string' && v.startsWith('[CMD]:')
+      });
+    }
+    for (const c of (state.settings?.customSlashCommands || [])) {
+      if (!c.name || !c.prompt) continue;
+      out.push({
+        name: c.name.replace(/^\/+/, ''),
+        template: c.prompt,
+        builtin: false,
+        action: false
+      });
+    }
+    return out;
+  }
+
+  function refreshSlashPalette() {
+    if (!els.slashPalette || !els.input) return;
+    const val = els.input.value;
+    if (!val.startsWith('/')) {
+      els.slashPalette.classList.add('hidden');
+      return;
+    }
+    // Once the user types whitespace after the command, the command is
+    // committed — hide the palette so it doesn't get in the way of
+    // typing arguments.
+    const spaceIdx = val.search(/\s/);
+    if (spaceIdx !== -1) {
+      els.slashPalette.classList.add('hidden');
+      return;
+    }
+    const query = val.slice(1).toLowerCase();
+    const all = allSlashCommands();
+    const filtered = (query
+      ? all.filter(c => c.name.toLowerCase().includes(query))
+      : all
+    ).slice(0, 24);
+
+    if (!filtered.length) {
+      els.slashPalette.classList.add('hidden');
+      return;
+    }
+    els.slashPalette.classList.remove('hidden');
+    const html = filtered.map((c, i) => {
+      let preview = '';
+      if (c.action) {
+        preview = 'panel action';
+      } else if (typeof c.template === 'string') {
+        preview = c.template.replace(/\s+/g, ' ').slice(0, 120);
+      }
+      const tag = c.action ? '<span class="slash-tag">action</span>'
+                : c.builtin ? ''
+                : '<span class="slash-tag">custom</span>';
+      return `<div class="slash-item${i === 0 ? ' active' : ''}" data-name="${esc(c.name)}" data-action="${c.action ? '1' : '0'}" role="option">
+        <span class="slash-name">/${esc(c.name)}</span>
+        <span class="slash-preview">${esc(preview)}</span>
+        ${tag}
+      </div>`;
+    }).join('') + '<div class="slash-hint">Tab/Enter → fill · ↑↓ → navigate · Esc → close</div>';
+    els.slashPalette.innerHTML = html;
+  }
+
+  function slashPaletteVisible() {
+    return els.slashPalette && !els.slashPalette.classList.contains('hidden');
+  }
+  function moveSlashSelection(delta) {
+    const items = els.slashPalette?.querySelectorAll('.slash-item');
+    if (!items?.length) return;
+    let idx = -1;
+    items.forEach((el, i) => { if (el.classList.contains('active')) idx = i; });
+    idx = (idx + delta + items.length) % items.length;
+    items.forEach((el, i) => el.classList.toggle('active', i === idx));
+    items[idx].scrollIntoView({ block: 'nearest' });
+  }
+  function fillFromSlashPalette() {
+    const active = els.slashPalette?.querySelector('.slash-item.active');
+    if (!active) return false;
+    const name = active.dataset.name;
+    const isAction = active.dataset.action === '1';
+    // Action commands take no args — fill without trailing space so
+    // an immediate Enter sends. Templated commands get a space so the
+    // user can keep typing args.
+    els.input.value = `/${name}${isAction ? '' : ' '}`;
+    els.input.style.height = 'auto';
+    els.input.style.height = Math.min(els.input.scrollHeight, 160) + 'px';
+    els.slashPalette.classList.add('hidden');
+    return true;
   }
 
   function toggleVisionPending() {
@@ -1218,18 +1318,26 @@
     if (kind === 'inline') { await handleInlineSlash(action, args); return; }
     // Honour the one-shot vision toggle.
     if (state.visionPending) {
+      // Always disarm the toggle FIRST so a failed capture doesn't
+      // strand the user in a loop where every send retries the same
+      // failing screenshot and silently replaces their text.
+      state.visionPending = false;
+      updateVisionUI();
       try {
         const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 80 });
-        state.visionPending = false;
-        updateVisionUI();
         return sendMessage([
           { type: 'text', text },
           { type: 'image_url', image_url: { url: dataUrl } }
         ]);
       } catch (e) {
-        // Restore the user's typed text so they can retry without losing it.
+        // Capture commonly fails on chrome:// / chrome-extension:// /
+        // the Web Store. Restore the user's typed text + show a clear
+        // explanation. Toggle is already off so they can just retry.
         if (els.input) { els.input.value = text; els.input.dispatchEvent(new Event('input')); }
-        addMessage('assistant', `Screenshot failed: ${e.message}. Your message has been restored to the composer.`, { error: true });
+        const hint = /Cannot access/i.test(e.message)
+          ? 'Chrome blocks screenshots of this page (it\'s a chrome:// / chrome-extension:// / Web Store URL). Open a normal http(s) tab first.'
+          : `Screenshot failed: ${e.message}`;
+        addMessage('assistant', `${hint} The 📸 toggle has been turned off; your message is back in the composer.`, { error: true });
         return;
       }
     }
@@ -1853,13 +1961,45 @@
     els.input.addEventListener('input', () => {
       els.input.style.height = 'auto';
       els.input.style.height = Math.min(els.input.scrollHeight, 160) + 'px';
+      refreshSlashPalette();
     });
     els.input.addEventListener('keydown', (e) => {
+      // Slash palette gets first pick at the keys
+      if (slashPaletteVisible()) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); moveSlashSelection(1); return; }
+        if (e.key === 'ArrowUp')   { e.preventDefault(); moveSlashSelection(-1); return; }
+        if (e.key === 'Escape')    { e.preventDefault(); els.slashPalette.classList.add('hidden'); return; }
+        if (e.key === 'Tab')       { e.preventDefault(); fillFromSlashPalette(); return; }
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          if (fillFromSlashPalette()) return;
+        }
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         const v = els.input.value; els.input.value = ''; els.input.style.height = 'auto';
+        els.slashPalette?.classList.add('hidden');
         submitInput(v);
       }
+    });
+    // Click to fill from palette
+    if (els.slashPalette) {
+      els.slashPalette.addEventListener('mousedown', (e) => {
+        // mousedown so the input doesn't lose focus first
+        const item = e.target.closest('.slash-item');
+        if (!item) return;
+        e.preventDefault();
+        // Mark clicked item as active so fillFromSlashPalette picks it
+        els.slashPalette.querySelectorAll('.slash-item').forEach(el => el.classList.toggle('active', el === item));
+        fillFromSlashPalette();
+        els.input.focus();
+      });
+    }
+    // Dismiss palette on click outside
+    document.addEventListener('mousedown', (e) => {
+      if (!slashPaletteVisible()) return;
+      if (els.slashPalette.contains(e.target) || els.input?.contains(e.target)) return;
+      els.slashPalette.classList.add('hidden');
     });
     els.sendBtn.addEventListener('click', () => {
       const v = els.input.value; els.input.value = ''; els.input.style.height = 'auto';

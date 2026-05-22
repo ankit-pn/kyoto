@@ -54,9 +54,14 @@
     </div>
   </main>
 
+  <!-- Slash command palette. Appears above the composer when the
+       input begins with "/". Lives outside .composer so it can float
+       upward without being clipped. -->
+  <div id="slashPalette" class="slash-palette hidden" role="listbox" aria-label="Slash commands"></div>
+
   <footer class="composer">
     <div class="composer-box">
-      <textarea id="input" rows="1" placeholder="Ask about this page…"></textarea>
+      <textarea id="input" rows="1" placeholder="Ask about this page… (type / for commands)"></textarea>
       <div class="composer-row">
         <label class="ctx-toggle" title="Include page content as context">
           <input type="checkbox" id="useContext" checked />

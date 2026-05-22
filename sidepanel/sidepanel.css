@@ -294,16 +294,82 @@ body {
 .msg-body th { background: var(--bg-elev); font-weight: 600; }
 .msg-body hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 
+/* ── Slash command palette ──────────────── */
+.slash-palette {
+  position: fixed;
+  left: 10px; right: 10px;
+  bottom: 88px;             /* sits just above the composer */
+  z-index: 12;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  display: flex; flex-direction: column;
+  font-size: 12.5px;
+}
+.slash-palette .slash-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--text);
+}
+.slash-palette .slash-item:hover { background: var(--bg-elev2); }
+.slash-palette .slash-item.active { background: var(--accent-soft); color: var(--accent); }
+.slash-palette .slash-name {
+  font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 12px; font-weight: 600;
+  white-space: nowrap;
+  min-width: 110px;
+}
+.slash-palette .slash-preview {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+.slash-palette .slash-item.active .slash-preview { color: var(--accent); opacity: 0.85; }
+.slash-palette .slash-tag {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 1px 5px; border-radius: 3px;
+  background: var(--bg-elev2); color: var(--text-faint);
+}
+.slash-palette .slash-item.active .slash-tag { background: rgba(255,255,255,0.18); color: var(--accent); }
+.slash-palette .slash-hint {
+  padding: 6px 8px;
+  font-size: 11px; color: var(--text-faint);
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+
 /* ── Composer vision button + multimodal images ── */
 .btn-vision {
   padding: 4px 8px;
   font-size: 13px;
   line-height: 1;
+  border: 1px solid transparent;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, box-shadow 0.12s;
 }
+.btn-vision:hover { background: var(--bg-elev2); }
 .btn-vision.active {
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent-hover);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+/* small "armed" indicator inside the composer row */
+.btn-vision.active::after {
+  content: 'armed';
+  margin-left: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: middle;
 }
 
 .msg-image {
