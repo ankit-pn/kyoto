@@ -194,7 +194,7 @@
     '/har':        'Export the captured network buffer as HAR using `network_har_export`. Show me a summary of how many entries and the top hosts.',
     '/diffcookies': 'First call `cookies_snapshot` for this site with label "before", then wait — when I say "now", call `cookies_diff` with label "before" and show what changed.',
     '/search':     'Use `minimax_web_search` to find: {{args}}. Then summarise the top 3 results with citations.',
-    '/vlm':        'Capture a tab screenshot via `tab_screenshot`, pass its dataUrl into `minimax_understand_image` with prompt: {{args}}'
+    '/vlm':        'Use `minimax_describe_tab` to analyze the current tab. Prompt: {{args}}'
   };
 
   function expandSlash(text) {

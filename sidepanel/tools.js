@@ -124,11 +124,14 @@
   T({
     name: 'tab_screenshot',
     group: 'browser',
-    description: 'Capture a PNG screenshot of the visible area of the current window. Returns a data URL.',
+    description: 'Capture a screenshot of the visible area of the current window. Returns the full data URL (use `format: "jpeg"` and a lower `quality` to reduce size). Note: the data URL is large; if you only need to *analyze* the screenshot with a vision model, prefer `minimax_describe_tab` which captures + analyzes in one step without round-tripping the base64 through the conversation.',
     parameters: OBJ({ format: { type: 'string', enum: ['png', 'jpeg'] }, quality: NUM }),
     handler: async ({ format = 'png', quality = 90 } = {}) => {
       const dataUrl = await chrome.tabs.captureVisibleTab({ format, quality });
-      return { dataUrl: truncate(dataUrl, 200000), bytes: dataUrl.length };
+      // Don't truncate — a truncated data URL is invalid and breaks any
+      // downstream consumer. Callers should pick JPEG + low quality if
+      // size matters.
+      return { dataUrl, bytes: dataUrl.length, mimeType: `image/${format}` };
     }
   });
 
@@ -1160,13 +1163,30 @@
   T({
     name: 'minimax_understand_image',
     group: 'minimax',
-    description: 'Vision/VLM analysis via MiniMax token-plan. Pass a `prompt` describing what to extract and an `image_url` (http(s) URL, data URL, or paired with `tab_screenshot` result). Supports JPEG/PNG/WebP. Returns a text description. Tip: capture a screenshot with `tab_screenshot` then feed its dataUrl into this tool for "what is on this page" workflows.',
+    description: 'Vision/VLM analysis via MiniMax token-plan. Pass a `prompt` describing what to extract and an `image_url` (http(s) URL or data URL). Supports JPEG/PNG/WebP. Returns a text description. For analyzing the current tab, prefer `minimax_describe_tab` which avoids round-tripping a large base64 string through the conversation.',
     parameters: OBJ({ prompt: STR, image_url: STR }, ['prompt', 'image_url']),
     handler: async ({ prompt, image_url }) => {
       if (!prompt) throw new Error('prompt required');
       const dataUrl = await toDataUrl(image_url);
       const data = await minimaxFetch('/v1/coding_plan/vlm', { prompt, image_url: dataUrl });
       return { content: data.content || '' };
+    }
+  });
+
+  T({
+    name: 'minimax_describe_tab',
+    group: 'minimax',
+    description: 'Capture a screenshot of the active tab and analyze it via MiniMax VLM in one tool call. Use for "what is on this page", OCR, layout analysis, accessibility checks. Returns only the model\'s text — the screenshot data URL never enters the conversation, so this is the cheap way to do tab-level vision.',
+    parameters: OBJ({
+      prompt: STR,
+      format: { type: 'string', enum: ['jpeg', 'png'] },
+      quality: NUM
+    }, ['prompt']),
+    handler: async ({ prompt, format = 'jpeg', quality = 80 }) => {
+      if (!prompt) throw new Error('prompt required');
+      const dataUrl = await chrome.tabs.captureVisibleTab({ format, quality });
+      const data = await minimaxFetch('/v1/coding_plan/vlm', { prompt, image_url: dataUrl });
+      return { content: data.content || '', screenshotBytes: dataUrl.length };
     }
   });
 
