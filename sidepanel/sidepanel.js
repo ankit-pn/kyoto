@@ -430,7 +430,7 @@
     '/media':      'Use `media_detect` on this tab to list every media URL (video / audio / streams) found in the DOM and recent network traffic. Then suggest the best one to download.',
     '/download':   'Use `media_download` to grab this URL into the user\'s Downloads folder: {{args}}',
     '/s3':         'Upload the URL/file described in "{{args}}" to S3 via `s3_upload` and return the resulting S3 URL.',
-    '/yt':         'Use `youtube_extract` on this tab. Show me the title + duration, list any progressive/adaptive formats with direct URLs (needsCipher:false), and the HLS / DASH manifest URLs if present. If everything needs ciphering, fall back to `yt_dlp_command`.',
+    '/yt':         'Try to download the current YouTube video. Strategy: (1) call `youtube_extract` — if any format has direct URLs (needsCipher:false), use `media_download` on the best one and stop. (2) Otherwise call `youtube_capture_streams` — it plays the video briefly and snoops the player\'s own network requests to get post-cipher URLs. Take a progressive item if available, else best audio + best video separately. Use `urlWithoutRange` with `media_download`. (3) Only if both fail, hand off to `yt_dlp_command`. Tell the user about throttling if you go via capture (~30-100 KB/s for video).',
     '/ytdl':       'Use `yt_dlp_command` to generate a yt-dlp invocation for this tab. {{args}}'
   };
 

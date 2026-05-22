@@ -1552,6 +1552,99 @@
   });
 
   T({
+    name: 'youtube_capture_streams',
+    group: 'media',
+    description:
+      'Best-effort in-browser YouTube download. Bypasses signature-cipher decoding by snooping on the page\'s OWN network requests — the URLs the player has already decoded are visible to us. ' +
+      'How it works: starts a tab-scoped network capture, triggers the <video> element to play (or seeks if already playing) so YouTube fetches fresh segments, waits a few seconds, then collects every `googlevideo.com/videoplayback` URL grouped by itag. ' +
+      'The captured URLs are valid for ~6 hours and can be passed to `media_download`. Use `urlWithoutRange` for the full stream. ' +
+      'IMPORTANT: in-browser downloads will be THROTTLED (~30-100 KB/s) due to YouTube\'s n-parameter throttling — only yt-dlp deciphers that. For long videos this is painful; use `yt_dlp_command` instead. For short audio (a song, a podcast clip), in-browser is fine.',
+    parameters: OBJ({
+      tabId: NUM,
+      playForMs: NUM
+    }),
+    handler: async ({ tabId, playForMs = 5000 } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      const tab = await chrome.tabs.get(tabId);
+      if (!/youtube\.com|youtu\.be|youtube-nocookie\.com/.test(tab?.url || '')) {
+        return { error: `Active tab isn't YouTube: ${tab?.url}` };
+      }
+
+      const wasCapturing = (await bg('NET_CAPTURE_LIST', { limit: 1 }))?.capturing;
+      if (!wasCapturing) await bg('NET_CAPTURE_START', { scope: 'tab', tabId });
+      // Clear any pre-existing capture so we only see fresh requests.
+      try { await bg('NET_CAPTURE_CLEAR'); } catch {}
+
+      // Kick the player so it actually fetches segments.
+      const playResult = await scrip(tabId, () => {
+        const v = document.querySelector('video');
+        if (!v) return { played: false, error: 'no <video> element on page' };
+        try { v.play(); } catch {}
+        try {
+          if (isFinite(v.duration) && v.duration > 0) {
+            // Tiny seek forces YouTube to issue a fresh segment range.
+            const old = v.currentTime || 0;
+            v.currentTime = Math.min(v.duration - 1, old + 0.5);
+          }
+        } catch {}
+        return { played: !v.paused, currentTime: v.currentTime, duration: v.duration };
+      });
+
+      const waitMs = Math.max(1500, Math.min(20000, playForMs));
+      await new Promise(r => setTimeout(r, waitMs));
+
+      const cap = await bg('NET_CAPTURE_LIST', {
+        filter: 'googlevideo\\.com.*videoplayback',
+        limit: 400
+      });
+      if (!wasCapturing) await bg('NET_CAPTURE_STOP');
+
+      // One entry per itag (the latest URL we saw for it).
+      const byItag = new Map();
+      const stripRange = (u) => u
+        .replace(/[?&]range=[^&]*/, '')
+        .replace(/[?&]rn=[^&]*/, '')
+        .replace(/[?&]rbuf=[^&]*/, '');
+      for (const e of (cap?.events || [])) {
+        const m = e.url && e.url.match(/[?&]itag=(\d+)/);
+        if (!m) continue;
+        const itag = m[1];
+        if (byItag.has(itag) && cap.events.indexOf(e) < cap.events.length / 2) continue;
+        const mime = (() => {
+          const t = (e.url.match(/[?&]mime=([^&]+)/) || [])[1];
+          return t ? decodeURIComponent(t) : null;
+        })();
+        byItag.set(itag, {
+          itag,
+          url: e.url,
+          urlWithoutRange: stripRange(e.url),
+          mime,
+          status: e.status
+        });
+      }
+
+      // Best-effort itag categorisation. Audio-only and progressive lists
+      // are well-known; anything else is treated as video-only adaptive.
+      const AUDIO = new Set(['139','140','141','171','249','250','251','256','258','327','380','600','774']);
+      const PROGRESSIVE = new Set(['5','6','17','18','22','34','35','36','37','38','43','44','45','46','82','83','84','85','100','101','102']);
+      const items = [...byItag.values()];
+      const audio = items.filter(i => AUDIO.has(i.itag));
+      const progressive = items.filter(i => PROGRESSIVE.has(i.itag));
+      const video = items.filter(i => !AUDIO.has(i.itag) && !PROGRESSIVE.has(i.itag));
+
+      return {
+        ok: items.length > 0,
+        playResult,
+        captured: items.length,
+        progressive, audio, video,
+        hint: items.length
+          ? 'Pass `urlWithoutRange` from any item to `media_download` to grab the full stream. Progressive items have audio+video combined; otherwise pick one from `audio` and one from `video` and merge externally with ffmpeg.'
+          : 'No googlevideo URLs were captured. Reasons: (1) autoplay was blocked — ask the user to click play once, then retry. (2) The page is YouTube Music or Shorts which sometimes hold off on segment fetches. (3) `webRequest` permission was revoked. Fall back to `yt_dlp_command`.'
+      };
+    }
+  });
+
+  T({
     name: 'yt_dlp_command',
     group: 'media',
     description:
