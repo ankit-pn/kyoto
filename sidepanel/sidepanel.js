@@ -61,6 +61,7 @@
   const $ = (id) => document.getElementById(id);
   const els = {
     chat: $('chat'),
+    goalBar: $('goalBar'),
     empty: $('empty'),
     input: $('input'),
     sendBtn: $('sendBtn'),
@@ -160,7 +161,8 @@
     modelsByProvider: new Map(), // providerId -> models[] — cross-provider header picker source
     mcpTools: [],                // dynamically-added tool defs
     visionPending: false,        // one-shot: attach screenshot to next message
-    pendingAgentTabBind: null    // when set, the next newly-created tab will inherit this session
+    pendingAgentTabBind: null,   // when set, the next newly-created tab will inherit this session
+    activeLoops: new Map()       // loopId -> { sessionId, intervalMs, prompt, count, intervalId }
   };
 
   // Tools.js calls this just before chrome.tabs.create so the new tab
@@ -450,8 +452,110 @@
     '/yt':         'Download the current YouTube video. Preferred path: `yt_dlp_run { url: <this tab\'s URL> }` — full speed, handles ciphers and merging. If the shell bridge isn\'t installed (yt_dlp_run errors with "shell bridge not installed"), fall back: try `youtube_extract` for direct URLs, then `youtube_capture_streams` for throttled in-browser download, and only as a last resort suggest `yt_dlp_command` for manual paste.',
     '/ytdl':       'Use `yt_dlp_command` to generate a yt-dlp invocation for this tab WITHOUT running it (for users who prefer manual paste). For automatic download, use /yt or /dl. {{args}}',
     '/sh':         'Run this shell command on the user\'s machine via `shell_exec`: {{args}}',
-    '/shell':      'Run this shell command on the user\'s machine via `shell_exec`: {{args}}'
+    '/shell':      'Run this shell command on the user\'s machine via `shell_exec`: {{args}}',
+    '/goal':       '[CMD]:goal',
+    '/loop':       '[CMD]:loop'
   };
+
+  // ── Goal + loop primitives (inspired by Claude Code) ─────────
+  function fmtDuration(ms) {
+    if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+    if (ms < 3_600_000) return `${(ms / 60_000).toFixed(ms % 60_000 ? 1 : 0)}m`.replace('.0', '');
+    return `${(ms / 3_600_000).toFixed(ms % 3_600_000 ? 1 : 0)}h`.replace('.0', '');
+  }
+  function parseDuration(s) {
+    const m = String(s || '').match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h|sec|min|hr|seconds?|minutes?|hours?)?$/i);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    const unit = (m[2] || 's').toLowerCase();
+    if (unit === 'ms') return Math.round(n);
+    if (unit.startsWith('h')) return Math.round(n * 3_600_000);
+    if (unit.startsWith('m') && !unit.startsWith('ms')) return Math.round(n * 60_000);
+    return Math.round(n * 1_000);
+  }
+
+  // Loops are side-panel-resident (setInterval). They survive session
+  // switches and tab changes but stop when the side panel itself closes.
+  function setupLoop(sessionId, intervalMs, prompt) {
+    const id = 'loop_' + Math.random().toString(36).slice(2, 9);
+    const intervalId = setInterval(() => fireLoop(id), intervalMs);
+    state.activeLoops.set(id, { sessionId, intervalMs, prompt, count: 0, intervalId });
+    return id;
+  }
+  async function fireLoop(loopId) {
+    const loop = state.activeLoops.get(loopId);
+    if (!loop) return;
+    loop.count++;
+    let session = state.activeSession?.id === loop.sessionId
+      ? state.activeSession
+      : await loadFullSession(loop.sessionId);
+    if (!session) {
+      // session got deleted — kill the loop
+      clearInterval(loop.intervalId);
+      state.activeLoops.delete(loopId);
+      updateGoalUI();
+      return;
+    }
+    // Skip a tick if the session is already busy (last run hasn't finished)
+    if (state.runtimes[session.id]?.busy) return;
+    session.history.push({ role: 'user', content: loop.prompt, _loopFire: loopId });
+    const idx = session.history.length - 1;
+    if (isActive(session.id)) {
+      const { wrap } = addMessage('user', `🔁 ${loop.prompt}`);
+      decoratePinButton(wrap, idx, false);
+    }
+    await persistSession(session);
+    runChatLoop(session).catch(() => {}).finally(updateGoalUI);
+    updateGoalUI();
+  }
+  function stopLoopsForSession(sessionId) {
+    let n = 0;
+    for (const [id, l] of state.activeLoops) {
+      if (!sessionId || l.sessionId === sessionId) {
+        clearInterval(l.intervalId);
+        state.activeLoops.delete(id);
+        n++;
+      }
+    }
+    return n;
+  }
+  function stopLoop(loopId) {
+    const l = state.activeLoops.get(loopId);
+    if (!l) return false;
+    clearInterval(l.intervalId);
+    state.activeLoops.delete(loopId);
+    return true;
+  }
+  // Detect the "I'm done" signal from the model. Lenient about formatting.
+  function isGoalDoneText(text) {
+    if (!text) return false;
+    return /\[\s*goal[_\s-]?done\s*\]|\[\s*goal[_\s-]?complete\s*\]|\[\s*task[_\s-]?complete\s*\]/i.test(text);
+  }
+
+  function updateGoalUI() {
+    if (!els.goalBar) return;
+    const session = state.activeSession;
+    if (!session) {
+      els.goalBar.classList.add('hidden');
+      els.goalBar.innerHTML = '';
+      return;
+    }
+    const items = [];
+    if (session.goal) {
+      items.push(`<div class="goal-item">🎯 <strong>Goal:</strong><span class="goal-text">${esc(session.goal)}</span><button class="goal-x" data-act="clear-goal" title="Clear goal">×</button></div>`);
+    }
+    for (const [id, l] of state.activeLoops) {
+      if (l.sessionId !== session.id) continue;
+      items.push(`<div class="goal-item">🔁 <strong>Loop:</strong><span class="goal-text">every ${fmtDuration(l.intervalMs)}: ${esc(l.prompt)} (${l.count} fired)</span><button class="goal-x" data-act="stop-loop" data-id="${esc(id)}" title="Stop loop">×</button></div>`);
+    }
+    if (!items.length) {
+      els.goalBar.classList.add('hidden');
+      els.goalBar.innerHTML = '';
+      return;
+    }
+    els.goalBar.classList.remove('hidden');
+    els.goalBar.innerHTML = items.join('');
+  }
 
   function expandSlash(text) {
     const trimmed = text.trimStart();
@@ -507,6 +611,71 @@
     }
     if (action === 'open_sessions') { toggleSessionsPopover(); return; }
     if (action === 'open_settings') { openDrawer(); return; }
+
+    if (action === 'goal') {
+      if (!state.activeSession) return;
+      const session = state.activeSession;
+      const trimmed = (args || '').trim();
+      if (!trimmed || trimmed === 'clear' || trimmed === 'off' || trimmed === 'stop') {
+        if (session.goal) {
+          session.goal = null;
+          await persistSession(session);
+          addMessage('assistant', '_Goal cleared._');
+        } else {
+          addMessage('assistant', '_No active goal._', { error: true });
+        }
+        updateGoalUI();
+        return;
+      }
+      if (trimmed === 'status' || trimmed === 'show') {
+        if (session.goal) addMessage('assistant', `_Active goal:_ **${session.goal}**`);
+        else addMessage('assistant', '_No active goal._');
+        return;
+      }
+      session.goal = trimmed;
+      await persistSession(session);
+      updateGoalUI();
+      // Kick off immediately — same wrapper text the loop appends so the
+      // model knows how to signal completion.
+      return sendMessage(
+        `Goal: ${trimmed}\n\n` +
+        `Work toward this goal using whatever tools you need. When you have fully completed it, include the literal token [GOAL_DONE] in your final reply so I know to stop. ` +
+        `If you cannot make further progress without me, ask. Type \`/goal clear\` to abandon.`
+      );
+    }
+
+    if (action === 'loop') {
+      if (!state.activeSession) return;
+      const trimmed = (args || '').trim();
+      if (!trimmed || trimmed === 'list' || trimmed === 'status') {
+        const mine = [...state.activeLoops].filter(([, l]) => l.sessionId === state.activeSession.id);
+        if (!mine.length) { addMessage('assistant', '_No active loops in this session._'); return; }
+        const lines = mine.map(([, l]) => `- every ${fmtDuration(l.intervalMs)} (${l.count} fired so far): ${l.prompt.slice(0, 100)}`);
+        addMessage('assistant', '**Active loops in this session:**\n\n' + lines.join('\n') + '\n\n`/loop stop` clears them all.');
+        return;
+      }
+      if (trimmed === 'stop' || trimmed === 'clear' || trimmed === 'off') {
+        const n = stopLoopsForSession(state.activeSession.id);
+        addMessage('assistant', n ? `_Stopped ${n} loop(s) in this session._` : '_No active loops to stop._');
+        updateGoalUI();
+        return;
+      }
+      const m = trimmed.match(/^(\S+)\s+([\s\S]+)$/);
+      if (!m) {
+        addMessage('assistant', '_Usage:_ `/loop <interval> <prompt>` — e.g. `/loop 5m /search latest AI news` or `/loop 30s check this page for changes`. Minimum 5s.', { error: true });
+        return;
+      }
+      const ms = parseDuration(m[1]);
+      const prompt = m[2].trim();
+      if (!ms || ms < 5000) {
+        addMessage('assistant', '_Interval must be at least 5s. Examples: `30s`, `5m`, `1h`._', { error: true });
+        return;
+      }
+      setupLoop(state.activeSession.id, ms, prompt);
+      addMessage('assistant', `_Loop active:_ every ${fmtDuration(ms)} running \`${prompt}\`. Type \`/loop stop\` to cancel. Loops stop when this side panel closes (not persisted across reloads).`);
+      updateGoalUI();
+      return;
+    }
     if (action === 'vision_one_shot') {
       // /see <prompt> — capture screenshot now and send as a multimodal
       // user message. Also clears any pending toggle so the *next*
@@ -815,6 +984,7 @@
     renderSessionHistoryFresh();
     updateModelLine();
     updateSessionsButton();
+    updateGoalUI();
     refreshPageContext();
   }
 
@@ -1517,6 +1687,7 @@
       const maxSteps = Math.max(1, Math.min(200, Number(state.settings.maxAgentSteps) || 50));
       const maxAutoContinues = Math.max(0, Math.min(10, Number(state.settings.maxAutoContinues) || 2));
       let autoContinues = 0;
+      let goalContinues = 0;
       let stoppedReason = 'maxSteps'; // overwritten if we break naturally
 
       stepLoop:
@@ -1553,6 +1724,42 @@
         //   length + no tools -> auto-continue (capped)
         //   stop / content_filter / other -> done
         if (!toolCalls.length) {
+          // Goal mode: if the active session has a goal and the model
+          // didn't emit a "done" marker, push a continue prompt and
+          // keep looping. Capped at goalContinues to prevent runaway.
+          const goal = session.goal;
+          const lastText = msg.content || '';
+          if (goal) {
+            if (isGoalDoneText(lastText)) {
+              session.goal = null;
+              await persistSession(session);
+              if (isActive(session.id)) {
+                addMessage('assistant', '_Goal complete — agent reported [GOAL_DONE]. Goal cleared._');
+                updateGoalUI();
+              }
+              stoppedReason = 'goal_done';
+              break stepLoop;
+            }
+            const maxGoalContinues = 30;
+            goalContinues = (goalContinues || 0) + 1;
+            if (goalContinues > maxGoalContinues) {
+              stoppedReason = 'goal_cap';
+              if (isActive(session.id)) {
+                addMessage('assistant', `_Goal cap (${maxGoalContinues}) reached. Continuing requires user input — clear the goal with \`/goal clear\` or run \`/goal status\`._`, { error: true });
+              }
+              break stepLoop;
+            }
+            session.history.push({
+              role: 'user',
+              content:
+                `Goal: ${goal}\n\n` +
+                `Keep working toward the goal. If the goal is fully complete, reply with the literal token [GOAL_DONE] (and only that line — no further actions). Otherwise, take the next concrete step.`
+            });
+            if (isActive(session.id)) addMessage('assistant', `_[goal continue ${goalContinues}/${maxGoalContinues}]_`);
+            await persistSession(session);
+            continue stepLoop;
+          }
+
           if (finishReason === 'length' && autoContinues < maxAutoContinues) {
             autoContinues++;
             const note = `_[auto-continue ${autoContinues}/${maxAutoContinues} — model output was cut off by max_tokens]_`;
@@ -2111,6 +2318,23 @@
       if (sid && state.runtimes[sid]?.abort) state.runtimes[sid].abort.abort();
     });
     if (els.visionBtn) els.visionBtn.addEventListener('click', toggleVisionPending);
+
+    if (els.goalBar) els.goalBar.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.goal-x');
+      if (!btn) return;
+      const act = btn.dataset.act;
+      if (act === 'clear-goal' && state.activeSession?.goal) {
+        state.activeSession.goal = null;
+        await persistSession(state.activeSession);
+        addMessage('assistant', '_Goal cleared._');
+        updateGoalUI();
+      } else if (act === 'stop-loop') {
+        if (stopLoop(btn.dataset.id)) {
+          addMessage('assistant', '_Loop stopped._');
+          updateGoalUI();
+        }
+      }
+    });
 
     if (els.downloadAuditBtn) els.downloadAuditBtn.addEventListener('click', () => {
       const log = state.auditLog || [];
@@ -2691,6 +2915,7 @@
     updateSessionsButton();
     wireEvents();
     renderSessionHistoryFresh();
+    updateGoalUI();
     refreshPageContext();
 
     // Init MCP servers in background

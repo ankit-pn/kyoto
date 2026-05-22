@@ -415,6 +415,34 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* ── Goal / loop bar ────────────────────── */
+.goal-bar {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 10px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--accent);
+  font-size: 12px;
+  color: var(--text);
+  flex-shrink: 0;
+}
+.goal-item {
+  display: flex; align-items: center; gap: 8px;
+  min-width: 0;
+}
+.goal-item > strong { color: var(--accent); }
+.goal-item > .goal-text {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.goal-x {
+  background: transparent; border: none;
+  color: var(--text-faint);
+  font-size: 14px; padding: 0 6px;
+  cursor: pointer; border-radius: 3px;
+  line-height: 1;
+}
+.goal-x:hover { color: var(--danger); background: var(--bg); }
+
 /* ── Streaming banner ───────────────────── */
 .streaming-banner {
   margin: 12px 0;
