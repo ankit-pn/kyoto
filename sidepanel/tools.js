@@ -3034,6 +3034,35 @@
     }
   });
 
+  T({
+    name: 'ask_user',
+    group: 'meta',
+    description:
+      'Pause and ask the user a question when genuinely stuck. Renders an interactive card in the chat and waits for the reply. ' +
+      'USE SPARINGLY — only when blocked by missing info you cannot infer (which file? which account? confirm destructive action?). ' +
+      'Do NOT use it to narrate progress, get permission for obvious next steps, or chitchat — that wastes the user\'s attention. ' +
+      'Pass `options` (array of strings, ≤8) to offer one-click chips alongside the free-text input; the user can also type a custom answer. ' +
+      'Returns { answer, viaButton } — the answer is the user\'s reply as a plain string.',
+    parameters: OBJ({
+      question: STR,
+      options: { type: 'array', items: STR },
+      placeholder: STR,
+      allowFreeText: BOOL
+    }, ['question']),
+    handler: async (args = {}) => {
+      if (typeof window.KyotoAskUser !== 'function') {
+        return { error: 'KyotoAskUser is not available — UI not initialized.' };
+      }
+      const r = await window.KyotoAskUser({
+        question: args.question,
+        options: args.options,
+        placeholder: args.placeholder,
+        allowFreeText: args.allowFreeText
+      });
+      return r;
+    }
+  });
+
   // ── Public API ───────────────────────────────────────
   window.KyotoTools = {
     list: () => TOOLS.map(t => ({ name: t.name, group: t.group, description: t.description })),

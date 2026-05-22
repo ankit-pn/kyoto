@@ -212,6 +212,92 @@
     })
   };
 
+  // Interactive prompt surfaced by the `ask_user` tool. Renders a card
+  // in the chat with the question, optional option chips, and a free-
+  // text input. Returns a promise resolving to { answer, viaButton } —
+  // or { cancelled: true } if the user dismisses it. The agent loop
+  // simply awaits this from inside the tool handler.
+  window.KyotoAskUser = function (opts = {}) {
+    const question = String(opts.question || '').trim();
+    if (!question) return Promise.resolve({ cancelled: true, error: 'empty question' });
+    const options = Array.isArray(opts.options) ? opts.options.filter(Boolean).slice(0, 8) : [];
+    const placeholder = String(opts.placeholder || 'Type your answer…');
+    const allowFreeText = opts.allowFreeText !== false;
+
+    return new Promise((resolve) => {
+      const card = document.createElement('div');
+      card.className = 'ask-card';
+      const head = document.createElement('div');
+      head.className = 'ask-head';
+      head.textContent = '❓ Question for you';
+      const body = document.createElement('div');
+      body.className = 'ask-body';
+      const q = document.createElement('div');
+      q.className = 'ask-q';
+      q.textContent = question;
+      body.appendChild(q);
+
+      let settled = false;
+      const finish = (answer, viaButton = false) => {
+        if (settled) return;
+        settled = true;
+        card.classList.add('ask-done');
+        const ans = document.createElement('div');
+        ans.className = 'ask-answer';
+        ans.textContent = `→ ${answer}`;
+        body.appendChild(ans);
+        for (const el of card.querySelectorAll('button, input')) el.disabled = true;
+        resolve({ answer, viaButton });
+      };
+
+      if (options.length) {
+        const chips = document.createElement('div');
+        chips.className = 'ask-chips';
+        for (const opt of options) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'ask-chip';
+          b.textContent = String(opt);
+          b.addEventListener('click', () => finish(String(opt), true));
+          chips.appendChild(b);
+        }
+        body.appendChild(chips);
+      }
+
+      if (allowFreeText) {
+        const row = document.createElement('div');
+        row.className = 'ask-row';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'ask-input';
+        input.placeholder = placeholder;
+        const send = document.createElement('button');
+        send.type = 'button';
+        send.className = 'ask-send';
+        send.textContent = 'Send';
+        const submit = () => {
+          const v = input.value.trim();
+          if (!v) return;
+          finish(v, false);
+        };
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); submit(); }
+          if (e.key === 'Escape') finish('(cancelled)', false);
+        });
+        send.addEventListener('click', submit);
+        row.appendChild(input);
+        row.appendChild(send);
+        body.appendChild(row);
+        setTimeout(() => { try { input.focus(); } catch {} }, 50);
+      }
+
+      card.appendChild(head);
+      card.appendChild(body);
+      els.chat.appendChild(card);
+      els.chat.scrollTop = els.chat.scrollHeight;
+    });
+  };
+
   // ── Marked setup ─────────────────────────────────────
   if (window.marked) {
     marked.setOptions({ breaks: true, gfm: true });
@@ -891,7 +977,7 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs'],
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta'],
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
