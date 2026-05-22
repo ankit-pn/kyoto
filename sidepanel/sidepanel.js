@@ -1218,27 +1218,30 @@
     // Delegate header construction to the provider config so non-Bearer
     // schemes (Anthropic's `x-api-key`, custom providers with bespoke
     // headers) keep working. Use a Headers object (and .set, not append)
-    // so we don't duplicate Content-Type — every provider's headers()
-    // already includes it, and Headers initialised from an object literal
-    // APPENDS by case-insensitive key, producing
-    // `Content-Type: application/json, application/json` which strict
-    // OpenAI-compat servers reject with 400/415.
+    // so we don't duplicate Content-Type. We then FORCE Content-Type
+    // + Accept after the provider's headers — this covers the
+    // misconfigured-custom-provider case where authHeader happens to
+    // be "Content-Type" and overrode the application/json value, and
+    // generally guarantees the request is well-formed for any strict
+    // OpenAI-compat gateway (Cloudflare AI Gateway, etc).
     const headers = new Headers();
     for (const [k, v] of Object.entries(cfg.headers(apiKey))) headers.set(k, v);
-    if (!headers.has('content-type')) headers.set('content-type', 'application/json');
-    const res = await fetch(cfg.chatUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        temperature,
-        max_tokens: maxTokens,
-      }),
+    headers.set('content-type', 'application/json');
+    if (!headers.has('accept')) headers.set('accept', 'application/json');
+
+    const body = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature,
+      max_tokens: maxTokens,
     });
+    const res = await fetch(cfg.chatUrl, { method: 'POST', headers, body });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      // Surface the URL + active Content-Type on failure so misconfigured
+      // custom providers / gateway proxies are easier to diagnose.
+      const ct = headers.get('content-type') || '<unset>';
+      throw new Error(`HTTP ${res.status} (POST ${cfg.chatUrl}, Content-Type=${ct}): ${text.slice(0, 200)}`);
     }
     const data = await res.json();
     return data?.choices?.[0]?.message?.content || '';
