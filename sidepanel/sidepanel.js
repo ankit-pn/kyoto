@@ -153,6 +153,11 @@
     shellInstallCopyAltBtn: $('shellInstallCopyAltBtn'),
     shellTestBtn: $('shellTestBtn'),
     shellStatus: $('shellStatus'),
+    skillsHubUrl: $('skillsHubUrl'),
+    skillsHubKey: $('skillsHubKey'),
+    skillsAutoSave: $('skillsAutoSave'),
+    skillsHubTestBtn: $('skillsHubTestBtn'),
+    skillsHubStatus: $('skillsHubStatus'),
     downloadAuditBtn: $('downloadAuditBtn'),
     clearAuditBtn: $('clearAuditBtn'),
     auditStatus: $('auditStatus'),
@@ -603,7 +608,9 @@
     '/export':     'Use `chat_export` to download the current chat. Default format: markdown. {{args}}',
     '/export-json':'Use `chat_export { format: "json" }` to download the current chat as JSON.',
     '/export-md':  'Use `chat_export { format: "markdown" }` to download the current chat as Markdown.',
-    '/export-all': 'Use `chat_export { format: "json", scope: "all" }` to bundle every session into one JSON file.'
+    '/export-all': 'Use `chat_export { format: "json", scope: "all" }` to bundle every session into one JSON file.',
+    '/save-skill': '[CMD]:save_skill',
+    '/skills':     '[CMD]:skills_list'
   };
 
   // ── Goal + loop primitives (inspired by Claude Code) ─────────
@@ -679,6 +686,167 @@
   function isGoalDoneText(text) {
     if (!text) return false;
     return /\[\s*goal[_\s-]?done\s*\]|\[\s*goal[_\s-]?complete\s*\]|\[\s*task[_\s-]?complete\s*\]/i.test(text);
+  }
+
+  // Heuristic: pull a site domain out of a URL.
+  function urlDomain(u) {
+    try {
+      const h = new URL(u).hostname.replace(/^www\./, '');
+      // eTLD+1: take last 2 segments (good enough for most sites; misses
+      // foo.co.uk style but rare in dev workflows). Use 'global' as
+      // fallback so the agent can still search.
+      const parts = h.split('.');
+      return parts.length >= 2 ? parts.slice(-2).join('.') : h || 'global';
+    } catch { return 'global'; }
+  }
+
+  // Distil a session's recent task into a saved Skill via a one-shot LLM
+  // call. Triggered automatically on goal_done OR via /save-skill.
+  async function extractAndSaveSkill(session, { trigger, hint, force } = {}) {
+    if (!window.KyotoSkillHub) {
+      if (force && isActive(session.id)) addMessage('assistant', '_Skill hub not available (extension not fully loaded)._', { error: true });
+      return;
+    }
+    const cfg = await window.KyotoSkillHub.config();
+    if (!cfg.url || !cfg.key) {
+      if (force && isActive(session.id)) addMessage('assistant', '_Skills hub not configured. Open Settings → Skills hub to paste your URL + API key._', { error: true });
+      return;
+    }
+
+    // Summarise the recent activity. We trim aggressively so the
+    // extraction call costs almost nothing in tokens.
+    const hist = session.history || [];
+    const toolCalls = [];
+    let lastAssistantText = '';
+    for (const m of hist) {
+      if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+        for (const tc of m.tool_calls) {
+          let args = '';
+          try { args = JSON.stringify(JSON.parse(tc.function.arguments || '{}')).slice(0, 200); }
+          catch { args = (tc.function.arguments || '').slice(0, 200); }
+          toolCalls.push({ name: tc.function.name, args, id: tc.id });
+        }
+      }
+      if (m.role === 'tool' && m.tool_call_id) {
+        const target = toolCalls.find(t => t.id === m.tool_call_id);
+        if (target) {
+          const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+          target.outcome = /(\\\"error\\\"|"error"|exit(Code)?: [^0])/i.test(c.slice(0, 400)) ? 'error' : 'ok';
+        }
+      }
+      if (m.role === 'assistant' && typeof m.content === 'string' && m.content.trim()) {
+        lastAssistantText = m.content;
+      }
+    }
+
+    if (!force && toolCalls.length < 2) {
+      // Pure chit-chat / single tool — don't bother saving.
+      return;
+    }
+
+    const tab = session.tabId ? await getTab(session.tabId) : null;
+    const pageUrl = tab?.url || session.lastUrl || '';
+    const domainHint = urlDomain(pageUrl) || 'global';
+
+    const seq = toolCalls.slice(0, 30)
+      .map((t, i) => `${i + 1}. ${t.name}(${t.args})  → ${t.outcome || 'ok'}`)
+      .join('\n');
+
+    const goal = session.goal || hint || (hist.find(m => m.role === 'user')?.content || '').slice(0, 400);
+
+    const extractPrompt =
+      'You are a skill-extractor. The user just had an AI agent accomplish a real task and you must distill the WORKING approach into a reusable playbook. ' +
+      'Output ONLY one JSON object, no commentary, matching this shape:\n' +
+      '{ "skip": true, "reason": "..." }   // if the task was trivial (single tool, pure Q&A, no exploration)\n' +
+      '— or —\n' +
+      '{\n' +
+      '  "domain": "<eTLD+1 if site-bound, else \\"global\\">",\n' +
+      '  "name": "<imperative title, <60 chars>",\n' +
+      '  "description": "<one-line summary, <200 chars>",\n' +
+      '  "content": "<markdown playbook: ### Prereqs, ### Steps (numbered), ### What does NOT work, ### Gotchas>",\n' +
+      '  "tags": ["<kebab-case>", ...]   // 2-6 tags\n' +
+      '}\n\n' +
+      `Context — page URL: ${pageUrl || '(none)'}  · domain hint: ${domainHint}\n` +
+      `User goal: ${goal}\n` +
+      `Tool sequence (in order, max 30):\n${seq || '(none)'}\n` +
+      `Final assistant reply (last 400 chars):\n${(lastAssistantText || '').slice(-400)}\n` +
+      (hint ? `\nUser hint about the skill: ${hint}\n` : '');
+
+    if (isActive(session.id)) addMessage('assistant', '_💡 Extracting skill from this turn…_');
+
+    let raw;
+    try { raw = await oneShotCompletion(extractPrompt, { maxTokens: 1200, temperature: 0.2 }); }
+    catch (e) {
+      if (isActive(session.id)) addMessage('assistant', `_Skill extraction failed: ${e.message}_`, { error: true });
+      return;
+    }
+
+    // Pull out the first JSON object from the response.
+    const m = raw && raw.match(/\{[\s\S]*\}/);
+    if (!m) {
+      if (isActive(session.id)) addMessage('assistant', `_Skill extraction: model returned no JSON._`, { error: true });
+      return;
+    }
+    let parsed;
+    try { parsed = JSON.parse(m[0]); }
+    catch (e) {
+      if (isActive(session.id)) addMessage('assistant', `_Skill extraction: bad JSON (${e.message})._`, { error: true });
+      return;
+    }
+    if (parsed.skip) {
+      if (isActive(session.id)) addMessage('assistant', `_Skill extraction skipped: ${parsed.reason || 'task was trivial'}._`);
+      return;
+    }
+    if (!parsed.name || !parsed.content) {
+      if (isActive(session.id)) addMessage('assistant', `_Skill extraction: missing required fields (name + content)._`, { error: true });
+      return;
+    }
+    const save = await window.KyotoSkillHub.save({
+      domain: parsed.domain || domainHint,
+      name: parsed.name,
+      description: parsed.description || '',
+      content: parsed.content,
+      tags: Array.isArray(parsed.tags) ? parsed.tags : [],
+      createdBy: trigger === 'manual' ? 'user' : 'agent',
+    });
+    if (save?.error) {
+      if (isActive(session.id)) addMessage('assistant', `_Skill save failed: ${save.error}_`, { error: true });
+      return;
+    }
+    if (isActive(session.id)) {
+      const where = parsed.domain || domainHint;
+      addMessage('assistant', `_💡 Saved skill **${parsed.name}** under \`${where}\` (\`${save.skill_id}\`)._`);
+    }
+  }
+
+  // One-shot non-streaming completion using the active provider/model.
+  // For internal helpers like skill extraction — no tools, no history,
+  // returns plain text.
+  async function oneShotCompletion(prompt, { maxTokens = 800, temperature = 0.2 } = {}) {
+    const { provider, model } = state.settings;
+    const cfg = getProviderConfig(provider);
+    if (!cfg) throw new Error(`unknown provider: ${provider}`);
+    const apiKey = keyFor(provider);
+    if (!apiKey && !cfg.isCustom) throw new Error(`no API key for ${cfg.label}`);
+    const res = await fetch(cfg.chatUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        temperature,
+        max_tokens: maxTokens,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content || '';
   }
 
   function fmtBytes(n) {
@@ -779,6 +947,23 @@
     }
     if (action === 'open_sessions') { toggleSessionsPopover(); return; }
     if (action === 'open_settings') { openDrawer(); return; }
+
+    if (action === 'save_skill') {
+      if (!state.activeSession) { addMessage('assistant', '_No active session._', { error: true }); return; }
+      await extractAndSaveSkill(state.activeSession, { trigger: 'manual', force: true, hint: (args || '').trim() });
+      return;
+    }
+    if (action === 'skills_list') {
+      if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not loaded._', { error: true }); return; }
+      const domain = (args || '').trim() || (state.page?.url ? urlDomain(state.page.url) : 'global');
+      const r = await window.KyotoSkillHub.search(domain, '', 10, true);
+      if (r?.error) { addMessage('assistant', `_Skill hub error: ${r.error}_`, { error: true }); return; }
+      const items = r?.items || [];
+      if (!items.length) { addMessage('assistant', `_No skills saved for \`${domain}\` yet._`); return; }
+      const lines = items.map(i => `- **${i.name}** (\`${i.skill_id}\`, ${i.domain}) — ${i.description || '_no description_'}`);
+      addMessage('assistant', `**Skills available for \`${domain}\`:**\n\n${lines.join('\n')}\n\nThe agent can pull any of these via \`skill_get\` when relevant.`);
+      return;
+    }
 
     if (action === 'clearfs') {
       if (!window.KyotoVFS) { addMessage('assistant', '_VFS not loaded._', { error: true }); return; }
@@ -1010,6 +1195,11 @@
     s3Bucket: '',
     s3KeyPrefix: '',
     s3Endpoint: '',
+    // Skills hub — domain-scoped playbook store backed by a remote API.
+    // Leave blank to disable everything (skill_* tools no-op cleanly).
+    skillsHubUrl: '',
+    skillsHubKey: '',
+    skillsAutoSave: true,
     theme: 'system',           // 'system' | 'light' | 'dark'
     density: 'comfortable',    // 'comfortable' | 'compact'
     hideReasoning: false,
@@ -1771,6 +1961,33 @@
   }
 
   // ── Page context ─────────────────────────────────────
+  // Per-domain skill cache for system-prompt enrichment. We re-fetch on
+  // page change but skip if we already loaded this domain in the last
+  // 5 min — keeps the hub call rate low and is fine: skills don't churn.
+  const _skillsDomainCache = new Map(); // domain -> { at: ms, items: [...] }
+  async function refreshSkillsForDomain(domain) {
+    if (!domain) return;
+    if (!window.KyotoSkillHub) return;
+    const cfg = await window.KyotoSkillHub.config();
+    if (!cfg.url || !cfg.key) return;
+    const cached = _skillsDomainCache.get(domain);
+    if (cached && Date.now() - cached.at < 5 * 60 * 1000) {
+      state.skillsForCurrentDomain = cached.items;
+      state.skillsForCurrentDomainKey = domain;
+      return;
+    }
+    try {
+      const r = await window.KyotoSkillHub.search(domain, '', 8, true);
+      if (r?.error) return;
+      const items = (r.items || []).map(s => ({
+        skill_id: s.skill_id, domain: s.domain, name: s.name, description: s.description,
+      }));
+      _skillsDomainCache.set(domain, { at: Date.now(), items });
+      state.skillsForCurrentDomain = items;
+      state.skillsForCurrentDomainKey = domain;
+    } catch {}
+  }
+
   async function refreshPageContext() {
     els.ctxDot.className = 'dot load';
     els.ctxTxt.textContent = 'Reading page…';
@@ -1791,6 +2008,9 @@
         state.activeSession.url = state.page.url;
         await persistSession(state.activeSession);
       }
+      // Refresh the per-domain skill list so the system prompt can surface
+      // them. Best-effort, cached for ~5 min to avoid spamming the hub.
+      refreshSkillsForDomain(urlDomain(state.page.url || '')).catch(() => {});
     } catch {
       state.page = null;
       els.ctxDot.className = 'dot err';
@@ -2037,6 +2257,15 @@
           });
           await persistSession(session);
         }
+      }
+
+      // Auto-extract a skill when a /goal completes successfully. We
+      // gate on goal_done (not 'done') because user-set goals are an
+      // explicit "this is a task, not idle chitchat" signal. Fire-and-
+      // forget so the UI isn't blocked.
+      if (stoppedReason === 'goal_done' && state.settings.skillsAutoSave !== false) {
+        extractAndSaveSkill(session, { trigger: 'goal_done' })
+          .catch((e) => console.warn('skill auto-extract failed:', e?.message || e));
       }
 
       // If we exited via the for-loop condition (not via break), we ran
@@ -2304,6 +2533,21 @@
       );
     }
 
+    // Skills hub — surface skills already saved for this domain so the
+    // model knows to call skill_get instead of rediscovering the workflow.
+    // skillsForCurrentDomain is refreshed by refreshPageContext().
+    if (state.skillsForCurrentDomain?.length) {
+      const lines = state.skillsForCurrentDomain.slice(0, 8).map(s =>
+        `- ${s.name} (id: ${s.skill_id}, domain: ${s.domain}) — ${s.description || '(no description)'}`
+      );
+      systemParts.push(
+        `🪄 Skills already saved for this domain (\`${state.skillsForCurrentDomainKey || 'global'}\`). ` +
+        `BEFORE you start exploring, call \`skill_get\` on any skill whose description matches the user\'s task — a 30s read can save 5-10 iterations. ` +
+        `If your task isn\'t covered here, also try \`skill_search\` with a more specific query.\n` +
+        lines.join('\n')
+      );
+    }
+
     if (els.useContext.checked && state.page?.content && isActive(session.id)) {
       systemParts.push(
         `Current page context:\nTitle: ${state.page.title}\nURL: ${state.page.url}\n\n--- PAGE CONTENT ---\n${state.page.content}\n--- END PAGE CONTENT ---`
@@ -2351,6 +2595,10 @@
     if (els.s3KeyPrefix) els.s3KeyPrefix.value = state.settings.s3KeyPrefix || '';
     if (els.s3Endpoint) els.s3Endpoint.value = state.settings.s3Endpoint || '';
     if (els.s3Status) els.s3Status.textContent = '';
+    if (els.skillsHubUrl) els.skillsHubUrl.value = state.settings.skillsHubUrl || '';
+    if (els.skillsHubKey) els.skillsHubKey.value = state.settings.skillsHubKey || '';
+    if (els.skillsAutoSave) els.skillsAutoSave.checked = state.settings.skillsAutoSave !== false;
+    if (els.skillsHubStatus) els.skillsHubStatus.textContent = '';
     const extId = chrome.runtime.id;
     if (els.shellExtId) els.shellExtId.value = extId;
 
@@ -2725,6 +2973,39 @@
       }
     });
 
+    if (els.skillsHubTestBtn) els.skillsHubTestBtn.addEventListener('click', async () => {
+      if (!els.skillsHubStatus) return;
+      const url = (els.skillsHubUrl?.value || '').trim().replace(/\/+$/, '');
+      const key = (els.skillsHubKey?.value || '').trim();
+      if (!url || !key) {
+        els.skillsHubStatus.textContent = 'Enter URL + API key first.';
+        els.skillsHubStatus.className = 'status err';
+        return;
+      }
+      els.skillsHubStatus.textContent = 'Pinging hub…';
+      els.skillsHubStatus.className = 'status';
+      try {
+        // Use in-form values so the user can test BEFORE saving.
+        const health = await fetch(url + '/v1/healthz').then(r => r.json()).catch(() => null);
+        const search = await fetch(url + '/v1/skills/search', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'X-Kyoto-Auth': key },
+          body: JSON.stringify({ domain: 'global', query: '', limit: 1 }),
+        });
+        if (!search.ok) {
+          els.skillsHubStatus.textContent = `Auth failed (HTTP ${search.status}). Check the API key.`;
+          els.skillsHubStatus.className = 'status err';
+          return;
+        }
+        const j = await search.json();
+        els.skillsHubStatus.textContent = `✓ Connected · ${health?.service || 'kyoto-skills-hub'} · ${j.count} global skill(s)`;
+        els.skillsHubStatus.className = 'status ok';
+      } catch (e) {
+        els.skillsHubStatus.textContent = `Error: ${e.message}`;
+        els.skillsHubStatus.className = 'status err';
+      }
+    });
+
     if (els.s3TestBtn) els.s3TestBtn.addEventListener('click', async () => {
       // Use the in-form values so the user can test BEFORE saving.
       if (els.s3Status) { els.s3Status.textContent = 'Uploading…'; els.s3Status.className = 'status'; }
@@ -3088,12 +3369,17 @@
       const theme = els.themeSelect?.value || state.settings.theme || 'system';
       const density = els.densitySelect?.value || state.settings.density || 'comfortable';
 
+      const skillsHubUrl = (els.skillsHubUrl?.value || '').trim();
+      const skillsHubKey = (els.skillsHubKey?.value || '').trim();
+      const skillsAutoSave = !!(els.skillsAutoSave?.checked);
+
       await saveSettings({
         provider, model, systemPrompt, temperature, maxTokens,
         toolsEnabled, maxAgentSteps, maxAutoContinues, enabledGroups,
         apiKeys, mcpServers, customProviders, customSlashCommands, customTools,
         redactSensitive, auditEnabled, hideReasoning, theme, density,
-        s3AccessKeyId, s3SecretAccessKey, s3Region, s3Bucket, s3KeyPrefix, s3Endpoint
+        s3AccessKeyId, s3SecretAccessKey, s3Region, s3Bucket, s3KeyPrefix, s3Endpoint,
+        skillsHubUrl, skillsHubKey, skillsAutoSave,
       });
       applyAppearance();
       compileCustomTools();

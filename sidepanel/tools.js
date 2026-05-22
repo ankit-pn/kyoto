@@ -3181,6 +3181,144 @@
     }
   });
 
+  // ──────── SKILL HUB (remote, DynamoDB-backed) ────────
+  // Talks to the deployed kyoto-skills-hub. The user pastes their hub
+  // URL + API key into Settings → Skills hub; we read them from
+  // chrome.storage.local. Skills are scoped by domain (e.g.
+  // "youtube.com", "github.com", or "global") so the agent can pull
+  // exactly what it needs without bloating context.
+  async function _skillsConfig() {
+    const g = await chrome.storage.local.get(['skillsHubUrl', 'skillsHubKey']);
+    return { url: (g.skillsHubUrl || '').replace(/\/+$/, ''), key: g.skillsHubKey || '' };
+  }
+  async function _skillsApi(method, path, { body, query } = {}) {
+    const cfg = await _skillsConfig();
+    if (!cfg.url || !cfg.key) {
+      return { error: 'Skills hub not configured. Set the URL + API key in Settings → Skills hub.' };
+    }
+    let url = cfg.url + path;
+    if (query) {
+      const qs = new URLSearchParams(Object.entries(query).filter(([_, v]) => v != null && v !== ''));
+      const s = qs.toString();
+      if (s) url += (url.includes('?') ? '&' : '?') + s;
+    }
+    try {
+      const init = {
+        method,
+        headers: { 'X-Kyoto-Auth': cfg.key, 'Content-Type': 'application/json' },
+      };
+      if (body !== undefined) init.body = JSON.stringify(body);
+      const r = await fetch(url, init);
+      const text = await r.text();
+      let parsed = null;
+      try { parsed = text ? JSON.parse(text) : null; } catch { parsed = { _raw: text }; }
+      if (!r.ok) return { error: parsed?.error || `HTTP ${r.status}`, status: r.status, ...parsed };
+      return parsed;
+    } catch (e) {
+      return { error: `network error: ${e.message}` };
+    }
+  }
+
+  T({
+    name: 'skill_search',
+    group: 'skill',
+    description:
+      'Search the skill hub for relevant playbooks before tackling a task. ' +
+      'CALL THIS EARLY whenever a task is non-trivial or domain-specific (anything involving a website, API, install, multi-step workflow). ' +
+      'Skills are short markdown playbooks distilled from past successful runs — using them saves iterations + tokens. ' +
+      'Pass `domain` (e.g. "youtube.com" or just "youtube" — server normalizes URLs) and a free-text `query` describing the task. ' +
+      'Returns ranked results with `name`, `description`, `contentPreview`, `skill_id`. ' +
+      'When something looks relevant, call `skill_get` to read the full body.',
+    parameters: OBJ({ domain: STR, query: STR, limit: NUM, includeGlobal: BOOL }, ['query']),
+    handler: async ({ domain = 'global', query, limit = 5, includeGlobal = true } = {}) => {
+      return _skillsApi('POST', '/v1/skills/search', { body: { domain, query, limit, includeGlobal } });
+    }
+  });
+
+  T({
+    name: 'skill_get',
+    group: 'skill',
+    description:
+      'Fetch the full body of a skill by `skill_id` (returned from `skill_search` or `skill_list`). ' +
+      'Pass the matching `domain` too — skills are partitioned by domain. Calling this bumps the skill\'s usageCount so popular skills surface first in future searches.',
+    parameters: OBJ({ skill_id: STR, domain: STR }, ['skill_id']),
+    handler: async ({ skill_id, domain = 'global' }) => {
+      return _skillsApi('GET', `/v1/skills/${encodeURIComponent(skill_id)}`, { query: { domain } });
+    }
+  });
+
+  T({
+    name: 'skill_list',
+    group: 'skill',
+    description: 'List all skills for a given domain. Use this to browse what\'s available before searching. Pass `domain` (default "global"); cap with `limit`.',
+    parameters: OBJ({ domain: STR, limit: NUM }),
+    handler: async ({ domain = 'global', limit = 50 } = {}) => {
+      return _skillsApi('GET', '/v1/skills', { query: { domain, limit } });
+    }
+  });
+
+  T({
+    name: 'skill_save',
+    group: 'skill',
+    description:
+      'Save a skill (playbook) to the hub so future agents can re-use it. ' +
+      'CALL THIS after you accomplish a non-trivial task that required real exploration — not for trivial Q&A. ' +
+      'Distill the WORKING APPROACH into a few hundred words: prereqs, the exact steps that succeeded, what *didn\'t* work and why, key gotchas. ' +
+      'Pass `domain` (the site or tool this skill applies to, e.g. "youtube.com" or "linear.app"; use "global" for OS-agnostic patterns), a short `name`, a one-line `description`, the `content` as markdown, and 2-6 short `tags`. ' +
+      'Returns `{ skill_id, domain }`. If you pass an existing `skill_id` the skill is updated in place (preserves createdAt + usageCount).',
+    parameters: OBJ({
+      domain: STR,
+      name: STR,
+      description: STR,
+      content: STR,
+      tags: { type: 'array', items: STR },
+      skill_id: STR
+    }, ['name', 'content']),
+    handler: async (args = {}) => {
+      const body = {
+        domain: args.domain || 'global',
+        name: args.name,
+        description: args.description || '',
+        content: args.content,
+        tags: args.tags || [],
+        createdBy: 'agent',
+      };
+      if (args.skill_id) body.skill_id = args.skill_id;
+      return _skillsApi('POST', '/v1/skills', { body });
+    }
+  });
+
+  T({
+    name: 'skill_delete',
+    group: 'skill',
+    description: 'Delete a skill from the hub. Use sparingly — usually update instead. Requires `skill_id` and the matching `domain`.',
+    parameters: OBJ({ skill_id: STR, domain: STR }, ['skill_id']),
+    handler: async ({ skill_id, domain = 'global' }) => {
+      return _skillsApi('DELETE', `/v1/skills/${encodeURIComponent(skill_id)}`, { query: { domain } });
+    }
+  });
+
+  // Expose for sidepanel.js to call directly (system-prompt enrichment, /save-skill, …)
+  window.KyotoSkillHub = {
+    config: _skillsConfig,
+    api: _skillsApi,
+    search: (domain, query, limit, includeGlobal) =>
+      _skillsApi('POST', '/v1/skills/search', { body: { domain, query, limit, includeGlobal } }),
+    save: (body) => _skillsApi('POST', '/v1/skills', { body }),
+    get: (skill_id, domain) =>
+      _skillsApi('GET', `/v1/skills/${encodeURIComponent(skill_id)}`, { query: { domain } }),
+    list: (domain, limit) =>
+      _skillsApi('GET', '/v1/skills', { query: { domain, limit } }),
+    health: async () => {
+      const cfg = await _skillsConfig();
+      if (!cfg.url) return { error: 'not configured' };
+      try {
+        const r = await fetch(cfg.url + '/v1/healthz');
+        return r.ok ? r.json() : { error: `HTTP ${r.status}` };
+      } catch (e) { return { error: e.message }; }
+    }
+  };
+
   T({
     name: 'ask_user',
     group: 'meta',
