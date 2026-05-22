@@ -13,7 +13,7 @@
         'Authorization': `Bearer ${key}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://github.com/page-chat-extension',
-        'X-Title': 'PageChat'
+        'X-Title': 'Kyoto'
       }),
       parseModels: (data) => (data.data || []).map(m => ({
         id: m.id,
@@ -68,7 +68,11 @@
     maxTokens: $('maxTokens'),
     saveBtn: $('saveBtn'),
     saveStatus: $('saveStatus'),
-    modelLine: $('modelLine'),
+    modelBtn: $('modelBtn'),
+    modelLineText: $('modelLineText'),
+    modelPopover: $('modelPopover'),
+    popoverSearch: $('popoverSearch'),
+    popoverList: $('popoverList'),
     ctxDot: $('ctxDot'),
     ctxTxt: $('ctxTxt'),
     reloadCtxBtn: $('reloadCtxBtn'),
@@ -139,11 +143,11 @@
   function updateModelLine() {
     const { provider, model } = state.settings;
     if (!model) {
-      els.modelLine.textContent = PROVIDERS[provider].label;
+      els.modelLineText.textContent = PROVIDERS[provider].label;
       return;
     }
     const short = model.includes('/') ? model.split('/').slice(1).join('/') : model;
-    els.modelLine.textContent = `${PROVIDERS[provider].label} · ${short}`;
+    els.modelLineText.textContent = `${PROVIDERS[provider].label} · ${short}`;
   }
 
   // ── Models ───────────────────────────────────────────
@@ -197,6 +201,62 @@
     if (state.settings.model && els.model.querySelector(`option[value="${CSS.escape(state.settings.model)}"]`)) {
       els.model.value = state.settings.model;
     }
+  }
+
+  // ── Model picker popover (header) ────────────────────
+  async function toggleModelPopover() {
+    if (!els.modelPopover.classList.contains('hidden')) {
+      closeModelPopover();
+      return;
+    }
+    if (!state.settings.apiKey) {
+      openDrawer();
+      return;
+    }
+    els.modelPopover.classList.remove('hidden');
+    els.popoverSearch.value = '';
+    if (!state.allModels.length) {
+      els.popoverList.innerHTML = '<p class="popover-empty">Loading…</p>';
+      await fetchModels(state.settings.provider, state.settings.apiKey);
+    }
+    renderPopoverList();
+    setTimeout(() => els.popoverSearch.focus(), 0);
+  }
+
+  function closeModelPopover() {
+    els.modelPopover.classList.add('hidden');
+  }
+
+  function renderPopoverList() {
+    if (!state.allModels.length) {
+      els.popoverList.innerHTML = '<p class="popover-empty">No models. Check your key in Settings.</p>';
+      return;
+    }
+    const q = els.popoverSearch.value.trim().toLowerCase();
+    const filtered = q
+      ? state.allModels.filter(m => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))
+      : state.allModels;
+
+    if (!filtered.length) {
+      els.popoverList.innerHTML = '<p class="popover-empty">No matches.</p>';
+      return;
+    }
+
+    const groups = {};
+    filtered.forEach(m => (groups[m.group] = groups[m.group] || []).push(m));
+
+    const parts = [];
+    Object.keys(groups).sort().forEach(g => {
+      parts.push(`<div class="popover-group">${escapeHtml(g)}</div>`);
+      groups[g].forEach(m => {
+        const active = m.id === state.settings.model ? ' active' : '';
+        parts.push(
+          `<div class="popover-item${active}" data-model="${escapeHtml(m.id)}">` +
+          `<span>${escapeHtml(m.name)}</span><span class="check">✓</span></div>`
+        );
+      });
+    });
+    els.popoverList.innerHTML = parts.join('');
   }
 
   // ── Page context ─────────────────────────────────────
@@ -436,6 +496,14 @@
   });
   els.newChatBtn.addEventListener('click', clearChat);
   els.settingsBtn.addEventListener('click', openDrawer);
+  els.modelBtn.addEventListener('click', toggleModelPopover);
+  els.popoverSearch.addEventListener('input', renderPopoverList);
+  document.addEventListener('click', (e) => {
+    if (els.modelPopover.classList.contains('hidden')) return;
+    if (!els.modelPopover.contains(e.target) && !els.modelBtn.contains(e.target)) {
+      closeModelPopover();
+    }
+  });
   els.closeDrawerBtn.addEventListener('click', closeDrawer);
   els.overlay.addEventListener('click', closeDrawer);
   els.reloadCtxBtn.addEventListener('click', refreshPageContext);
@@ -491,6 +559,16 @@
       els.saveStatus.textContent = '';
       closeDrawer();
     }, 600);
+  });
+
+  els.popoverList.addEventListener('click', async (e) => {
+    const item = e.target.closest('.popover-item');
+    if (!item) return;
+    const modelId = item.dataset.model;
+    if (!modelId) return;
+    await saveSettings({ model: modelId });
+    updateModelLine();
+    closeModelPopover();
   });
 
   els.chat.addEventListener('click', (e) => {

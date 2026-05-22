@@ -5,12 +5,12 @@ chrome.sidePanel
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: 'pc-ask-selection',
-    title: 'Ask PageChat about "%s"',
+    title: 'Ask Kyoto about "%s"',
     contexts: ['selection']
   });
   chrome.contextMenus.create({
     id: 'pc-ask-page',
-    title: 'Ask PageChat about this page',
+    title: 'Ask Kyoto about this page',
     contexts: ['page']
   });
 });

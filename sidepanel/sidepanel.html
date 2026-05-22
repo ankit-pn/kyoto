@@ -3,14 +3,17 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PageChat</title>
+  <title>Kyoto</title>
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
   <header class="hdr">
     <div class="hdr-l">
-      <div class="brand">PageChat</div>
-      <div class="model-line" id="modelLine">—</div>
+      <div class="brand">Kyoto</div>
+      <button class="model-line" id="modelBtn" type="button" title="Switch model">
+        <span id="modelLineText">—</span>
+        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
     </div>
     <div class="hdr-r">
       <button class="ibtn" id="newChatBtn" title="New chat">
@@ -59,6 +62,16 @@
       </div>
     </div>
   </footer>
+
+  <!-- Inline model picker popover -->
+  <div class="popover hidden" id="modelPopover">
+    <div class="popover-hdr">
+      <input type="text" id="popoverSearch" placeholder="Search models…" autocomplete="off" />
+    </div>
+    <div class="popover-body" id="popoverList">
+      <p class="popover-empty">No models loaded.</p>
+    </div>
+  </div>
 
   <!-- Settings drawer -->
   <div class="overlay hidden" id="overlay"></div>

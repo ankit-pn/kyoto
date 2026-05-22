@@ -1,22 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "PageChat — OpenRouter & DeepSeek",
-  "version": "3.0.0",
+  "name": "Kyoto — Ask any AI on any page",
+  "version": "3.1.0",
   "description": "Ask any AI model about the current page. Bring your own OpenRouter or DeepSeek key — pick from hundreds of models.",
   "minimum_chrome_version": "114",
   "permissions": [
     "storage",
     "sidePanel",
-    "activeTab",
     "scripting",
-    "contextMenus"
+    "contextMenus",
+    "tabs"
   ],
   "host_permissions": [
-    "https://openrouter.ai/*",
-    "https://api.deepseek.com/*"
+    "<all_urls>"
   ],
   "action": {
-    "default_title": "Open PageChat",
+    "default_title": "Open Kyoto",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
@@ -35,7 +34,7 @@
         "default": "Ctrl+Shift+L",
         "mac": "Command+Shift+L"
       },
-      "description": "Open PageChat side panel"
+      "description": "Open Kyoto side panel"
     }
   },
   "icons": {
