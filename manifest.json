@@ -1,15 +1,30 @@
 {
   "manifest_version": 3,
-  "name": "Kyoto — Ask any AI on any page",
-  "version": "3.1.0",
-  "description": "Ask any AI model about the current page. Bring your own OpenRouter or DeepSeek key — pick from hundreds of models.",
-  "minimum_chrome_version": "114",
+  "name": "Kyoto — AI browser agent for developers",
+  "version": "4.0.0",
+  "description": "An AI agent in your sidebar. Read pages, inspect network and cookies, clone sessions, run JS, drive the browser. BYOK: OpenRouter or DeepSeek.",
+  "minimum_chrome_version": "116",
   "permissions": [
     "storage",
     "sidePanel",
     "scripting",
     "contextMenus",
-    "tabs"
+    "tabs",
+    "cookies",
+    "webRequest",
+    "webNavigation",
+    "history",
+    "bookmarks",
+    "downloads",
+    "notifications",
+    "clipboardWrite",
+    "alarms"
+  ],
+  "optional_permissions": [
+    "debugger",
+    "clipboardRead",
+    "management",
+    "topSites"
   ],
   "host_permissions": [
     "<all_urls>"

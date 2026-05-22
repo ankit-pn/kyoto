@@ -35,13 +35,15 @@
 
   <main class="chat" id="chat">
     <div class="empty" id="empty">
-      <h2>Ask anything about this page</h2>
-      <p>Bring your own key from OpenRouter or DeepSeek. Pick a model. Chat.</p>
+      <h2>Your browser, agent-controlled</h2>
+      <p>Ask in natural language. Kyoto can read DOM, inspect network, dump cookies, run JS, click buttons, capture screenshots, search history, and offload non-browser work to opencode.</p>
       <div class="chips">
-        <button class="chip" data-prompt="Summarize this page in 5 bullet points.">Summarize</button>
-        <button class="chip" data-prompt="What are the key takeaways?">Key takeaways</button>
-        <button class="chip" data-prompt="Explain the main concept in simple terms.">Explain simply</button>
-        <button class="chip" data-prompt="Extract any code, commands, or data tables from this page.">Extract code/data</button>
+        <button class="chip" data-prompt="Summarize this page in 5 bullet points.">Summarize page</button>
+        <button class="chip" data-prompt="List all cookies for this site and tell me which ones look important for the session (likely auth/session tokens).">Analyze cookies</button>
+        <button class="chip" data-prompt="Export the cookies for this site as a Netscape cookies.txt block so I can clone the session into another browser. Only include cookies that look auth/session-related.">Clone session</button>
+        <button class="chip" data-prompt="Start a network capture limited to this tab. Then list the recent XHR/fetch requests and show me the API endpoints in use.">Inspect network</button>
+        <button class="chip" data-prompt="Use page_eval to dump the current window globals (top-level keys on window that are NOT the standard browser ones).">Inspect globals</button>
+        <button class="chip" data-prompt="Capture a screenshot of this tab.">Screenshot</button>
       </div>
     </div>
   </main>
@@ -130,12 +132,53 @@
         </div>
       </div>
 
+      <div class="field">
+        <label class="check-row">
+          <input type="checkbox" id="toolsEnabled" checked />
+          <span>Enable tool calling (agent mode)</span>
+        </label>
+        <p class="hint">When on, models that support tools can drive the browser via Kyoto's tool registry.</p>
+      </div>
+
+      <div class="field">
+        <label>Tool groups</label>
+        <div id="toolGroups" class="grp-list"></div>
+        <p class="hint">Disable groups you don't want the agent to use.</p>
+      </div>
+
+      <div class="field">
+        <label>Optional permissions</label>
+        <div class="perm-row">
+          <span>Debugger (CDP / response bodies)</span>
+          <span id="debuggerStatus" class="permstatus">Unknown</span>
+          <button class="btn-mini" id="requestDebuggerBtn" type="button">Grant debugger</button>
+        </div>
+        <p class="hint">Required for response-body capture, network modification, and full DevTools control. Chrome shows a yellow banner on the tab.</p>
+      </div>
+
+      <h3 class="drawer-section">Opencode offload</h3>
+
+      <div class="field">
+        <label>Opencode base URL</label>
+        <input type="text" id="opencodeUrl" placeholder="http://localhost:4096" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label>Opencode token (optional)</label>
+        <input type="password" id="opencodeToken" placeholder="Bearer token (sent as Authorization)" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label>Opencode endpoint path</label>
+        <input type="text" id="opencodePath" placeholder="/api/message" autocomplete="off" />
+        <p class="hint">POST target for <code>opencode_send</code>. Customise to match your opencode server's message endpoint.</p>
+      </div>
+
       <button class="btn-primary" id="saveBtn">Save</button>
       <p class="status" id="saveStatus"></p>
     </div>
   </aside>
 
   <script src="../lib/marked.min.js"></script>
+  <script src="tools.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>
