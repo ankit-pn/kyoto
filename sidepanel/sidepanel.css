@@ -296,9 +296,9 @@ body {
 
 /* ── Slash command palette ──────────────── */
 .slash-palette {
-  position: fixed;
-  left: 10px; right: 10px;
-  bottom: 88px;             /* sits just above the composer */
+  position: absolute;
+  left: 0; right: 0;
+  bottom: calc(100% + 6px);  /* anchored to top of .composer-box */
   z-index: 12;
   max-height: 280px;
   overflow-y: auto;
@@ -718,6 +718,7 @@ body {
   background: var(--bg-elev);
   padding: 8px 10px;
   transition: border-color 0.15s, box-shadow 0.15s;
+  position: relative;        /* anchor for the slash palette */
 }
 .composer-box:focus-within {
   border-color: var(--accent);

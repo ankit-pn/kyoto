@@ -499,9 +499,12 @@
   // with "/" and the user hasn't typed a space yet (which would mean
   // the command is committed and they're typing args).
   function allSlashCommands() {
-    const out = [];
+    // Dedup by name; customs override built-ins (matches expandSlash's
+    // lookup order — otherwise the palette would show two rows for the
+    // same command and the wrong one might be selected.)
+    const byName = new Map();
     for (const [k, v] of Object.entries(BUILTIN_SLASH)) {
-      out.push({
+      byName.set(k.slice(1), {
         name: k.slice(1),
         template: v,
         builtin: true,
@@ -510,14 +513,10 @@
     }
     for (const c of (state.settings?.customSlashCommands || [])) {
       if (!c.name || !c.prompt) continue;
-      out.push({
-        name: c.name.replace(/^\/+/, ''),
-        template: c.prompt,
-        builtin: false,
-        action: false
-      });
+      const n = c.name.replace(/^\/+/, '');
+      byName.set(n, { name: n, template: c.prompt, builtin: false, action: false });
     }
-    return out;
+    return [...byName.values()];
   }
 
   function refreshSlashPalette() {
