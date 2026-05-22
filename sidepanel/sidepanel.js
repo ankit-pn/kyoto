@@ -354,8 +354,19 @@
     }
   }
   function renderMarkdown(text) {
-    try { return window.marked ? marked.parse(text || '') : esc(text || ''); }
-    catch { return esc(text || ''); }
+    try {
+      if (!window.marked) return esc(text || '');
+      // Strip inline `<think>…</think>` blocks. Some models (Anthropic
+      // extended-thinking, DeepSeek-R1 distill variants, …) emit
+      // reasoning inline in the content field. Pre-v14.6.2 the browser
+      // silently treated `<think>` as an unknown inline element so the
+      // inner text rendered naturally. After we tightened marked's
+      // raw-HTML escape, the literal `<think>` tag became visible.
+      // Restore the prior UX without weakening the XSS defense for
+      // actually dangerous tags (script/iframe/onerror/etc).
+      const stripped = String(text || '').replace(/<\/?think\b[^>]*>/gi, '');
+      return marked.parse(stripped);
+    } catch { return esc(text || ''); }
   }
   function jsonString(v) { try { return JSON.stringify(v, null, 2); } catch { return String(v); } }
 
