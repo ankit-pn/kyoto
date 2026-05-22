@@ -443,11 +443,12 @@
     '/postman':    'Export the captured network buffer as a Postman v2.1 collection using `network_postman_export`. Show me the host breakdown.',
     '/py':         'Run this Python via `python_exec` and show me the value + stdout/stderr: {{args}}',
     '/pip':        'Install the package(s) "{{args}}" via micropip in the Python sandbox, then `python_exec` a small import test to confirm.',
-    '/media':      'Use `media_detect` on this tab to list every media URL (video / audio / streams) found in the DOM and recent network traffic. Then suggest the best one to download.',
-    '/download':   'Use `media_download` to grab this URL into the user\'s Downloads folder: {{args}}',
+    '/media':      'Use `media_detect` on this tab to list every media URL (video / audio / streams) found in the DOM and recent network traffic. For each candidate, recommend the best download method: `yt_dlp_run` for site URLs, `media_download` for direct file URLs.',
+    '/dl':          'Download the current tab (or {{args}} if it looks like a URL) via `yt_dlp_run`. Use full-quality defaults. Tell the user the saved path when done.',
+    '/download':   'Download a direct file URL via `media_download`: {{args}}. (For YouTube / Instagram / Twitter / etc., use `/dl` instead — it goes through yt-dlp.)',
     '/s3':         'Upload the URL/file described in "{{args}}" to S3 via `s3_upload` and return the resulting S3 URL.',
-    '/yt':         'Try to download the current YouTube video. Strategy: (1) call `youtube_extract` — if any format has direct URLs (needsCipher:false), use `media_download` on the best one and stop. (2) Otherwise call `youtube_capture_streams` — it plays the video briefly and snoops the player\'s own network requests to get post-cipher URLs. Take a progressive item if available, else best audio + best video separately. Use `urlWithoutRange` with `media_download`. (3) Only if both fail, hand off to `yt_dlp_command`. Tell the user about throttling if you go via capture (~30-100 KB/s for video).',
-    '/ytdl':       'Use `yt_dlp_command` to generate a yt-dlp invocation for this tab. {{args}}',
+    '/yt':         'Download the current YouTube video. Preferred path: `yt_dlp_run { url: <this tab\'s URL> }` — full speed, handles ciphers and merging. If the shell bridge isn\'t installed (yt_dlp_run errors with "shell bridge not installed"), fall back: try `youtube_extract` for direct URLs, then `youtube_capture_streams` for throttled in-browser download, and only as a last resort suggest `yt_dlp_command` for manual paste.',
+    '/ytdl':       'Use `yt_dlp_command` to generate a yt-dlp invocation for this tab WITHOUT running it (for users who prefer manual paste). For automatic download, use /yt or /dl. {{args}}',
     '/sh':         'Run this shell command on the user\'s machine via `shell_exec`: {{args}}',
     '/shell':      'Run this shell command on the user\'s machine via `shell_exec`: {{args}}'
   };

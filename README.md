@@ -108,7 +108,7 @@ Toggle groups on/off in **Settings → Tool groups**.
 | **misc** | `clipboard_write`, `permission_request`, `permission_check` |
 | **memory** | `memory_add`, `memory_list`, `memory_get`, `memory_search`, `memory_update`, `memory_delete` |
 | **minimax** | `minimax_web_search` (Google-grade web), `minimax_understand_image`, `minimax_describe_tab` (capture + analyze in one call) |
-| **media** | `media_detect`, `media_download` (local or S3), `s3_upload`, `youtube_extract`, `youtube_capture_streams`, `yt_dlp_command` |
+| **media** | `media_detect`, `media_download` (local or S3, for direct file URLs), `s3_upload`, **`yt_dlp_run`** (full-quality download via shell bridge), `youtube_extract`, `youtube_capture_streams`, `yt_dlp_command` |
 | **shell** | `shell_exec` (run a command via the native messaging host), `shell_ping` |
 
 Plus any MCP-server tools (auto-namespaced `mcp__<server>__<tool>`) and custom JS tools you define.
@@ -225,6 +225,17 @@ Or in normal chat: *"Run `git status` in `~/projects/foo` and tell me what's cha
 The installer writes manifests for every installed Chromium browser it finds (Chrome, Chrome Beta/Canary, Chromium, Edge, Brave, Vivaldi, Opera, Arc on macOS).
 
 Tools: **`shell_exec({ command, cwd?, timeoutMs?, env? })`**, **`shell_ping`**. Slash commands: **`/sh`**, **`/shell`**.
+
+### Real YouTube / Instagram / Twitter / Vimeo / Twitch / TikTok / Bilibili downloads
+
+Once the shell bridge is installed, **`yt_dlp_run`** does the actually-correct thing for ~1500 sites. Full speed (no n-param throttling), full quality (auto ffmpeg merge of separate streams), uses your browser cookies for age-gated / Premium / members-only content. On first call it auto-installs `yt-dlp` via `pipx` → `pip --user` if it's not already on your `PATH`.
+
+```
+/dl
+/yt
+```
+
+`/dl` downloads the current tab. `/yt` is shorthand for "download this YouTube tab." Both go through `yt_dlp_run`. Tools: **`yt_dlp_run({ url, audioOnly?, format?, outputDir?, useBrowserCookies? })`**. The older `yt_dlp_command` is kept for the "give me the command, I'll run it myself" workflow.
 
 ## DevTools panel mode
 

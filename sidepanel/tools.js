@@ -1433,9 +1433,10 @@
         items: all,
         isYouTube: !!dom?.isYouTube,
         notes: [
-          dom?.isYouTube ? 'YouTube is detected. Adaptive HLS/DASH with signature-deciphered URLs cannot be reliably extracted from a browser extension — use yt-dlp on the desktop for YouTube.' : null,
-          'For HLS (.m3u8) you may need to fetch the manifest with `network_fetch`, parse the variant playlist, and download segments.',
-          'Use `media_download { url }` to save any direct URL. Add `uploadToS3: true` to send straight to your configured S3 bucket instead of the local Downloads folder.'
+          dom?.isYouTube ? 'YouTube detected — call `yt_dlp_run { url: location.href }` (full speed via shell bridge + yt-dlp). It also handles 1500 other sites: Instagram, Twitter/X, Vimeo, Twitch, TikTok, podcasts, etc.' : null,
+          'Got a direct file URL (an .mp3 / .mp4 / etc. you can fetch as-is)? Pass it to `media_download`.',
+          'Got a site URL (not a direct file)? Use `yt_dlp_run` — it handles cookies, ciphers, manifest reassembly, ffmpeg merge automatically.',
+          'For HLS (.m3u8) without yt-dlp: fetch the manifest with `network_fetch`, parse, download segments. yt-dlp does this for you.'
         ].filter(Boolean)
       };
     }
@@ -1444,7 +1445,11 @@
   T({
     name: 'media_download',
     group: 'media',
-    description: 'Download a media URL. By default uses chrome.downloads (saves to the user\'s Downloads folder). Set `uploadToS3: true` to fetch into memory and PUT to the configured S3 bucket instead — useful for hands-off archiving. Pass `filename` (or `s3Key`) to override the auto-derived name.',
+    description:
+      'Download a DIRECT media URL (.mp4, .m4a, .mp3, .webm, …) via chrome.downloads (default) or upload it to S3 (uploadToS3: true). ' +
+      'Use this when you already have the direct file URL — e.g. a podcast .mp3 link, a CDN .mp4 from `media_detect`, or any URL `web_fetch_extract` surfaced. ' +
+      'NOT the right choice for site URLs like youtube.com / instagram.com / twitter.com — for those, use `yt_dlp_run` instead (handles login cookies, signature ciphers, manifest reassembly, ffmpeg merge automatically). ' +
+      'Pass `filename` (or `s3Key`) to override the auto-derived name.',
     parameters: OBJ({
       url: STR,
       filename: STR,
@@ -1615,10 +1620,9 @@
     group: 'media',
     description:
       'Extract YouTube streaming data (formats, URLs, metadata) from the active YouTube tab by reading ytInitialPlayerResponse. ' +
-      'For each format you get a `url` plus a `needsCipher` flag. ' +
-      'Formats with `needsCipher: false` and a non-null `url` work directly with `media_download`. ' +
-      'Formats with `needsCipher: true` are signature-encrypted and in-browser deciphering is brittle — use `yt_dlp_command` instead. ' +
-      'Live streams usually expose `hlsManifestUrl`; modern long-form video usually only has adaptive formats with ciphered URLs.',
+      'Primarily diagnostic — for actually downloading, prefer `yt_dlp_run` which is full-speed and handles signatures + n-param + ffmpeg merging. ' +
+      'Returns each format with `url` + `needsCipher`; formats with `needsCipher: false` and a non-null `url` would work with `media_download`, but most modern YouTube formats are ciphered. ' +
+      'Live streams usually expose `hlsManifestUrl`.',
     parameters: OBJ({ tabId: NUM }),
     handler: async ({ tabId } = {}) => {
       tabId = tabId ?? (await activeTab()).id;
@@ -1678,10 +1682,11 @@
     name: 'youtube_capture_streams',
     group: 'media',
     description:
-      'Best-effort in-browser YouTube download. Bypasses signature-cipher decoding by snooping on the page\'s OWN network requests — the URLs the player has already decoded are visible to us. ' +
-      'How it works: starts a tab-scoped network capture, triggers the <video> element to play (or seeks if already playing) so YouTube fetches fresh segments, waits a few seconds, then collects every `googlevideo.com/videoplayback` URL grouped by itag. ' +
-      'The captured URLs are valid for ~6 hours and can be passed to `media_download`. Use `urlWithoutRange` for the full stream. ' +
-      'IMPORTANT: in-browser downloads will be THROTTLED (~30-100 KB/s) due to YouTube\'s n-parameter throttling — only yt-dlp deciphers that. For long videos this is painful; use `yt_dlp_command` instead. For short audio (a song, a podcast clip), in-browser is fine.',
+      'Last-resort YouTube workaround when the shell bridge / yt_dlp_run is unavailable. ' +
+      'Snoops the page\'s own player network traffic to grab post-cipher videoplayback URLs (no signature decoding needed). ' +
+      'Plays the video briefly, captures URLs, returns them grouped by itag. Pass `urlWithoutRange` to `media_download`. ' +
+      'IMPORTANT: in-browser downloads are THROTTLED to ~30-100 KB/s by YouTube\'s n-parameter — only yt-dlp deciphers it. ' +
+      'PREFER `yt_dlp_run` if the shell bridge is installed (full speed, no babysitting).',
     parameters: OBJ({
       tabId: NUM,
       playForMs: NUM
@@ -1767,13 +1772,153 @@
     }
   });
 
+  // Internal helper — calls shell_exec via the same ShellHost.send the
+  // shell_exec tool uses. Throws if the shell bridge isn't installed.
+  async function _shell(command, timeoutMs = 60000) {
+    return ShellHost.send({ command, timeoutMs }, timeoutMs);
+  }
+
+  async function _ytDlpAutoInstall() {
+    // Try each command in order; first one to leave a working `yt-dlp`
+    // on PATH wins.
+    const candidates = [
+      'pipx install yt-dlp',
+      'python3 -m pip install --user yt-dlp',
+      'pip3 install --user yt-dlp',
+      'python -m pip install --user yt-dlp',
+      'pip install --user yt-dlp'
+    ];
+    const log = [];
+    for (const c of candidates) {
+      try {
+        const r = await _shell(c + ' 2>&1', 240000);
+        log.push(`${c} -> exit ${r.exitCode}`);
+        if (r.exitCode === 0) {
+          // Verify yt-dlp is now invokable. pipx puts binaries in
+          // ~/.local/bin which isn't always on the shell's PATH yet;
+          // fall through if so and try a direct path.
+          const v = await _shell('yt-dlp --version 2>&1 || echo MISS', 5000);
+          if (!/MISS/.test(v.stdout)) {
+            log.push(`yt-dlp ok: ${(v.stdout || '').trim()}`);
+            return { ok: true, log };
+          }
+          const v2 = await _shell('~/.local/bin/yt-dlp --version 2>&1 || echo MISS', 5000);
+          if (!/MISS/.test(v2.stdout)) {
+            log.push(`yt-dlp ok (~/.local/bin): ${(v2.stdout || '').trim()}`);
+            return { ok: true, useLocalBin: true, log };
+          }
+        }
+      } catch (e) {
+        log.push(`${c} -> ${e.message}`);
+      }
+    }
+    return { ok: false, log };
+  }
+
+  T({
+    name: 'yt_dlp_run',
+    group: 'media',
+    description:
+      'Download a media URL using yt-dlp via the shell bridge. ' +
+      'This is the recommended path for ANY site yt-dlp supports — YouTube, Instagram, Twitter/X, Vimeo, Twitch, TikTok, SoundCloud, Bilibili, podcast sites, etc. (~1500 supported). ' +
+      'Full speed (no n-param throttling), auto ffmpeg merge of separate streams. ' +
+      'On first call, attempts to install yt-dlp automatically via pipx -> pip --user. ' +
+      'Returns { ok, savedPath, command } on success. ' +
+      'Requires the shell bridge to be installed (Settings → Shell bridge).',
+    parameters: OBJ({
+      url: STR,
+      audioOnly: BOOL,
+      format: STR,
+      outputDir: STR,
+      useBrowserCookies: BOOL,
+      timeoutMs: NUM
+    }, ['url']),
+    handler: async (args = {}) => {
+      const { url, audioOnly = false, format, outputDir, useBrowserCookies = true, timeoutMs = 600000 } = args;
+      if (!url || !/^https?:\/\//i.test(url)) {
+        return { error: 'url must be a full http(s) URL' };
+      }
+
+      const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+      const buildCmd = (binary) => {
+        const parts = [binary];
+        if (useBrowserCookies) parts.push('--cookies-from-browser', 'chrome');
+        if (audioOnly) {
+          parts.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
+        } else if (format) {
+          parts.push('-f', sq(format));
+        } else {
+          parts.push('-f', sq('bv*+ba/b'), '--merge-output-format', 'mp4');
+        }
+        const dir = (outputDir || '~/Downloads').replace(/\/+$/, '');
+        parts.push('-o', sq(`${dir}/%(title)s.%(ext)s`));
+        // After-move print emits the final path on its own stdout line.
+        parts.push('--print', sq('after_move:filepath'));
+        parts.push(sq(url));
+        return parts.join(' ');
+      };
+
+      let binary = 'yt-dlp';
+      let installLog;
+      // 1) try direct invocation
+      let r;
+      try {
+        r = await _shell(buildCmd(binary) + ' 2>&1', timeoutMs);
+      } catch (e) {
+        return {
+          error: e.message,
+          hint: 'Shell bridge not installed. Open Settings → Shell bridge for the one-line installer.'
+        };
+      }
+      // 2) command-not-found path — try auto-install
+      const notFound = r.exitCode === 127
+        || /yt-dlp: command not found/i.test(r.stdout || r.stderr || '')
+        || /'yt-dlp' is not recognized/i.test(r.stdout || r.stderr || '');
+      if (notFound) {
+        const inst = await _ytDlpAutoInstall();
+        installLog = inst.log;
+        if (!inst.ok) {
+          return {
+            error: 'yt-dlp is not installed and auto-install failed',
+            installLog,
+            hint: 'Install manually: pipx install yt-dlp  (or: pip install --user yt-dlp)'
+          };
+        }
+        if (inst.useLocalBin) binary = '~/.local/bin/yt-dlp';
+        // 3) retry after install
+        r = await _shell(buildCmd(binary) + ' 2>&1', timeoutMs);
+      }
+
+      if (r.exitCode !== 0) {
+        return {
+          error: `yt-dlp exited ${r.exitCode}`,
+          stdout: (r.stdout || '').slice(-2000),
+          stderr: (r.stderr || '').slice(-2000),
+          installLog
+        };
+      }
+      // Pick the last non-empty line as the saved path (--print after_move:filepath
+      // emits exactly that). yt-dlp may also emit progress lines we
+      // ignore.
+      const lines = (r.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+      const savedPath = lines[lines.length - 1] || null;
+      return {
+        ok: true,
+        savedPath,
+        binary,
+        stdoutTail: lines.slice(-5).join('\n'),
+        installLog
+      };
+    }
+  });
+
   T({
     name: 'yt_dlp_command',
     group: 'media',
     description:
-      'Generate a ready-to-paste yt-dlp command for the active YouTube tab. Honest fallback for when in-browser extraction fails (signature ciphers, throttled n-param, age-gated content). ' +
-      'Does NOT run anything — returns the command string for the user to paste into their terminal. ' +
-      'Defaults to best video+audio merge; pass audioOnly: true for an MP3 extraction; pass a custom `format` selector to override.',
+      'Generate a yt-dlp command string for the active YouTube tab without running it. ' +
+      'Use ONLY when the user wants the command to paste themselves (no shell bridge, or they prefer running it manually). ' +
+      'For actually downloading, call `yt_dlp_run` instead — it executes via the shell bridge, auto-installs yt-dlp if missing, and returns the saved file path.',
     parameters: OBJ({
       tabId: NUM,
       audioOnly: BOOL,
