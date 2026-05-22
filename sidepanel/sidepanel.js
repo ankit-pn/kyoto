@@ -12,7 +12,7 @@
       headers: (key) => ({
         'Authorization': `Bearer ${key}`,
         'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://github.com/page-chat-extension',
+        'HTTP-Referer': 'https://github.com/ankit-pn/kyoto',
         'X-Title': 'Kyoto'
       }),
       parseModels: (data) => (data.data || []).map(m => ({
