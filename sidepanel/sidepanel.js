@@ -21,7 +21,20 @@
         context: m.context_length,
         supportsTools: m.supported_parameters?.includes('tools') ?? true
       })),
-      defaultModel: 'openai/gpt-4o-mini'
+      defaultModel: 'openai/gpt-4o-mini',
+      // Used when /models is unreachable or returns an empty list.
+      // Keeps the cross-provider picker functional even when one
+      // provider's catalogue endpoint is having a bad day.
+      fallbackModels: [
+        { id: 'openai/gpt-4o-mini',                   name: 'GPT-4o mini',         group: 'openai' },
+        { id: 'openai/gpt-4o',                        name: 'GPT-4o',              group: 'openai' },
+        { id: 'anthropic/claude-3.5-sonnet',          name: 'Claude 3.5 Sonnet',   group: 'anthropic' },
+        { id: 'anthropic/claude-3.5-haiku',           name: 'Claude 3.5 Haiku',    group: 'anthropic' },
+        { id: 'google/gemini-2.0-flash-exp',          name: 'Gemini 2.0 Flash',    group: 'google' },
+        { id: 'meta-llama/llama-3.3-70b-instruct',    name: 'Llama 3.3 70B',       group: 'meta-llama' },
+        { id: 'deepseek/deepseek-chat',               name: 'DeepSeek V3',         group: 'deepseek' },
+        { id: 'deepseek/deepseek-r1',                 name: 'DeepSeek R1',         group: 'deepseek' }
+      ]
     },
     deepseek: {
       label: 'DeepSeek',
@@ -33,7 +46,11 @@
       parseModels: (data) => (data.data || []).map(m => ({
         id: m.id, name: m.id, group: 'deepseek', supportsTools: true
       })),
-      defaultModel: 'deepseek-chat'
+      defaultModel: 'deepseek-chat',
+      fallbackModels: [
+        { id: 'deepseek-chat',     name: 'deepseek-chat (V3.x)',  group: 'deepseek' },
+        { id: 'deepseek-reasoner', name: 'deepseek-reasoner',     group: 'deepseek' }
+      ]
     },
     minimax: {
       label: 'MiniMax',
@@ -1339,31 +1356,53 @@
   }
 
   // ── Models ───────────────────────────────────────────
+  // "Shown provider" = whichever provider's models the user is
+  // currently looking at in the SETTINGS DRAWER. That isn't always
+  // state.settings.provider — when the user picks a different option
+  // in the drawer's <select> without saving, the dropdown value
+  // diverges. Use the dropdown's live value when available so a
+  // pending fetch repaints the dropdown the user is actually staring
+  // at.
+  function isProviderShownInDrawer(provider) {
+    if (els.provider && !els.drawer?.classList.contains('hidden')) {
+      return els.provider.value === provider;
+    }
+    return state.settings.provider === provider;
+  }
+
   async function fetchModels(provider, apiKey) {
     const cfg = getProviderConfig(provider);
     if (!cfg) {
-      els.modelHint.textContent = `Unknown provider: ${provider}`;
+      if (isProviderShownInDrawer(provider)) els.modelHint.textContent = `Unknown provider: ${provider}`;
       return;
     }
     // Custom providers may not need an API key (e.g. local Ollama).
     if (!apiKey && !cfg.isCustom) {
-      state.allModels = [];
-      els.model.innerHTML = '';
-      els.modelHint.textContent = 'Enter an API key to load models.';
+      if (isProviderShownInDrawer(provider)) {
+        state.allModels = [];
+        els.model.innerHTML = '';
+        els.modelHint.textContent = 'Enter an API key to load models.';
+      }
       return;
     }
-    els.modelHint.textContent = 'Loading models…';
-    const isShownProvider = state.settings.provider === provider;
+    if (isProviderShownInDrawer(provider)) {
+      els.modelHint.textContent = 'Loading models…';
+    }
     const setModels = (list, statusText) => {
       // Always store into the cross-provider map (so the header picker
       // sees this provider's models even when another provider is the
       // current chat target). Only update the Settings drawer's
       // state.allModels and hint when it's the actively-shown provider.
       state.modelsByProvider.set(provider, list);
-      if (isShownProvider) {
+      if (isProviderShownInDrawer(provider)) {
         state.allModels = list;
         els.modelHint.textContent = statusText;
         renderModelOptions();
+      }
+      // Re-render the cross-provider header popover if it's open —
+      // partial results appear as each provider finishes loading.
+      if (els.modelPopover && !els.modelPopover.classList.contains('hidden')) {
+        try { renderPopoverList(); } catch {}
       }
     };
     try {
@@ -1385,7 +1424,7 @@
         setModels(cfg.fallbackModels, `${cfg.fallbackModels.length} models (fallback — /models endpoint unreachable: ${e.message}).`);
       } else {
         setModels([], `Failed: ${e.message}`);
-        if (isShownProvider) { state.allModels = []; els.model.innerHTML = ''; }
+        if (isProviderShownInDrawer(provider)) { state.allModels = []; els.model.innerHTML = ''; }
       }
     }
   }
@@ -1417,13 +1456,18 @@
   // ── Model header popover ─────────────────────────────
   async function toggleModelPopover() {
     if (!els.modelPopover.classList.contains('hidden')) { closeModelPopover(); return; }
-    if (!currentApiKey()) { openDrawer(); return; }
     els.modelPopover.classList.remove('hidden');
     els.popoverSearch.value = '';
-    els.popoverList.innerHTML = '<p class="popover-empty">Loading…</p>';
-    // Kick off a refresh of every configured provider's model list. We
-    // don't block on it — partial results render as they arrive.
-    await fetchAllProviderModels({ background: false });
+    // Render whatever we already have cached so the user sees something
+    // immediately. The background refresh then re-renders when more
+    // models arrive.
+    renderPopoverList();
+    if (els.popoverList.children.length === 0 || (els.popoverList.firstElementChild && els.popoverList.firstElementChild.classList.contains('popover-empty'))) {
+      els.popoverList.innerHTML = '<p class="popover-empty">Loading models from configured providers…</p>';
+    }
+    try {
+      await fetchAllProviderModels({ background: false });
+    } catch {}
     renderPopoverList();
     setTimeout(() => els.popoverSearch.focus(), 0);
   }
@@ -1447,7 +1491,19 @@
   function renderPopoverList() {
     const all = allConfiguredModels();
     if (!all.length) {
-      els.popoverList.innerHTML = '<p class="popover-empty">No models loaded. Add a provider key in Settings.</p>';
+      // Look at what providers are CONFIGURED (have keys / are custom)
+      // so we can tell the user something useful: "we're still
+      // loading X providers" vs. "you haven't added any keys".
+      const keys = state.settings?.apiKeys || {};
+      const configured = allProviderKeys().filter(p => {
+        const cfg = getProviderConfig(p);
+        return cfg?.isCustom || (keys[p] && keys[p].trim());
+      });
+      if (!configured.length) {
+        els.popoverList.innerHTML = '<p class="popover-empty">No provider keys configured yet. Open Settings, paste a key for OpenRouter / DeepSeek / MiniMax (or add a custom provider) and save.</p>';
+      } else {
+        els.popoverList.innerHTML = `<p class="popover-empty">Loading models from ${configured.length} provider${configured.length === 1 ? '' : 's'}… If this stays empty, check the Settings drawer for fetch errors.</p>`;
+      }
       return;
     }
     const q = els.popoverSearch.value.trim().toLowerCase();
