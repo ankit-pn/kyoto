@@ -3242,7 +3242,12 @@
       'Fetch the full body of a skill by `skill_id` (returned from `skill_search` or `skill_list`). ' +
       'Pass the matching `domain` too — skills are partitioned by domain. Calling this bumps the skill\'s usageCount so popular skills surface first in future searches.',
     parameters: OBJ({ skill_id: STR, domain: STR }, ['skill_id']),
-    handler: async ({ skill_id, domain = 'global' }) => {
+    handler: async (args = {}) => {
+      // Defensive: some models call this with `id` instead of `skill_id`.
+      // Accept the alias rather than silently posting /skills/undefined.
+      const skill_id = args.skill_id || args.id;
+      const domain = args.domain || 'global';
+      if (!skill_id) return { error: 'skill_id is required (use the value from skill_search.items[].skill_id)' };
       return _skillsApi('GET', `/v1/skills/${encodeURIComponent(skill_id)}`, { query: { domain } });
     }
   });
@@ -3293,7 +3298,10 @@
     group: 'skill',
     description: 'Delete a skill from the hub. Use sparingly — usually update instead. Requires `skill_id` and the matching `domain`.',
     parameters: OBJ({ skill_id: STR, domain: STR }, ['skill_id']),
-    handler: async ({ skill_id, domain = 'global' }) => {
+    handler: async (args = {}) => {
+      const skill_id = args.skill_id || args.id;
+      const domain = args.domain || 'global';
+      if (!skill_id) return { error: 'skill_id is required' };
       return _skillsApi('DELETE', `/v1/skills/${encodeURIComponent(skill_id)}`, { query: { domain } });
     }
   });

@@ -1217,9 +1217,15 @@
     if (!apiKey && !cfg.isCustom) throw new Error(`no API key for ${cfg.label}`);
     // Delegate header construction to the provider config so non-Bearer
     // schemes (Anthropic's `x-api-key`, custom providers with bespoke
-    // headers) keep working. Previously hardcoded `authorization: Bearer …`
-    // silently 401'd on non-OpenAI-compat providers.
-    const headers = { 'content-type': 'application/json', ...cfg.headers(apiKey) };
+    // headers) keep working. Use a Headers object (and .set, not append)
+    // so we don't duplicate Content-Type — every provider's headers()
+    // already includes it, and Headers initialised from an object literal
+    // APPENDS by case-insensitive key, producing
+    // `Content-Type: application/json, application/json` which strict
+    // OpenAI-compat servers reject with 400/415.
+    const headers = new Headers();
+    for (const [k, v] of Object.entries(cfg.headers(apiKey))) headers.set(k, v);
+    if (!headers.has('content-type')) headers.set('content-type', 'application/json');
     const res = await fetch(cfg.chatUrl, {
       method: 'POST',
       headers,
@@ -2673,6 +2679,31 @@
         await persistSession(session);
       }
     } catch (e) {
+      // Sanitise history: if the last assistant message has tool_calls
+      // without all of their tool responses present, OpenAI-compat
+      // servers will reject the very next turn with "insufficient tool
+      // messages following tool_calls message". Synthesise placeholder
+      // tool responses so the conversation stays well-formed.
+      try {
+        const h = session.history;
+        for (let i = h.length - 1; i >= 0; i--) {
+          const m = h[i];
+          if (m.role !== 'assistant' || !Array.isArray(m.tool_calls) || !m.tool_calls.length) continue;
+          const answered = new Set();
+          for (let j = i + 1; j < h.length; j++) {
+            if (h[j].role === 'tool' && h[j].tool_call_id) answered.add(h[j].tool_call_id);
+          }
+          for (const tc of m.tool_calls) {
+            if (!tc.id || answered.has(tc.id)) continue;
+            h.push({
+              role: 'tool', tool_call_id: tc.id, name: tc.function?.name || 'unknown',
+              content: JSON.stringify({ error: e.name === 'AbortError' ? '[stopped by user]' : `[aborted: ${e.message}]` }),
+              _aborted: true,
+            });
+          }
+          break;
+        }
+      } catch {}
       if (e.name === 'AbortError') {
         session.history.push({ role: 'assistant', content: '_[stopped]_', _error: true });
       } else {
@@ -3910,8 +3941,22 @@
       }
       await switchToSession(session);
     });
-    chrome.tabs.onUpdated.addListener((tid, info) => {
-      if (info.status === 'complete') refreshPageContext();
+    // Refresh page context when the user-visible tab navigates. The
+    // status === 'complete' branch covers full reloads; info.url covers
+    // SPA history nav (pushState/replaceState/popstate) where Chromium
+    // never fires `complete` but does emit a tabs.onUpdated with the
+    // new url. Debounce a beat so the rapid status→url→complete burst
+    // collapses to one fetch.
+    let _ctxRefreshTimer = null;
+    chrome.tabs.onUpdated.addListener((tid, info, tab) => {
+      // Skip background tabs — they don't affect the panel's view.
+      if (!tab || !tab.active) return;
+      if (info.status !== 'complete' && !info.url && !info.title) return;
+      if (_ctxRefreshTimer) clearTimeout(_ctxRefreshTimer);
+      _ctxRefreshTimer = setTimeout(() => {
+        _ctxRefreshTimer = null;
+        refreshPageContext();
+      }, 250);
     });
     chrome.tabs.onRemoved.addListener((tabId) => {
       // Detach session from removed tab but keep the session
