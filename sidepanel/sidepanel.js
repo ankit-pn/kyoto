@@ -124,7 +124,10 @@
     customProvidersList: $('customProvidersList'),
     customProviderAddBtn: $('customProviderAddBtn'),
     customSlashList: $('customSlashList'),
-    customSlashAddBtn: $('customSlashAddBtn')
+    customSlashAddBtn: $('customSlashAddBtn'),
+    customToolsList: $('customToolsList'),
+    customToolAddBtn: $('customToolAddBtn'),
+    customToolStatus: $('customToolStatus')
   };
 
   // ── State ────────────────────────────────────────────
@@ -519,7 +522,11 @@
     // id is "custom_<slug>"; selected via the same provider dropdown.
     customProviders: [],
     // Built-in slash command map. Users can override via customSlashCommands.
-    customSlashCommands: []
+    customSlashCommands: [],
+    // User-defined tools registered alongside built-ins. Each:
+    //   { name, description, parameters (JSON string), code (function body) }
+    // Code receives `args` and `ctx` (chrome, fetch are global). Async ok.
+    customTools: []
   };
 
   // Provider resolver — returns the same shape as the built-in PROVIDERS
@@ -693,7 +700,8 @@
   function renderHistoryEntry(m, idx) {
     ensureEmptyHidden();
     if (m.role === 'user') {
-      addMessage('user', m.content, { historyIndex: idx, pinned: !!m._pinned });
+      const r = addMessage('user', m.content, { historyIndex: idx, pinned: !!m._pinned });
+      decorateEditButton(r.wrap, idx);
     } else if (m.role === 'assistant') {
       // reasoning block first (if any)
       const rContent = m.reasoning_content || m.reasoning || m.thinking;
@@ -800,6 +808,68 @@
     btn.textContent = pinned ? '★' : '☆';
     label.appendChild(btn);
     if (pinned) wrap.classList.add('pinned');
+  }
+
+  // Edit button — only on user messages. Lets the user rewrite an
+  // earlier turn and regenerate from there (truncates everything after).
+  function decorateEditButton(wrap, idx) {
+    if (!wrap || !wrap.classList.contains('user')) return;
+    const label = wrap.querySelector('.msg-role');
+    if (!label || label.querySelector('.edit-btn')) return;
+    const btn = document.createElement('button');
+    btn.className = 'edit-btn';
+    btn.dataset.idx = String(idx);
+    btn.title = 'Edit this message and regenerate the rest of the conversation';
+    btn.textContent = '✎';
+    label.appendChild(btn);
+  }
+
+  async function editUserMessage(idx) {
+    if (!state.activeSession) return;
+    const session = state.activeSession;
+    const msg = session.history[idx];
+    if (!msg || msg.role !== 'user') return;
+    if (state.runtimes[session.id]?.busy) return;
+
+    const wrap = els.chat.querySelector(`.msg.user .edit-btn[data-idx="${idx}"]`)?.closest('.msg');
+    if (!wrap) return;
+    const body = wrap.querySelector('.msg-body');
+    if (!body || wrap.querySelector('.edit-area')) return;
+
+    const current = contentText(msg.content);
+    const editor = document.createElement('div');
+    editor.className = 'edit-area';
+    editor.innerHTML = `
+      <textarea class="edit-textarea" rows="3"></textarea>
+      <div class="edit-actions">
+        <button class="btn-mini edit-cancel" type="button">Cancel</button>
+        <button class="btn-mini edit-save" type="button">Save &amp; regenerate</button>
+      </div>
+    `;
+    body.replaceWith(editor);
+    const ta = editor.querySelector('.edit-textarea');
+    ta.value = current;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 240) + 'px';
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+
+    editor.querySelector('.edit-cancel').addEventListener('click', () => {
+      // Restore the original body by re-rendering the whole session
+      // (simplest reliable way; preserves tool cards and pins).
+      renderSessionHistoryFresh();
+    });
+    editor.querySelector('.edit-save').addEventListener('click', async () => {
+      const newText = ta.value;
+      if (!newText.trim()) return;
+      // Truncate everything from this message onward, then push the edited
+      // message and run the chat loop afresh.
+      session.history.splice(idx);
+      session.history.push({ role: 'user', content: newText });
+      await persistSession(session);
+      renderSessionHistoryFresh();
+      await runChatLoop(session);
+    });
   }
 
   // Append a compact "tokens · $cost" chip under the last assistant message.
@@ -1221,9 +1291,16 @@
     if (isActive(session.id)) {
       const { wrap } = addMessage('user', text);
       decoratePinButton(wrap, userIdx, false);
+      decorateEditButton(wrap, userIdx);
     }
     await persistSession(session);
+    await runChatLoop(session);
+  }
 
+  // Re-runs the streaming + tool loop on a session whose history already
+  // ends with the user message we want a response to. Used by both
+  // sendMessage (after pushing) and the replay/edit path.
+  async function runChatLoop(session) {
     const runtime = (state.runtimes[session.id] ??= {});
     runtime.busy = true;
     runtime.abort = new AbortController();
@@ -1231,7 +1308,6 @@
       els.sendBtn.disabled = true;
       els.stopBtn.classList.remove('hidden');
     }
-
     try {
       const maxSteps = 12;
       for (let step = 0; step < maxSteps; step++) {
@@ -1326,7 +1402,46 @@
     if (state.mcpTools.find(t => t.function.name === name)) {
       return window.KyotoMCP.call(name, args);
     }
+    if (state.customToolHandlers?.has(name)) {
+      try {
+        const out = await state.customToolHandlers.get(name)(args || {});
+        return out === undefined ? { ok: true } : out;
+      } catch (e) {
+        return { error: e?.message || String(e), stack: e?.stack };
+      }
+    }
     return window.KyotoTools.call(name, args);
+  }
+
+  // Compile user-defined tools into callable handlers + schemas.
+  function compileCustomTools() {
+    state.customToolHandlers = new Map();
+    state.customToolSchemas = [];
+    for (const t of (state.settings?.customTools || [])) {
+      if (!t.name || !t.code) continue;
+      let params;
+      try { params = t.parameters ? JSON.parse(t.parameters) : { type: 'object', properties: {}, additionalProperties: false }; }
+      catch { params = { type: 'object', properties: {}, additionalProperties: false }; }
+      let fn;
+      try {
+        // The function body runs in the side-panel context with full chrome.*
+        // and fetch access. The user wrote it; the user trusts it.
+        fn = new Function('args', `return (async () => { ${t.code} })();`);
+      } catch (e) {
+        console.warn('[Kyoto] custom tool compile failed:', t.name, e.message);
+        continue;
+      }
+      const name = t.name.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 60);
+      state.customToolHandlers.set(name, fn);
+      state.customToolSchemas.push({
+        type: 'function',
+        function: {
+          name,
+          description: `[user] ${t.description || ''}`.trim(),
+          parameters: params
+        }
+      });
+    }
   }
 
   // One streamed model call. Returns accumulated text + tool calls + reasoning.
@@ -1344,7 +1459,7 @@
 
     const messages = buildMessages(session);
     const baseTools = toolsEnabled ? window.KyotoTools.schemas(new Set(enabledGroups)) : [];
-    const tools = [...baseTools, ...state.mcpTools];
+    const tools = [...baseTools, ...state.mcpTools, ...(state.customToolSchemas || [])];
 
     // Clamp max_tokens to whatever models.dev (or our fallback table)
     // says this model actually supports, so we don't ask for 32K from a
@@ -1551,6 +1666,7 @@
     renderProviderDropdown();
     renderCustomProvidersList();
     renderCustomSlashList();
+    renderCustomToolsList();
     renderMcpList();
     refreshDebuggerStatus();
     reflectProvider(state.settings.provider);
@@ -1643,6 +1759,25 @@
         <div class="mcp-row-r">
           <button class="btn-mini cs-del" type="button">×</button>
         </div>
+      </div>
+    `).join('');
+  }
+
+  function renderCustomToolsList() {
+    const list = state.settings.customTools || [];
+    if (!list.length) {
+      els.customToolsList.innerHTML = '<p class="hint">No custom tools yet. Click + to define one. Example body: <code>return { ok: true, ts: Date.now() };</code></p>';
+      return;
+    }
+    els.customToolsList.innerHTML = list.map((t, i) => `
+      <div class="ct-row" data-idx="${i}">
+        <div class="ct-head">
+          <input type="text" class="ct-name" placeholder="tool_name (snake_case)" value="${esc(t.name || '')}" />
+          <button class="btn-mini ct-del" type="button">×</button>
+        </div>
+        <input type="text" class="ct-desc" placeholder="What does this tool do? (model sees this)" value="${esc(t.description || '')}" />
+        <textarea class="ct-params" rows="2" placeholder='JSON schema for args, e.g. { "type":"object", "properties":{ "q":{"type":"string"} }, "required":["q"] }'>${esc(t.parameters || '')}</textarea>
+        <textarea class="ct-code" rows="5" placeholder="// Body of an async function. Receives args. Return a JSON-serialisable value.">${esc(t.code || '')}</textarea>
       </div>
     `).join('');
   }
@@ -1907,6 +2042,21 @@
       renderCustomSlashList();
     });
 
+    if (els.customToolAddBtn) els.customToolAddBtn.addEventListener('click', () => {
+      state.settings.customTools = [
+        ...(state.settings.customTools || []),
+        { name: '', description: '', parameters: '{ "type": "object", "properties": {} }', code: '// args: parsed input object\nreturn { ok: true };' }
+      ];
+      renderCustomToolsList();
+    });
+    if (els.customToolsList) els.customToolsList.addEventListener('click', (e) => {
+      const row = e.target.closest('.ct-row');
+      if (!row || !e.target.classList.contains('ct-del')) return;
+      const idx = Number(row.dataset.idx);
+      state.settings.customTools.splice(idx, 1);
+      renderCustomToolsList();
+    });
+
     els.mcpAddBtn.addEventListener('click', () => {
       state.settings.mcpServers = [...(state.settings.mcpServers || []), { name: '', url: '', auth: '', enabled: true }];
       renderMcpList();
@@ -1973,6 +2123,13 @@
         prompt: row.querySelector('.cs-prompt').value.trim()
       })).filter(c => c.name && c.prompt);
 
+      const customTools = Array.from(els.customToolsList?.querySelectorAll('.ct-row') || []).map(row => ({
+        name: row.querySelector('.ct-name').value.trim(),
+        description: row.querySelector('.ct-desc').value.trim(),
+        parameters: row.querySelector('.ct-params').value.trim(),
+        code: row.querySelector('.ct-code').value
+      })).filter(t => t.name && t.code);
+
       const mcpServers = Array.from(els.mcpServersList.querySelectorAll('.mcp-row')).map(row => ({
         name: row.querySelector('.mcp-name')?.value.trim() || '',
         url: row.querySelector('.mcp-url')?.value.trim() || '',
@@ -1994,10 +2151,16 @@
       await saveSettings({
         provider, model, systemPrompt, temperature, maxTokens,
         toolsEnabled, enabledGroups,
-        apiKeys, mcpServers, customProviders, customSlashCommands,
+        apiKeys, mcpServers, customProviders, customSlashCommands, customTools,
         redactSensitive, auditEnabled, hideReasoning, theme, density
       });
       applyAppearance();
+      compileCustomTools();
+      if (els.customToolStatus) {
+        const n = state.customToolHandlers?.size || 0;
+        els.customToolStatus.textContent = `${n} custom tool${n === 1 ? '' : 's'} registered`;
+        els.customToolStatus.className = 'status ok';
+      }
 
       // Re-init MCP tools after settings change
       els.mcpStatus.textContent = 'Reconnecting MCP servers…';
@@ -2022,6 +2185,12 @@
           copy.textContent = 'Copied';
           setTimeout(() => { copy.textContent = orig; }, 1200);
         });
+        return;
+      }
+      const editBtn = e.target.closest('.edit-btn');
+      if (editBtn) {
+        const idx = Number(editBtn.dataset.idx);
+        editUserMessage(idx);
         return;
       }
       const pinBtn = e.target.closest('.pin-btn');
@@ -2091,6 +2260,7 @@
   (async () => {
     await loadSettings();
     applyAppearance();
+    compileCustomTools();
     // Kick off models.dev registry load (cached, non-blocking after first run)
     if (window.KyotoModels) window.KyotoModels.init().catch(() => {});
     state.sessionsIndex = await loadSessionsIndex();

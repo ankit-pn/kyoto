@@ -1090,6 +1090,71 @@
     }
   });
 
+  // ──────── ARBITRARY URL FETCH + EXTRACT ────────
+  T({
+    name: 'web_fetch_extract',
+    group: 'network',
+    description: 'Fetch an arbitrary URL, parse the HTML, and return the readable main content (article/body text), plus title and discovered links. Unlike `network_fetch` this strips chrome and extracts readable text — the URL-equivalent of `page_content` for the current tab.',
+    parameters: OBJ({
+      url: STR,
+      maxBytes: NUM,
+      includeLinks: BOOL
+    }, ['url']),
+    handler: async ({ url, maxBytes = 20000, includeLinks = false } = {}) => {
+      if (!/^https?:\/\//i.test(url)) throw new Error('url must start with http(s)://');
+      const res = await fetch(url, { credentials: 'omit' });
+      const status = res.status;
+      const ct = res.headers.get('content-type') || '';
+      if (!/text\/html/.test(ct) && !/application\/xhtml/.test(ct)) {
+        // Not HTML — return raw text snippet
+        const txt = await res.text();
+        return { status, mime: ct, url: res.url, text: txt.slice(0, maxBytes) };
+      }
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const baseEl = doc.querySelector('base');
+      const base = baseEl?.href || res.url;
+      // Strip non-content elements before extracting text
+      const dropSel = 'script,style,noscript,nav,footer,header,aside,form,iframe,svg,button,[role="navigation"],.ad,.advertisement,.cookie-banner';
+      doc.querySelectorAll(dropSel).forEach(n => n.remove());
+      // Pick a main-content root using the same heuristic as page_content
+      const cands = Array.from(doc.querySelectorAll('article, main, [role="main"], .post-content, .article-content, .entry-content, #content'))
+        .filter(el => el.textContent.trim().length > 200);
+      let root = cands[0];
+      if (!root) {
+        let best = null, bestScore = 0;
+        for (const el of doc.body.querySelectorAll('*')) {
+          const t = el.textContent.trim();
+          if (t.length < 300) continue;
+          const blocks = el.querySelectorAll('p, li, h1, h2, h3, h4, pre, blockquote').length;
+          if (blocks < 3) continue;
+          const score = t.length * (blocks / Math.max(1, el.querySelectorAll('*').length));
+          if (score > bestScore) { bestScore = score; best = el; }
+        }
+        root = best || doc.body;
+      }
+      let text = root.textContent.replace(/\s+/g, ' ').trim();
+      if (text.length > maxBytes) text = text.slice(0, maxBytes) + '… [truncated]';
+      const out = {
+        status, url: res.url, title: doc.title || '', text
+      };
+      if (includeLinks) {
+        const seen = new Set();
+        const links = [];
+        for (const a of doc.querySelectorAll('a[href]')) {
+          let href;
+          try { href = new URL(a.getAttribute('href'), base).toString(); } catch { continue; }
+          if (seen.has(href)) continue;
+          seen.add(href);
+          links.push({ href, text: (a.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200) });
+          if (links.length >= 200) break;
+        }
+        out.links = links;
+      }
+      return out;
+    }
+  });
+
   // ──────── EXPORT / GENERATE ────────
   T({
     name: 'network_postman_export',

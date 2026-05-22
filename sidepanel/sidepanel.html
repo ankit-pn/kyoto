@@ -242,6 +242,14 @@
         <p class="hint">Use <code>{{args}}</code> as a placeholder for whatever the user types after the slash. Example name: <code>tickets</code>, template: <code>Open https://jira.mycorp.com and find ticket {{args}}</code>. Built-ins are listed under <code>/help</code>.</p>
       </div>
 
+      <h3 class="drawer-section">Custom JS tools</h3>
+      <div id="customToolsList"></div>
+      <div class="mcp-actions">
+        <button class="btn-mini" id="customToolAddBtn" type="button">+ Add tool</button>
+        <p class="status" id="customToolStatus"></p>
+      </div>
+      <p class="hint">Define your own tools the agent can call. The code body runs in the side-panel context with full <code>chrome.*</code> and <code>fetch</code> access — treat as you would your own JS. <code>args</code> is the parsed input. Return the result; an exception becomes the tool error.</p>
+
       <h3 class="drawer-section">MCP servers</h3>
       <div id="mcpServersList"></div>
       <div class="mcp-actions">
