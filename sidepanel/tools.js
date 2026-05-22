@@ -1486,6 +1486,124 @@
     }
   });
 
+  // ──────── SHELL (native messaging to local host) ────────
+  // Talks to the kyoto-shell.py host installed via install.sh / install.ps1.
+  // One long-lived chrome.runtime.connectNative port; auto-reconnects.
+  const ShellHost = (() => {
+    const HOST_NAME = 'com.kyoto.shell';
+    let port = null;
+    const pending = new Map();   // id -> { resolve, reject, timeoutId }
+
+    function disconnect(err) {
+      port = null;
+      for (const [id, { reject, timeoutId }] of pending) {
+        clearTimeout(timeoutId);
+        reject(err || new Error('shell host disconnected'));
+      }
+      pending.clear();
+    }
+
+    function ensurePort() {
+      if (port) return port;
+      try {
+        port = chrome.runtime.connectNative(HOST_NAME);
+      } catch (e) {
+        throw new Error(`Native messaging not available: ${e.message}`);
+      }
+      port.onMessage.addListener((msg) => {
+        const id = msg && msg.id;
+        if (!id || !pending.has(id)) return;
+        const { resolve, timeoutId } = pending.get(id);
+        clearTimeout(timeoutId);
+        pending.delete(id);
+        resolve(msg);
+      });
+      port.onDisconnect.addListener(() => {
+        const lastErr = chrome.runtime.lastError;
+        const e = lastErr
+          ? new Error(`Shell host: ${lastErr.message}. Run the installer? curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${chrome.runtime.id}`)
+          : null;
+        disconnect(e);
+      });
+      return port;
+    }
+
+    function send(msg, timeoutMs) {
+      const id = msg.id || ('sh_' + Math.random().toString(36).slice(2, 11));
+      msg.id = id;
+      return new Promise((resolve, reject) => {
+        let p;
+        try { p = ensurePort(); } catch (e) { return reject(e); }
+        const timeoutId = setTimeout(() => {
+          if (pending.has(id)) {
+            pending.delete(id);
+            reject(new Error(`shell_exec timed out after ${Math.round(timeoutMs / 1000)}s`));
+          }
+        }, timeoutMs + 2000); // give the host a couple of seconds to surface its own timeout
+        pending.set(id, { resolve, reject, timeoutId });
+        try { p.postMessage(msg); }
+        catch (e) {
+          clearTimeout(timeoutId);
+          pending.delete(id);
+          reject(e);
+        }
+      });
+    }
+
+    return { send, get extensionId() { return chrome.runtime.id; } };
+  })();
+
+  T({
+    name: 'shell_exec',
+    group: 'shell',
+    description:
+      'Execute a shell command on the user\'s OS via Kyoto\'s native messaging host. Runs as the user, with their PATH and env. ' +
+      'Returns { stdout, stderr, exitCode }. Long-running commands stream nothing — they\'re captured in full and returned at the end (or `error: timed out`). ' +
+      'Requires the host to be installed once: curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- <EXTENSION_ID>. ' +
+      'WINDOWS: irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex. ' +
+      'The extension ID is shown in Settings → Shell bridge.',
+    parameters: OBJ({
+      command: STR,
+      cwd: STR,
+      timeoutMs: NUM,
+      env: { type: 'object', additionalProperties: STR }
+    }, ['command']),
+    handler: async ({ command, cwd, timeoutMs = 60000, env } = {}) => {
+      if (!command || !command.trim()) throw new Error('command required');
+      try {
+        const r = await ShellHost.send({ command, cwd, timeoutMs, env }, timeoutMs);
+        if (r.error) return { error: r.error, stdout: r.stdout || '', stderr: r.stderr || '' };
+        return { stdout: r.stdout || '', stderr: r.stderr || '', exitCode: r.exitCode ?? null, cwd: r.cwd };
+      } catch (e) {
+        return {
+          error: e.message,
+          installHint: `Run: curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${chrome.runtime.id}`,
+          installHintWindows: `Run (PowerShell): $env:KYOTO_EXT_ID="${chrome.runtime.id}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex`
+        };
+      }
+    }
+  });
+
+  T({
+    name: 'shell_ping',
+    group: 'shell',
+    description: 'Ping the native messaging host to verify it\'s installed and reachable. Returns { ok, platform, cwd } on success, an installHint on failure.',
+    parameters: OBJ(),
+    handler: async () => {
+      try {
+        const r = await ShellHost.send({ type: 'ping' }, 5000);
+        return { ok: true, platform: r.platform, cwd: r.cwd };
+      } catch (e) {
+        return {
+          ok: false,
+          error: e.message,
+          installHint: `curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${chrome.runtime.id}`,
+          installHintWindows: `$env:KYOTO_EXT_ID="${chrome.runtime.id}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex`
+        };
+      }
+    }
+  });
+
   // ──────── YOUTUBE (best-effort, signature-cipher caveat) ────────
   T({
     name: 'youtube_extract',

@@ -244,6 +244,28 @@
         <p class="hint">Granted at install time. Required for response-body capture, network modification, and full DevTools control via <code>debugger_attach</code> / <code>debugger_send</code>. Chrome shows a yellow banner on the tab while attached. If you see "Not granted", reload the extension on <code>chrome://extensions</code> (the ⤴ button takes you there).</p>
       </div>
 
+      <h3 class="drawer-section">Shell bridge (native messaging)</h3>
+      <p class="hint">The <code>shell_exec</code> tool lets the agent run real shell commands on your machine via a small Python host installed under your home directory. Once installed, no sudo or open port is involved — Chrome speaks to it over stdio.</p>
+      <div class="field">
+        <label>Your extension ID</label>
+        <div class="input-wrap">
+          <input type="text" id="shellExtId" readonly />
+          <button class="reveal" id="shellCopyIdBtn" type="button" title="Copy">⧉</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>One-line install (Linux / macOS)</label>
+        <textarea id="shellInstallCmd" readonly rows="2" style="font-family:'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;font-size:11px"></textarea>
+      </div>
+      <div class="field">
+        <label>One-line install (Windows PowerShell)</label>
+        <textarea id="shellInstallCmdWin" readonly rows="2" style="font-family:'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;font-size:11px"></textarea>
+      </div>
+      <div class="mcp-actions">
+        <button class="btn-mini" id="shellTestBtn" type="button">Test connection</button>
+        <p class="status" id="shellStatus"></p>
+      </div>
+
       <h3 class="drawer-section">AWS S3 (and S3-compatible)</h3>
       <p class="hint">Credentials for the <code>s3_upload</code> tool and the <code>uploadToS3</code> option in <code>media_download</code>. Works with native AWS S3, Cloudflare R2, Wasabi, MinIO, Backblaze B2 (S3 API), etc.</p>
       <div class="field-row">

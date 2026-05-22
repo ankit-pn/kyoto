@@ -14,7 +14,7 @@ Bring your own key for any OpenAI-compatible provider (OpenRouter, DeepSeek, Min
 - **Any OpenAI-compatible provider, multiple at once.** Three first-class (OpenRouter / DeepSeek / MiniMax) plus an unlimited "custom" slot for Ollama, LM Studio, Groq, Together, Cerebras, Gemini-OAI, Anthropic-via-LiteLLM, your-own-proxy, etc.
 - **Per-tab sessions.** Every tab owns its own conversation. Switching tabs swaps the visible session; in-flight streams keep running for the tabs you left.
 - **Streaming tool-call loop.** Up to 12 round-trips per turn. Captures `reasoning_content` from DeepSeek thinking-mode and reasoning models, echoes it back as the API requires.
-- **~45 built-in tools** across browser, DOM, cookies, network, storage, devtools, debugger, history, memory, minimax, devtools-export groups. Plus your own:
+- **~50 built-in tools** across browser, DOM, cookies, network, storage, devtools, debugger, history, memory, minimax, media, **shell**, devtools-export groups. Plus your own:
   - **Custom JS tools** — write a JS function body in Settings, model can call it.
   - **MCP server support** — JSON-RPC over HTTP; tools auto-registered as `mcp__<server>__<tool>`.
 - **Cost & token visibility.** `stream_options.include_usage` parsed; each assistant message gets a `1.2K↧ · 0.4K↥ · $0.0021` chip from models.dev pricing.
@@ -108,6 +108,8 @@ Toggle groups on/off in **Settings → Tool groups**.
 | **misc** | `clipboard_write`, `permission_request`, `permission_check` |
 | **memory** | `memory_add`, `memory_list`, `memory_get`, `memory_search`, `memory_update`, `memory_delete` |
 | **minimax** | `minimax_web_search` (Google-grade web), `minimax_understand_image`, `minimax_describe_tab` (capture + analyze in one call) |
+| **media** | `media_detect`, `media_download` (local or S3), `s3_upload`, `youtube_extract`, `youtube_capture_streams`, `yt_dlp_command` |
+| **shell** | `shell_exec` (run a command via the native messaging host), `shell_ping` |
 
 Plus any MCP-server tools (auto-namespaced `mcp__<server>__<tool>`) and custom JS tools you define.
 
@@ -189,6 +191,40 @@ Settings → Appearance:
 - **Theme**: System / Light / Dark (overrides `prefers-color-scheme`).
 - **Density**: Comfortable / Compact (smaller paddings + font).
 - **Hide reasoning cards** toggle.
+
+## Shell bridge — run real commands on your machine
+
+Kyoto can execute shell commands on your OS via Chrome's native messaging API. A tiny Python host lives under your home directory and Chrome speaks to it over stdio — no open ports, no sudo.
+
+**Install (one-liner):**
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh \
+  | bash -s -- <YOUR_EXTENSION_ID>
+```
+
+```powershell
+# Windows (PowerShell)
+$env:KYOTO_EXT_ID = "<YOUR_EXTENSION_ID>"
+irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex
+```
+
+Find `<YOUR_EXTENSION_ID>` at `chrome://extensions` (Developer mode enabled), or open Kyoto → ⚙ Settings → **Shell bridge** — the ID is shown with a copy button, and the install command is pre-filled with your ID.
+
+Restart Chrome after install, then in Kyoto:
+
+```
+/sh echo hello
+/sh ls ~/Downloads
+/shell df -h
+```
+
+Or in normal chat: *"Run `git status` in `~/projects/foo` and tell me what's changed."*
+
+The installer writes manifests for every installed Chromium browser it finds (Chrome, Chrome Beta/Canary, Chromium, Edge, Brave, Vivaldi, Opera, Arc on macOS).
+
+Tools: **`shell_exec({ command, cwd?, timeoutMs?, env? })`**, **`shell_ping`**. Slash commands: **`/sh`**, **`/shell`**.
 
 ## DevTools panel mode
 

@@ -120,6 +120,12 @@
     s3Endpoint: $('s3Endpoint'),
     s3TestBtn: $('s3TestBtn'),
     s3Status: $('s3Status'),
+    shellExtId: $('shellExtId'),
+    shellCopyIdBtn: $('shellCopyIdBtn'),
+    shellInstallCmd: $('shellInstallCmd'),
+    shellInstallCmdWin: $('shellInstallCmdWin'),
+    shellTestBtn: $('shellTestBtn'),
+    shellStatus: $('shellStatus'),
     downloadAuditBtn: $('downloadAuditBtn'),
     clearAuditBtn: $('clearAuditBtn'),
     auditStatus: $('auditStatus'),
@@ -431,7 +437,9 @@
     '/download':   'Use `media_download` to grab this URL into the user\'s Downloads folder: {{args}}',
     '/s3':         'Upload the URL/file described in "{{args}}" to S3 via `s3_upload` and return the resulting S3 URL.',
     '/yt':         'Try to download the current YouTube video. Strategy: (1) call `youtube_extract` — if any format has direct URLs (needsCipher:false), use `media_download` on the best one and stop. (2) Otherwise call `youtube_capture_streams` — it plays the video briefly and snoops the player\'s own network requests to get post-cipher URLs. Take a progressive item if available, else best audio + best video separately. Use `urlWithoutRange` with `media_download`. (3) Only if both fail, hand off to `yt_dlp_command`. Tell the user about throttling if you go via capture (~30-100 KB/s for video).',
-    '/ytdl':       'Use `yt_dlp_command` to generate a yt-dlp invocation for this tab. {{args}}'
+    '/ytdl':       'Use `yt_dlp_command` to generate a yt-dlp invocation for this tab. {{args}}',
+    '/sh':         'Run this shell command on the user\'s machine via `shell_exec`: {{args}}',
+    '/shell':      'Run this shell command on the user\'s machine via `shell_exec`: {{args}}'
   };
 
   function expandSlash(text) {
@@ -627,7 +635,7 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media'],
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell'],
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
@@ -1841,6 +1849,11 @@
     if (els.s3KeyPrefix) els.s3KeyPrefix.value = state.settings.s3KeyPrefix || '';
     if (els.s3Endpoint) els.s3Endpoint.value = state.settings.s3Endpoint || '';
     if (els.s3Status) els.s3Status.textContent = '';
+    const extId = chrome.runtime.id;
+    if (els.shellExtId) els.shellExtId.value = extId;
+    if (els.shellInstallCmd) els.shellInstallCmd.value = `curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${extId}`;
+    if (els.shellInstallCmdWin) els.shellInstallCmdWin.value = `$env:KYOTO_EXT_ID="${extId}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex`;
+    if (els.shellStatus) els.shellStatus.textContent = '';
     renderToolGroupCheckboxes();
     renderProviderDropdown();
     renderCustomProvidersList();
@@ -2071,6 +2084,32 @@
     });
 
     if (els.testConnBtn) els.testConnBtn.addEventListener('click', testConnection);
+
+    if (els.shellCopyIdBtn) els.shellCopyIdBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(chrome.runtime.id).then(() => {
+        const orig = els.shellCopyIdBtn.textContent;
+        els.shellCopyIdBtn.textContent = '✓';
+        setTimeout(() => { els.shellCopyIdBtn.textContent = orig; }, 1000);
+      });
+    });
+    if (els.shellTestBtn) els.shellTestBtn.addEventListener('click', async () => {
+      if (!els.shellStatus) return;
+      els.shellStatus.textContent = 'Pinging native host…';
+      els.shellStatus.className = 'status';
+      try {
+        const r = await window.KyotoTools.call('shell_ping', {});
+        if (r?.ok) {
+          els.shellStatus.textContent = `✓ Connected · ${r.platform} · cwd ${r.cwd}`;
+          els.shellStatus.className = 'status ok';
+        } else {
+          els.shellStatus.textContent = `${r?.error || 'Not connected'} — run the install command above, then click Test again.`;
+          els.shellStatus.className = 'status err';
+        }
+      } catch (e) {
+        els.shellStatus.textContent = `Error: ${e.message}`;
+        els.shellStatus.className = 'status err';
+      }
+    });
 
     if (els.s3TestBtn) els.s3TestBtn.addEventListener('click', async () => {
       // Use the in-form values so the user can test BEFORE saving.
