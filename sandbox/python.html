@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Kyoto · Python sandbox</title>
+</head>
+<body>
+<script>
+(() => {
+  'use strict';
+
+  // Pin a known-good Pyodide. Bump deliberately when verifying a new
+  // release; the version flows into both the loader script URL and
+  // the indexURL Pyodide uses to fetch its WASM and bundled packages.
+  const PYODIDE_VERSION = '0.28.4';
+  const CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
+
+  let pyodide = null;
+  let pyodideReady = null;
+
+  async function ensurePyodide() {
+    if (pyodide) return pyodide;
+    if (pyodideReady) return pyodideReady;
+    pyodideReady = (async () => {
+      // Load pyodide.js as a script tag — fetch alone isn't enough,
+      // it expects to register `loadPyodide` on the global.
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = CDN + 'pyodide.js';
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('Failed to fetch pyodide.js from ' + CDN));
+        document.head.appendChild(s);
+      });
+      pyodide = await loadPyodide({ indexURL: CDN });
+      await pyodide.loadPackage('micropip');
+      return pyodide;
+    })();
+    return pyodideReady;
+  }
+
+  // postMessage helpers — `event.origin` is "null" for sandboxed
+  // iframes; reply with "*" to bridge back to the extension page.
+  function reply(event, payload) {
+    try { event.source.postMessage(payload, event.origin || '*'); } catch {}
+  }
+
+  // Serialize exec calls so stdout/stderr capture doesn't race.
+  let queue = Promise.resolve();
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'ping') {
+      reply(event, { id: msg.id, type: 'pong' });
+      return;
+    }
+    if (msg.type === 'exec') {
+      queue = queue.then(() => handleExec(event)).catch(() => {});
+    }
+  });
+
+  async function handleExec(event) {
+    const msg = event.data;
+    const id = msg.id;
+    try {
+      const py = await ensurePyodide();
+
+      // Install requested packages via micropip first.
+      if (Array.isArray(msg.packages) && msg.packages.length) {
+        const micropip = py.pyimport('micropip');
+        for (const pkg of msg.packages) {
+          try {
+            await micropip.install(pkg);
+          } catch (e) {
+            reply(event, { id, type: 'result', value: null, stdout: '', stderr: `micropip install ${pkg} failed: ${e && e.message ? e.message : String(e)}` });
+            return;
+          }
+        }
+      }
+
+      let stdout = '', stderr = '';
+      py.setStdout({ batched: (s) => { stdout += s + '\n'; } });
+      py.setStderr({ batched: (s) => { stderr += s + '\n'; } });
+
+      let result, pyErr;
+      try {
+        result = await py.runPythonAsync(msg.code);
+      } catch (e) {
+        pyErr = e;
+      } finally {
+        // Restore default IO on the interpreter (the next call sets its own).
+        py.setStdout();
+        py.setStderr();
+      }
+
+      if (pyErr) {
+        reply(event, {
+          id, type: 'result', value: null,
+          stdout, stderr: stderr + String(pyErr.message || pyErr)
+        });
+        return;
+      }
+
+      // Convert PyProxy -> plain JS. Then sanitise so postMessage
+      // structured-clone doesn't choke on things like Map/Set/PyProxy.
+      let value;
+      try {
+        if (result && typeof result.toJs === 'function') {
+          value = result.toJs({ dict_converter: Object.fromEntries });
+          if (typeof result.destroy === 'function') result.destroy();
+        } else {
+          value = result;
+        }
+      } catch {
+        value = String(result);
+      }
+      try {
+        value = JSON.parse(JSON.stringify(value, (_k, v) => {
+          if (typeof v === 'function') return '<function>';
+          if (typeof v === 'bigint') return String(v);
+          if (v instanceof Map) return Object.fromEntries(v);
+          if (v instanceof Set) return [...v];
+          return v;
+        }));
+      } catch {
+        value = String(result);
+      }
+
+      reply(event, { id, type: 'result', value, stdout, stderr });
+    } catch (e) {
+      reply(event, { id, type: 'result', value: null, stdout: '', stderr: `sandbox error: ${e && e.message ? e.message : String(e)}` });
+    }
+  }
+
+  // Announce readiness so the parent can stop pinging.
+  try { window.parent.postMessage({ type: 'sandbox_ready' }, '*'); } catch {}
+})();
+</script>
+</body>
+</html>

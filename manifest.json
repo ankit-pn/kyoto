@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kyoto — AI browser agent for developers",
-  "version": "10.1.0",
+  "version": "11.0.0",
   "description": "AI browser agent for devs. BYOK any OpenAI-compat provider (OpenRouter / DeepSeek / MiniMax / Ollama / Groq / ...). Per-tab sessions, slash commands, cross-session memory, MCP servers, ~35 dev tools.",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -44,6 +44,13 @@
     "default_path": "sidepanel/sidepanel.html"
   },
   "devtools_page": "devtools/devtools.html",
+  "sandbox": {
+    "pages": ["sandbox/python.html"]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-eval' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net blob:; connect-src 'self' https://cdn.jsdelivr.net https: data: blob:; worker-src 'self' blob:; child-src 'self' blob:; object-src 'self'"
+  },
   "commands": {
     "_execute_action": {
       "suggested_key": {

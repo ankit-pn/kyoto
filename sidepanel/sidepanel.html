@@ -284,6 +284,12 @@
     </div>
   </aside>
 
+  <!-- Hidden sandbox iframe for Pyodide / python_exec. Sandboxed page
+       (declared in manifest) runs with a CSP that allows unsafe-eval +
+       loading Pyodide from cdn.jsdelivr.net. Lazy: Pyodide is only
+       fetched on first exec. -->
+  <iframe id="pythonSandbox" src="../sandbox/python.html" style="display:none" title="python sandbox"></iframe>
+
   <script src="../lib/marked.min.js"></script>
   <script src="models-registry.js"></script>
   <script src="tools.js"></script>

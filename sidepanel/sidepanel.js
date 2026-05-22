@@ -415,7 +415,9 @@
     '/pypi':       'Look up the PyPI package "{{args}}" using `pypi_info`. Show version, summary, and project URLs.',
     '/so':         'Use `stackoverflow_search` for: {{args}}. Show the top 5 results with title, score, and link.',
     '/ts':         'Take the JSON I just pasted (or the latest tool result) and use `json_to_typescript` to generate the TypeScript interfaces. Root name: {{args}}',
-    '/postman':    'Export the captured network buffer as a Postman v2.1 collection using `network_postman_export`. Show me the host breakdown.'
+    '/postman':    'Export the captured network buffer as a Postman v2.1 collection using `network_postman_export`. Show me the host breakdown.',
+    '/py':         'Run this Python via `python_exec` and show me the value + stdout/stderr: {{args}}',
+    '/pip':        'Install the package(s) "{{args}}" via micropip in the Python sandbox, then `python_exec` a small import test to confirm.'
   };
 
   function expandSlash(text) {
