@@ -199,6 +199,19 @@
     state.pendingAgentTabBind = state.activeSession?.id || null;
   };
 
+  // Read-only window into session storage for tools (chat_export, etc.).
+  // Defined here so it's available before tools.js runs its tool registrations.
+  // loadFullSession isn't defined yet at this top-level; we defer the lookup.
+  window.KyotoSession = {
+    active: () => state.activeSession,
+    listIndex: () => [...(state.sessionsIndex || [])],
+    load: (id) => (typeof loadFullSession === 'function' ? loadFullSession(id) : Promise.reject(new Error('not ready'))),
+    settingsSnapshot: () => ({
+      provider: state.settings?.provider,
+      model: state.settings?.model
+    })
+  };
+
   // ── Marked setup ─────────────────────────────────────
   if (window.marked) {
     marked.setOptions({ breaks: true, gfm: true });
@@ -483,7 +496,11 @@
     '/loop':       '[CMD]:loop',
     '/ls':         'Use `fs_list` to show every file in the workspace. Format as a small tree.',
     '/zip':        'Use `fs_zip` to package the entire workspace into a ZIP and download it.',
-    '/clearfs':    '[CMD]:clearfs'
+    '/clearfs':    '[CMD]:clearfs',
+    '/export':     'Use `chat_export` to download the current chat. Default format: markdown. {{args}}',
+    '/export-json':'Use `chat_export { format: "json" }` to download the current chat as JSON.',
+    '/export-md':  'Use `chat_export { format: "markdown" }` to download the current chat as Markdown.',
+    '/export-all': 'Use `chat_export { format: "json", scope: "all" }` to bundle every session into one JSON file.'
   };
 
   // ── Goal + loop primitives (inspired by Claude Code) ─────────

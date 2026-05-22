@@ -1496,6 +1496,175 @@
     }
   });
 
+  // ──────── CHAT HISTORY EXPORT ────────
+  // Pulls the active (or named) session out of side-panel storage,
+  // serialises it as JSON or Markdown, and downloads it via
+  // chrome.downloads. Useful when the user wants a record outside
+  // the extension's own storage.
+  function _formatSessionMarkdown(session, { providerLabel } = {}) {
+    if (!session) return '# (no session)';
+    const lines = [];
+    const created = session.createdAt ? new Date(session.createdAt).toISOString() : 'unknown';
+    lines.push(`# Kyoto chat — ${session.title || session.id}`);
+    lines.push('');
+    lines.push(`- **Session id:** \`${session.id}\``);
+    lines.push(`- **Created:** ${created}`);
+    if (session.tabUrl) lines.push(`- **Bound tab URL:** ${session.tabUrl}`);
+    if (providerLabel) lines.push(`- **Provider/model at export time:** ${providerLabel}`);
+    if (session.goal) lines.push(`- **Active goal:** ${session.goal}`);
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    const history = session.history || [];
+    for (const msg of history) {
+      const role = msg.role;
+      if (role === 'system') {
+        lines.push('## ⚙️ System');
+        lines.push('');
+        lines.push('```');
+        lines.push((msg.content || '').toString());
+        lines.push('```');
+        lines.push('');
+        continue;
+      }
+      if (role === 'user') {
+        lines.push('## 👤 User');
+        lines.push('');
+        const c = msg.content;
+        if (typeof c === 'string') {
+          lines.push(c);
+        } else if (Array.isArray(c)) {
+          for (const part of c) {
+            if (part?.type === 'text') lines.push(part.text || '');
+            else if (part?.type === 'image_url') lines.push(`![image](${part.image_url?.url || ''})`);
+          }
+        }
+        lines.push('');
+        continue;
+      }
+      if (role === 'assistant') {
+        lines.push('## 🤖 Assistant');
+        if (msg._finishReason) lines.push(`*finish: \`${msg._finishReason}\`*`);
+        if (msg._usage) {
+          const u = msg._usage;
+          const cost = msg._cost != null ? ` · $${Number(msg._cost).toFixed(4)}` : '';
+          lines.push(`*tokens: in ${u.prompt_tokens ?? '?'} · out ${u.completion_tokens ?? '?'} · total ${u.total_tokens ?? '?'}${cost}*`);
+        }
+        lines.push('');
+        if (msg.reasoning_content) {
+          lines.push('<details><summary>Reasoning (thinking)</summary>');
+          lines.push('');
+          lines.push(msg.reasoning_content);
+          lines.push('');
+          lines.push('</details>');
+          lines.push('');
+        }
+        if (msg.content) {
+          lines.push(msg.content);
+          lines.push('');
+        }
+        if (msg.tool_calls?.length) {
+          for (const tc of msg.tool_calls) {
+            const name = tc.function?.name || '(unknown)';
+            lines.push(`#### 🔧 Tool call: \`${name}\``);
+            lines.push('');
+            lines.push('```json');
+            let args = tc.function?.arguments || '{}';
+            try { args = JSON.stringify(JSON.parse(args), null, 2); } catch {}
+            lines.push(args);
+            lines.push('```');
+            lines.push('');
+          }
+        }
+        continue;
+      }
+      if (role === 'tool') {
+        lines.push(`#### 📦 Tool result${msg.name ? ` (\`${msg.name}\`)` : ''}`);
+        lines.push('');
+        lines.push('```json');
+        const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2);
+        if (content && content.length > 20000) lines.push(content.slice(0, 20000) + `\n… (truncated, ${content.length - 20000} more chars)`);
+        else lines.push(content || '');
+        lines.push('```');
+        lines.push('');
+        continue;
+      }
+    }
+    return lines.join('\n');
+  }
+
+  function _suggestedExportName(session, ext) {
+    const safe = (s) => String(s || '').replace(/[^a-z0-9-_]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const slug = safe(session?.title) || safe(session?.id) || 'chat';
+    return `kyoto-chat-${slug}-${stamp}.${ext}`;
+  }
+
+  T({
+    name: 'chat_export',
+    group: 'misc',
+    description:
+      'Export the chat history as a downloadable file. ' +
+      '`format` is "json" (full structure incl. tool calls / tool results / usage stats — round-trippable) or "markdown" (human-readable). ' +
+      'Default scope is the ACTIVE session. Pass `sessionId` to export a specific session, or `scope: "all"` to bundle every session into one archive. ' +
+      'Returns { ok, filename, bytes, downloadId, format }.',
+    parameters: OBJ({
+      format: { type: 'string', enum: ['json', 'markdown', 'md'] },
+      sessionId: STR,
+      scope: { type: 'string', enum: ['active', 'all'] },
+      filename: STR
+    }, ['format']),
+    handler: async ({ format, sessionId, scope = 'active', filename } = {}) => {
+      if (!window.KyotoSession) throw new Error('Session API not available');
+      const fmt = format === 'md' ? 'markdown' : format;
+      let content, mime, ext;
+
+      if (scope === 'all') {
+        const index = window.KyotoSession.listIndex();
+        const sessions = [];
+        for (const meta of index) {
+          // eslint-disable-next-line no-await-in-loop
+          const full = await window.KyotoSession.load(meta.id);
+          if (full) sessions.push(full);
+        }
+        if (fmt === 'markdown') {
+          content = sessions.map(s => _formatSessionMarkdown(s)).join('\n\n---\n\n');
+          mime = 'text/markdown';
+          ext = 'md';
+        } else {
+          content = JSON.stringify({ exportedAt: new Date().toISOString(), sessions }, null, 2);
+          mime = 'application/json';
+          ext = 'json';
+        }
+      } else {
+        const session = sessionId
+          ? await window.KyotoSession.load(sessionId)
+          : window.KyotoSession.active();
+        if (!session) throw new Error('No session to export');
+        if (fmt === 'markdown') {
+          const snap = window.KyotoSession.settingsSnapshot();
+          content = _formatSessionMarkdown(session, { providerLabel: `${snap.provider}/${snap.model}` });
+          mime = 'text/markdown';
+          ext = 'md';
+        } else {
+          content = JSON.stringify(session, null, 2);
+          mime = 'application/json';
+          ext = 'json';
+        }
+      }
+
+      const blob = new Blob([content], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const suggested = filename || _suggestedExportName(
+        scope === 'all' ? { title: 'all-sessions' } : (sessionId ? { id: sessionId } : window.KyotoSession.active()),
+        ext
+      );
+      const downloadId = await chrome.downloads.download({ url, filename: suggested, saveAs: true });
+      setTimeout(() => URL.revokeObjectURL(url), 120000);
+      return { ok: true, filename: suggested, bytes: blob.size, downloadId, format: fmt, scope };
+    }
+  });
+
   // ──────── VIRTUAL FILESYSTEM (in IndexedDB) ────────
   // A scratch workspace for the agent — drop scraped data here in
   // chunks, walk it later, package up as a ZIP for the user to
@@ -1894,34 +2063,69 @@
     return ShellHost.send({ command, timeoutMs }, timeoutMs);
   }
 
+  // Where binaries get dropped by various installers. The shell host
+  // runs commands without sourcing the user's interactive shell rc,
+  // so PATH may not include these. Always try in order.
+  const _YT_DLP_PATHS = [
+    '/opt/homebrew/bin/yt-dlp',       // Apple Silicon Homebrew
+    '/usr/local/bin/yt-dlp',          // Intel Homebrew + most Linux package managers
+    '$HOME/.local/bin/yt-dlp',        // pipx default + pip --user (Linux + macOS Python.org)
+    '/opt/local/bin/yt-dlp',          // MacPorts
+    // pip --user on macOS system Python installs under ~/Library/Python/3.X/bin
+    '$HOME/Library/Python/3.13/bin/yt-dlp',
+    '$HOME/Library/Python/3.12/bin/yt-dlp',
+    '$HOME/Library/Python/3.11/bin/yt-dlp',
+    '$HOME/Library/Python/3.10/bin/yt-dlp',
+    '$HOME/Library/Python/3.9/bin/yt-dlp'
+  ];
+
+  // Returns a usable yt-dlp invocation string, e.g.
+  //   "/opt/homebrew/bin/yt-dlp"
+  //   "$HOME/Library/Python/3.9/bin/yt-dlp"
+  //   "python3 -m yt_dlp"
+  //   null if nothing works.
+  async function _findYtDlp() {
+    // 1) any of the well-known absolute paths
+    for (const p of _YT_DLP_PATHS) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await _shell(`test -x ${p} && echo OK || echo MISS`, 5000);
+      if (/OK/.test(r.stdout || '')) return p;
+    }
+    // 2) on the shell's PATH directly
+    const r2 = await _shell('command -v yt-dlp 2>/dev/null || true', 5000);
+    const out2 = (r2.stdout || '').trim();
+    if (out2) return out2;
+    // 3) python -m yt_dlp (the module IS installed even if the script isn't on PATH)
+    for (const py of ['python3', 'python']) {
+      // eslint-disable-next-line no-await-in-loop
+      const r3 = await _shell(`${py} -c "import yt_dlp" 2>&1 && echo OK || echo MISS`, 5000);
+      if (/OK/.test(r3.stdout || '')) return `${py} -m yt_dlp`;
+    }
+    return null;
+  }
+
   async function _ytDlpAutoInstall() {
-    // Try each command in order; first one to leave a working `yt-dlp`
-    // on PATH wins.
+    // Prefer pipx (clean install), then user-site pip. yt-dlp self-updates
+    // via "yt-dlp -U" so we don't have to upgrade it ourselves.
     const candidates = [
       'pipx install yt-dlp',
-      'python3 -m pip install --user yt-dlp',
-      'pip3 install --user yt-dlp',
-      'python -m pip install --user yt-dlp',
-      'pip install --user yt-dlp'
+      'python3 -m pip install --user --upgrade yt-dlp',
+      'pip3 install --user --upgrade yt-dlp',
+      'python -m pip install --user --upgrade yt-dlp',
+      'pip install --user --upgrade yt-dlp'
     ];
     const log = [];
     for (const c of candidates) {
       try {
+        // eslint-disable-next-line no-await-in-loop
         const r = await _shell(c + ' 2>&1', 240000);
         log.push(`${c} -> exit ${r.exitCode}`);
         if (r.exitCode === 0) {
-          // Verify yt-dlp is now invokable. pipx puts binaries in
-          // ~/.local/bin which isn't always on the shell's PATH yet;
-          // fall through if so and try a direct path.
-          const v = await _shell('yt-dlp --version 2>&1 || echo MISS', 5000);
-          if (!/MISS/.test(v.stdout)) {
-            log.push(`yt-dlp ok: ${(v.stdout || '').trim()}`);
-            return { ok: true, log };
-          }
-          const v2 = await _shell('~/.local/bin/yt-dlp --version 2>&1 || echo MISS', 5000);
-          if (!/MISS/.test(v2.stdout)) {
-            log.push(`yt-dlp ok (~/.local/bin): ${(v2.stdout || '').trim()}`);
-            return { ok: true, useLocalBin: true, log };
+          // eslint-disable-next-line no-await-in-loop
+          const found = await _findYtDlp();
+          if (found) {
+            log.push(`yt-dlp ok at: ${found}`);
+            return { ok: true, binary: found, log };
           }
         }
       } catch (e) {
@@ -1929,6 +2133,12 @@
       }
     }
     return { ok: false, log };
+  }
+
+  // Heuristic: did this look like YouTube's SABR-only 403?
+  function _is403Sabr(text) {
+    if (!text) return false;
+    return /HTTP Error 403/.test(text) || /SABR/i.test(text) || /Please sign in/i.test(text);
   }
 
   T({
@@ -1947,16 +2157,17 @@
       format: STR,
       outputDir: STR,
       useBrowserCookies: BOOL,
+      extraArgs: STR,
       timeoutMs: NUM
     }, ['url']),
     handler: async (args = {}) => {
-      const { url, audioOnly = false, format, outputDir, useBrowserCookies = true, timeoutMs = 600000 } = args;
+      const { url, audioOnly = false, format, outputDir, useBrowserCookies = true, extraArgs = '', timeoutMs = 600000 } = args;
       if (!url || !/^https?:\/\//i.test(url)) {
         return { error: 'url must be a full http(s) URL' };
       }
 
       const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-      const buildCmd = (binary) => {
+      const buildCmd = (binary, { ytClients } = {}) => {
         const parts = [binary];
         if (useBrowserCookies) parts.push('--cookies-from-browser', 'chrome');
         if (audioOnly) {
@@ -1966,65 +2177,98 @@
         } else {
           parts.push('-f', sq('bv*+ba/b'), '--merge-output-format', 'mp4');
         }
+        if (ytClients && /youtube\.com|youtu\.be/i.test(url)) {
+          // Multi-client fallback works around YouTube's SABR-only experiment
+          // (see yt-dlp issue #12482). tv_simply / web_safari / mweb still
+          // serve plain https segment URLs at the time of writing.
+          parts.push('--extractor-args', sq(`youtube:player_client=${ytClients}`));
+        }
         const dir = (outputDir || '~/Downloads').replace(/\/+$/, '');
         parts.push('-o', sq(`${dir}/%(title)s.%(ext)s`));
-        // After-move print emits the final path on its own stdout line.
         parts.push('--print', sq('after_move:filepath'));
+        parts.push('--no-warnings');
+        if (extraArgs && extraArgs.trim()) parts.push(extraArgs.trim());
         parts.push(sq(url));
         return parts.join(' ');
       };
 
-      let binary = 'yt-dlp';
-      let installLog;
-      // 1) try direct invocation
-      let r;
+      // 1) Find or install yt-dlp BEFORE the first download attempt.
+      // We no longer "try yt-dlp blindly and hope PATH catches it" — the
+      // shell host's PATH doesn't include pipx/pip --user dirs reliably.
+      let binary, installLog;
       try {
-        r = await _shell(buildCmd(binary) + ' 2>&1', timeoutMs);
+        binary = await _findYtDlp();
       } catch (e) {
         return {
           error: e.message,
           hint: 'Shell bridge not installed. Open Settings → Shell bridge for the one-line installer.'
         };
       }
-      // 2) command-not-found path — try auto-install
-      const notFound = r.exitCode === 127
-        || /yt-dlp: command not found/i.test(r.stdout || r.stderr || '')
-        || /'yt-dlp' is not recognized/i.test(r.stdout || r.stderr || '');
-      if (notFound) {
+      if (!binary) {
         const inst = await _ytDlpAutoInstall();
         installLog = inst.log;
         if (!inst.ok) {
           return {
             error: 'yt-dlp is not installed and auto-install failed',
             installLog,
-            hint: 'Install manually: pipx install yt-dlp  (or: pip install --user yt-dlp)'
+            hint: 'Install manually:  pipx install yt-dlp   (or:  pip3 install --user yt-dlp).  On macOS the easiest is:  brew install yt-dlp ffmpeg'
           };
         }
-        if (inst.useLocalBin) binary = '~/.local/bin/yt-dlp';
-        // 3) retry after install
-        r = await _shell(buildCmd(binary) + ' 2>&1', timeoutMs);
+        binary = inst.binary;
       }
 
-      if (r.exitCode !== 0) {
+      // 2) For YouTube, try a SABR-resistant client tuple first.
+      const isYouTube = /youtube\.com|youtu\.be/i.test(url);
+      const clientPlan = isYouTube
+        ? ['tv_simply,mweb,web_safari', 'default,tv_simply,mweb,web_safari,web_creator', null]
+        : [null];
+
+      let lastResult;
+      for (const ytClients of clientPlan) {
+        const cmd = buildCmd(binary, { ytClients });
+        // eslint-disable-next-line no-await-in-loop
+        const r = await _shell(cmd + ' 2>&1', timeoutMs);
+        lastResult = r;
+        if (r.exitCode === 0) {
+          const lines = (r.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+          const savedPath = lines[lines.length - 1] || null;
+          return {
+            ok: true,
+            savedPath,
+            binary,
+            ytClients: ytClients || 'default',
+            stdoutTail: lines.slice(-5).join('\n'),
+            installLog
+          };
+        }
+        // 403 / SABR — try the next client tuple
+        if (!_is403Sabr(r.stdout) && !_is403Sabr(r.stderr)) break;
+      }
+
+      // None of the attempts worked.
+      const r = lastResult;
+      const isSabr = _is403Sabr(r?.stdout) || _is403Sabr(r?.stderr);
+      if (r?.exitCode !== 0) {
         return {
-          error: `yt-dlp exited ${r.exitCode}`,
-          stdout: (r.stdout || '').slice(-2000),
-          stderr: (r.stderr || '').slice(-2000),
-          installLog
+          error: `yt-dlp exited ${r?.exitCode}`,
+          stdout: (r?.stdout || '').slice(-2000),
+          stderr: (r?.stderr || '').slice(-2000),
+          installLog,
+          binary,
+          hint: isSabr && isYouTube
+            ? [
+                'Hit a YouTube SABR / 403 block. Things to try:',
+                `1. Update yt-dlp to the latest:  ${binary === 'python3 -m yt_dlp' || binary === 'python -m yt_dlp' ? 'pip3 install --user --upgrade yt-dlp' : `${binary} -U`}`,
+                '2. Install ffmpeg (often required to merge HQ formats): `brew install ffmpeg` (macOS) / `sudo apt install ffmpeg` (Linux).',
+                '3. Pass `extraArgs: "--extractor-args youtube:formats=missing_pot --throttled-rate 100K"`.',
+                '4. As a last resort: install the bgutils PO-token plugin (https://github.com/Brainicism/bgutils-ytdlp-pot-provider) — yt-dlp picks it up automatically.'
+              ].join('\n')
+            : undefined
         };
       }
-      // Pick the last non-empty line as the saved path (--print after_move:filepath
-      // emits exactly that). yt-dlp may also emit progress lines we
-      // ignore.
-      const lines = (r.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
-      const savedPath = lines[lines.length - 1] || null;
-      return {
-        ok: true,
-        savedPath,
-        binary,
-        stdoutTail: lines.slice(-5).join('\n'),
-        installLog
-      };
+      // The earlier loop already returned on success — falling through
+      // here means a non-zero exit that wasn't SABR-shaped.
+      return { error: 'yt-dlp failed', binary, installLog };
     }
   });
 
