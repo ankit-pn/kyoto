@@ -2006,23 +2006,47 @@
       // Clear any pre-existing capture so we only see fresh requests.
       try { await bg('NET_CAPTURE_CLEAR'); } catch {}
 
-      // Kick the player so it actually fetches segments.
+      // Kick the player so it actually fetches segments. We have to land
+      // OUTSIDE the already-buffered range or the player never re-requests
+      // — YouTube buffers ~120s ahead, so +0.5s is always inside it.
       const playResult = await scrip(tabId, () => {
         const v = document.querySelector('video');
         if (!v) return { played: false, error: 'no <video> element on page' };
         try { v.play(); } catch {}
         try {
           if (isFinite(v.duration) && v.duration > 0) {
-            // Tiny seek forces YouTube to issue a fresh segment range.
             const old = v.currentTime || 0;
-            v.currentTime = Math.min(v.duration - 1, old + 0.5);
+            // Pick a target well past the buffer head. If we're already
+            // near the end, jump backwards instead.
+            const ahead = old + 180;
+            const target = ahead < v.duration - 5 ? ahead : Math.max(0, old - 60);
+            v.currentTime = target;
           }
         } catch {}
         return { played: !v.paused, currentTime: v.currentTime, duration: v.duration };
       });
 
       const waitMs = Math.max(1500, Math.min(20000, playForMs));
-      await new Promise(r => setTimeout(r, waitMs));
+      // While waiting, re-seek every ~2s to invalidate the buffer again —
+      // catches players that re-buffer aggressively and stop fetching.
+      const seekTicker = (async () => {
+        const ticks = Math.floor(waitMs / 2000);
+        for (let i = 1; i < ticks; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            await scrip(tabId, () => {
+              const v = document.querySelector('video');
+              if (!v || !isFinite(v.duration) || v.duration <= 0) return;
+              const next = (v.currentTime + 47) % Math.max(60, v.duration - 5);
+              v.currentTime = next;
+            });
+          } catch {}
+        }
+      })();
+      await Promise.race([
+        seekTicker,
+        new Promise(r => setTimeout(r, waitMs))
+      ]);
 
       const cap = await bg('NET_CAPTURE_LIST', {
         filter: 'googlevideo\\.com.*videoplayback',
@@ -2102,22 +2126,34 @@
   //   "$HOME/Library/Python/3.9/bin/yt-dlp"
   //   "python3 -m yt_dlp"
   //   null if nothing works.
+  // Verify a yt-dlp invocation actually runs. `test -x` lies for Homebrew
+  // binaries whose Python shebang points at a removed interpreter
+  // ("bad interpreter: /opt/homebrew/opt/python@3.11/bin/python3.11").
+  async function _ytDlpProbe(invocation) {
+    try {
+      const r = await _shell(`${invocation} --version 2>&1`, 8000);
+      if (r.exitCode !== 0) return false;
+      // The real yt-dlp prints a date-like version (e.g. "2025.10.14").
+      return /\d{4}\.\d{2}\.\d{2}/.test(r.stdout || '');
+    } catch {
+      return false;
+    }
+  }
+
   async function _findYtDlp() {
-    // 1) any of the well-known absolute paths
+    // 1) any of the well-known absolute paths — but verify it actually runs.
     for (const p of _YT_DLP_PATHS) {
       // eslint-disable-next-line no-await-in-loop
-      const r = await _shell(`test -x ${p} && echo OK || echo MISS`, 5000);
-      if (/OK/.test(r.stdout || '')) return p;
+      if (await _ytDlpProbe(p)) return p;
     }
     // 2) on the shell's PATH directly
     const r2 = await _shell('command -v yt-dlp 2>/dev/null || true', 5000);
     const out2 = (r2.stdout || '').trim();
-    if (out2) return out2;
+    if (out2 && await _ytDlpProbe(out2)) return out2;
     // 3) python -m yt_dlp (the module IS installed even if the script isn't on PATH)
     for (const py of ['python3', 'python']) {
       // eslint-disable-next-line no-await-in-loop
-      const r3 = await _shell(`${py} -c "import yt_dlp" 2>&1 && echo OK || echo MISS`, 5000);
-      if (/OK/.test(r3.stdout || '')) return `${py} -m yt_dlp`;
+      if (await _ytDlpProbe(`${py} -m yt_dlp`)) return `${py} -m yt_dlp`;
     }
     return null;
   }
@@ -2206,6 +2242,38 @@
         }
       } catch (e) {
         log.push(`${c} -> ${e.message}`);
+      }
+    }
+    return { ok: false, log };
+  }
+
+  // Try to install the bgutil PO-token provider plugin. yt-dlp picks it
+  // up automatically the next time it runs. Needs Node.js because the
+  // plugin shells out to a Node helper to mint tokens. Returns
+  // { ok, log, method }. Best-effort — skipped silently if Node missing.
+  async function _installPoTokenProvider() {
+    const log = [];
+    const node = await _shell('command -v node 2>/dev/null && node --version 2>&1', 5000);
+    const hasNode = (node.stdout || '').trim().startsWith('v');
+    log.push(`node detected: ${hasNode ? (node.stdout || '').trim() : 'NO'}`);
+    if (!hasNode) {
+      return { ok: false, log, reason: 'no Node.js — bgutil plugin needs it to mint PO tokens' };
+    }
+    // Package name has churned: try the current name first, then the
+    // older / mirror names. Any one that ends up installable is fine.
+    const pkgs = [
+      'bgutil-ytdlp-pot-provider',
+      'bgutils-ytdlp-pot-provider',
+      'yt-dlp-get-pot-bgutil'
+    ];
+    const installers = ['pipx install', 'python3 -m pip install --user --upgrade', 'pip3 install --user --upgrade'];
+    for (const installer of installers) {
+      for (const pkg of pkgs) {
+        const cmd = `${installer} ${pkg}`;
+        // eslint-disable-next-line no-await-in-loop
+        const r = await _shell(cmd + ' 2>&1', 180000);
+        log.push(`${cmd} -> exit ${r.exitCode}`);
+        if (r.exitCode === 0) return { ok: true, log, method: cmd };
       }
     }
     return { ok: false, log };
@@ -2328,6 +2396,8 @@
 
       let lastResult;
       let attemptedSelfUpdate = false;
+      let attemptedPotProvider = false;
+      let potProviderLog;
       for (const ytClients of clientPlan) {
         const cmd = buildCmd(binary, { ytClients });
         // eslint-disable-next-line no-await-in-loop
@@ -2344,7 +2414,8 @@
             ffmpegPath,
             stdoutTail: lines.slice(-5).join('\n'),
             installLog,
-            ffmpegLog
+            ffmpegLog,
+            potProviderLog
           };
         }
         const sabr = _is403Sabr(r.stdout) || _is403Sabr(r.stderr);
@@ -2374,6 +2445,37 @@
             };
           }
         }
+        // Persistent SABR after self-update → real fix is the PO-token
+        // provider plugin. Try once to install it (needs Node.js) and
+        // retry. Only attempted on the LAST client tuple to avoid
+        // installing it three times.
+        const isLast = ytClients === clientPlan[clientPlan.length - 1];
+        if (sabr && isLast && !attemptedPotProvider && isYouTube) {
+          attemptedPotProvider = true;
+          // eslint-disable-next-line no-await-in-loop
+          const pot = await _installPoTokenProvider();
+          potProviderLog = pot.log;
+          if (pot.ok) {
+            // eslint-disable-next-line no-await-in-loop
+            const r3 = await _shell(cmd + ' 2>&1', timeoutMs);
+            lastResult = r3;
+            if (r3.exitCode === 0) {
+              const lines = (r3.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+              return {
+                ok: true,
+                savedPath: lines[lines.length - 1] || null,
+                binary,
+                ytClients: ytClients || 'default',
+                ffmpegPath,
+                stdoutTail: lines.slice(-5).join('\n'),
+                installLog,
+                ffmpegLog,
+                potProviderLog,
+                note: `Succeeded after installing PO-token provider (${pot.method}).`
+              };
+            }
+          }
+        }
         // not SABR-shaped → no point trying alternate client tuples
         if (!sabr) break;
       }
@@ -2390,20 +2492,27 @@
         stderr: (r?.stderr || '').slice(-2000),
         installLog,
         ffmpegLog,
+        potProviderLog,
         binary,
         ffmpegPath,
         hint: isSabr && isYouTube
           ? [
               'Hit a YouTube SABR / 403 block. yt-dlp tried multiple player clients with an auto-update, all still 403\'d.',
+              attemptedPotProvider
+                ? (potProviderLog && potProviderLog.length
+                    ? `PO-token provider auto-install attempted but didn\'t resolve the 403 (see potProviderLog). Most common cause: Node.js missing or pipx not on PATH.`
+                    : 'PO-token provider auto-install was skipped (no Node.js detected).')
+                : null,
               `1. Try the latest yt-dlp release manually:  ${updateHint}`,
-              '2. Install the PO-token provider plugin (the real fix for SABR-only accounts):',
-              '     pipx install bgutils-ytdlp-pot-provider',
+              '2. Install Node.js + the PO-token provider plugin (the real fix for SABR-only accounts):',
+              '     brew install node    # macOS  (or:  sudo apt install nodejs)',
+              '     pipx install bgutil-ytdlp-pot-provider',
               '   yt-dlp picks it up automatically; re-run /dl after that.',
               '3. Last resort, fetch the lowest tier (often skips SABR):',
               '     yt_dlp_run { url, format: "worst" }',
               '4. Or generate the command and paste in a terminal where you have a better-pathed Python:',
               '     yt_dlp_command { url }'
-            ].join('\n')
+            ].filter(Boolean).join('\n')
           : isYouTube && !ffmpegPath
             ? 'ffmpeg not installed and auto-install failed — yt-dlp can\'t merge separate video+audio streams. Try `brew install ffmpeg` (macOS) or `sudo apt install ffmpeg` (Linux).'
             : undefined
