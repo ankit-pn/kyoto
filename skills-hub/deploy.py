@@ -65,30 +65,77 @@ def save_state(state):
 
 # ---------- DynamoDB --------------------------------------------------------
 
+GSI_BY_SKILL_ID = 'skill_id_index'
+
+
 def ensure_table():
     ddb = boto3.client('dynamodb', region_name=REGION)
+    created = False
     try:
-        ddb.describe_table(TableName=TABLE_NAME)
+        desc = ddb.describe_table(TableName=TABLE_NAME)
         log(f'DynamoDB table {TABLE_NAME!r} already exists')
-        return
     except ClientError as e:
         if e.response['Error']['Code'] != 'ResourceNotFoundException':
             raise
-    log(f'Creating DynamoDB table {TABLE_NAME!r} (PK=domain, SK=skill_id)...')
-    ddb.create_table(
-        TableName=TABLE_NAME,
-        AttributeDefinitions=[
-            {'AttributeName': 'domain', 'AttributeType': 'S'},
-            {'AttributeName': 'skill_id', 'AttributeType': 'S'},
-        ],
-        KeySchema=[
-            {'AttributeName': 'domain', 'KeyType': 'HASH'},
-            {'AttributeName': 'skill_id', 'KeyType': 'RANGE'},
-        ],
-        BillingMode='PAY_PER_REQUEST',
-    )
-    ddb.get_waiter('table_exists').wait(TableName=TABLE_NAME)
-    log(f'Table {TABLE_NAME!r} active')
+        log(f'Creating DynamoDB table {TABLE_NAME!r} (PK=domain, SK=skill_id)...')
+        ddb.create_table(
+            TableName=TABLE_NAME,
+            AttributeDefinitions=[
+                {'AttributeName': 'domain', 'AttributeType': 'S'},
+                {'AttributeName': 'skill_id', 'AttributeType': 'S'},
+            ],
+            KeySchema=[
+                {'AttributeName': 'domain', 'KeyType': 'HASH'},
+                {'AttributeName': 'skill_id', 'KeyType': 'RANGE'},
+            ],
+            GlobalSecondaryIndexes=[{
+                'IndexName': GSI_BY_SKILL_ID,
+                'KeySchema': [{'AttributeName': 'skill_id', 'KeyType': 'HASH'}],
+                'Projection': {'ProjectionType': 'ALL'},
+            }],
+            BillingMode='PAY_PER_REQUEST',
+        )
+        ddb.get_waiter('table_exists').wait(TableName=TABLE_NAME)
+        log(f'Table {TABLE_NAME!r} active')
+        created = True
+        desc = ddb.describe_table(TableName=TABLE_NAME)
+
+    # If the table existed already from a pre-v14.6.8 deploy, it won't
+    # have skill_id_index. Add it now so GET/DELETE /v1/skills/<id> can
+    # work without the caller supplying domain. Backfill is automatic;
+    # we just have to wait for ACTIVE.
+    if not created:
+        gsis = desc['Table'].get('GlobalSecondaryIndexes') or []
+        has_idx = any(g['IndexName'] == GSI_BY_SKILL_ID for g in gsis)
+        if not has_idx:
+            log(f'Adding GSI {GSI_BY_SKILL_ID!r} to existing table (backfill can take minutes)...')
+            ddb.update_table(
+                TableName=TABLE_NAME,
+                AttributeDefinitions=[
+                    {'AttributeName': 'skill_id', 'AttributeType': 'S'},
+                ],
+                GlobalSecondaryIndexUpdates=[{
+                    'Create': {
+                        'IndexName': GSI_BY_SKILL_ID,
+                        'KeySchema': [{'AttributeName': 'skill_id', 'KeyType': 'HASH'}],
+                        'Projection': {'ProjectionType': 'ALL'},
+                    }
+                }],
+            )
+            # Poll until the GSI is ACTIVE — backfill is best-effort
+            # capped at 20 min so the script doesn't hang forever.
+            for i in range(80):
+                time.sleep(15)
+                d = ddb.describe_table(TableName=TABLE_NAME)
+                gsi = next((g for g in d['Table'].get('GlobalSecondaryIndexes') or []
+                            if g['IndexName'] == GSI_BY_SKILL_ID), None)
+                status = gsi['IndexStatus'] if gsi else 'unknown'
+                if status == 'ACTIVE':
+                    log('  GSI is ACTIVE')
+                    break
+                log(f'  GSI {GSI_BY_SKILL_ID} status: {status}')
+            else:
+                log(f'  WARN: GSI never reached ACTIVE; lookups by skill_id alone may 500 until it does')
 
 
 # ---------- IAM -------------------------------------------------------------
@@ -116,7 +163,11 @@ INLINE_POLICY = {
                 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
                 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan',
             ],
-            'Resource': f'arn:aws:dynamodb:{REGION}:*:table/{TABLE_NAME}',
+            'Resource': [
+                f'arn:aws:dynamodb:{REGION}:*:table/{TABLE_NAME}',
+                # GSI Query needs the index ARN, not just the base table.
+                f'arn:aws:dynamodb:{REGION}:*:table/{TABLE_NAME}/index/*',
+            ],
         },
     ],
 }

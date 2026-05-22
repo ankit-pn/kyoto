@@ -3407,12 +3407,15 @@
       'Search the skill hub for relevant playbooks before tackling a task. ' +
       'CALL THIS EARLY whenever a task is non-trivial or domain-specific (anything involving a website, API, install, multi-step workflow). ' +
       'Skills are short markdown playbooks distilled from past successful runs — using them saves iterations + tokens. ' +
-      'Pass `domain` (e.g. "youtube.com" or just "youtube" — server normalizes URLs) and a free-text `query` describing the task. ' +
+      'Pass a free-text `query` describing the task. ' +
+      'Optionally pass `domain` (e.g. "youtube.com") to restrict to that domain + the global partition; if omitted the server scans every domain. ' +
       'Returns ranked results with `name`, `description`, `contentPreview`, `skill_id`. ' +
-      'When something looks relevant, call `skill_get` to read the full body.',
+      'When something looks relevant, call `skill_get` with the skill_id to read the full body.',
     parameters: OBJ({ domain: STR, query: STR, limit: NUM, includeGlobal: BOOL }, ['query']),
-    handler: async ({ domain = 'global', query, limit = 5, includeGlobal = true } = {}) => {
-      return _skillsApi('POST', '/v1/skills/search', { body: { domain, query, limit, includeGlobal } });
+    handler: async ({ domain, query, limit = 5, includeGlobal = true } = {}) => {
+      const body = { query, limit, includeGlobal };
+      if (domain) body.domain = domain;
+      return _skillsApi('POST', '/v1/skills/search', { body });
     }
   });
 
@@ -3421,15 +3424,17 @@
     group: 'skill',
     description:
       'Fetch the full body of a skill by `skill_id` (returned from `skill_search` or `skill_list`). ' +
-      'Pass the matching `domain` too — skills are partitioned by domain. Calling this bumps the skill\'s usageCount so popular skills surface first in future searches.',
+      'Domain is optional — the server resolves the partition via a GSI on skill_id. ' +
+      'Pass `domain` only if you already know it (slightly faster path). ' +
+      'Calling this bumps the skill\'s usageCount so popular skills surface first in future searches.',
     parameters: OBJ({ skill_id: STR, domain: STR }, ['skill_id']),
     handler: async (args = {}) => {
-      // Defensive: some models call this with `id` instead of `skill_id`.
-      // Accept the alias rather than silently posting /skills/undefined.
-      const skill_id = args.skill_id || args.id;
-      const domain = args.domain || 'global';
+      // Accept the common alias variants — different model serializations
+      // produce skill_id / skillId / id depending on the JSON schema dialect.
+      const skill_id = args.skill_id || args.skillId || args.skillID || args.id;
       if (!skill_id) return { error: 'skill_id is required (use the value from skill_search.items[].skill_id)' };
-      return _skillsApi('GET', `/v1/skills/${encodeURIComponent(skill_id)}`, { query: { domain } });
+      const query = args.domain ? { domain: args.domain } : {};
+      return _skillsApi('GET', `/v1/skills/${encodeURIComponent(skill_id)}`, { query });
     }
   });
 
@@ -3477,13 +3482,13 @@
   T({
     name: 'skill_delete',
     group: 'skill',
-    description: 'Delete a skill from the hub. Use sparingly — usually update instead. Requires `skill_id` and the matching `domain`.',
+    description: 'Delete a skill from the hub. Use sparingly — usually update instead. Pass `skill_id`; domain is optional (server resolves it via GSI).',
     parameters: OBJ({ skill_id: STR, domain: STR }, ['skill_id']),
     handler: async (args = {}) => {
-      const skill_id = args.skill_id || args.id;
-      const domain = args.domain || 'global';
+      const skill_id = args.skill_id || args.skillId || args.skillID || args.id;
       if (!skill_id) return { error: 'skill_id is required' };
-      return _skillsApi('DELETE', `/v1/skills/${encodeURIComponent(skill_id)}`, { query: { domain } });
+      const query = args.domain ? { domain: args.domain } : {};
+      return _skillsApi('DELETE', `/v1/skills/${encodeURIComponent(skill_id)}`, { query });
     }
   });
 

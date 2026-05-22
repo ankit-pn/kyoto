@@ -187,11 +187,34 @@ def _save(event):
 
 def _get(event, skill_id):
     qs = event.get('queryStringParameters') or {}
-    domain = _norm_domain(qs.get('domain'))
-    r = _table.get_item(Key={'domain': domain, 'skill_id': skill_id})
-    item = r.get('Item')
+    raw_domain = (qs.get('domain') or '').strip()
+    item = None
+    domain = None
+    if raw_domain:
+        # Fast path — caller knows the domain so we GetItem with both keys.
+        domain = _norm_domain(raw_domain)
+        r = _table.get_item(Key={'domain': domain, 'skill_id': skill_id})
+        item = r.get('Item')
     if not item:
-        return _resp(404, {'error': 'not found', 'domain': domain, 'skill_id': skill_id})
+        # Domain unknown (or wrong) — fall back to a GSI Query by skill_id.
+        # Skill IDs are globally unique (name-slug + 6-hex suffix), so this
+        # finds the one matching item across all partitions cheaply.
+        try:
+            r = _table.query(
+                IndexName='skill_id_index',
+                KeyConditionExpression=Key('skill_id').eq(skill_id),
+                Limit=1,
+            )
+            items = r.get('Items', [])
+            if items:
+                item = items[0]
+                domain = item['domain']
+        except Exception:
+            # GSI may not exist yet on legacy tables — bubble the original 404.
+            pass
+    if not item:
+        return _resp(404, {'error': 'not found', 'skill_id': skill_id,
+                           'hint': 'try calling skill_search first to discover the right skill_id'})
     # Bump usage counter on read — best-effort, no transaction.
     try:
         _table.update_item(
@@ -206,7 +229,25 @@ def _get(event, skill_id):
 
 def _delete(event, skill_id):
     qs = event.get('queryStringParameters') or {}
-    domain = _norm_domain(qs.get('domain'))
+    raw_domain = (qs.get('domain') or '').strip()
+    domain = None
+    if raw_domain:
+        domain = _norm_domain(raw_domain)
+    else:
+        # Resolve via GSI when caller doesn't know the domain.
+        try:
+            r = _table.query(
+                IndexName='skill_id_index',
+                KeyConditionExpression=Key('skill_id').eq(skill_id),
+                Limit=1,
+            )
+            items = r.get('Items', [])
+            if items:
+                domain = items[0]['domain']
+        except Exception:
+            pass
+    if not domain:
+        return _resp(404, {'error': 'not found', 'skill_id': skill_id})
     r = _table.delete_item(
         Key={'domain': domain, 'skill_id': skill_id},
         ReturnValues='ALL_OLD',
@@ -221,18 +262,35 @@ def _search(event):
     except Exception:
         return _resp(400, {'error': 'invalid JSON body'})
     query = (body.get('query') or '').strip().lower()
-    domain = _norm_domain(body.get('domain'))
+    # Treat missing/empty domain as "search everywhere". The caller can
+    # explicitly opt into the original per-domain behaviour by passing
+    # a non-empty domain string.
+    raw_domain = (body.get('domain') or '').strip()
+    domain = _norm_domain(raw_domain) if raw_domain else None
     limit = _parse_int(body.get('limit'), 10, max_value=50)
     include_global = bool(body.get('includeGlobal', True))
 
-    domains_to_query = [domain]
-    if include_global and domain != 'global':
-        domains_to_query.append('global')
-
     items = []
-    for d in domains_to_query:
-        r = _table.query(KeyConditionExpression=Key('domain').eq(d), Limit=200)
+    if domain:
+        # Targeted: query the per-domain partition + optionally global.
+        domains_to_query = [domain]
+        if include_global and domain != 'global':
+            domains_to_query.append('global')
+        for d in domains_to_query:
+            r = _table.query(KeyConditionExpression=Key('domain').eq(d), Limit=200)
+            items.extend(r.get('Items', []))
+    else:
+        # No domain hint — scan the whole table. Skills are small + few
+        # in practice; if the table grows past ~1000 items we should
+        # add a per-tag GSI or a tokenised search index instead.
+        scan_kwargs = {'Limit': 500}
+        r = _table.scan(**scan_kwargs)
         items.extend(r.get('Items', []))
+        # One follow-up page if we got the soft cap and a continuation token.
+        # We deliberately don't loop forever — search is best-effort, not a dump.
+        if r.get('LastEvaluatedKey') and len(items) < 500:
+            r2 = _table.scan(ExclusiveStartKey=r['LastEvaluatedKey'], Limit=500 - len(items))
+            items.extend(r2.get('Items', []))
 
     # Score: name hit (3pts) > description hit (2) > tag hit (2) > content hit (1).
     # Tie-break on usageCount. DynamoDB returns Decimals for N attrs, which
@@ -279,7 +337,12 @@ def _search(event):
             **{k: v for k, v in it.items() if k != 'content'},
             'contentPreview': c[:240] + ('…' if len(c) > 240 else ''),
         })
-    return _resp(200, {'query': query, 'domain': domain, 'count': len(summary), 'items': summary})
+    return _resp(200, {
+        'query': query,
+        'domain': domain or '(all)',
+        'count': len(summary),
+        'items': summary,
+    })
 
 
 # ---------- router ----------------------------------------------------------
