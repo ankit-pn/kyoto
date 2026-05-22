@@ -330,6 +330,22 @@
     return d;
   }
 
+  function addReasoningCard() {
+    ensureEmptyHidden();
+    const card = document.createElement('details');
+    card.className = 'reasoning-card';
+    const summary = document.createElement('summary');
+    summary.innerHTML = '<span class="reasoning-name">💭 thinking</span><span class="reasoning-state">streaming…</span>';
+    card.appendChild(summary);
+    const body = document.createElement('pre');
+    body.className = 'reasoning-body';
+    body.textContent = '';
+    card.appendChild(body);
+    els.chat.appendChild(card);
+    scrollToBottom();
+    return { card, summary, body };
+  }
+
   // ── Chat loop ────────────────────────────────────────
   async function sendMessage(text) {
     if (!text.trim()) return;
@@ -353,9 +369,15 @@
       // Multi-step loop (tool calls).
       const maxSteps = 12;
       for (let step = 0; step < maxSteps; step++) {
-        const { text: assistantText, toolCalls } = await streamOnce(state.abort.signal);
+        const { text: assistantText, toolCalls, reasoning, reasoningField } = await streamOnce(state.abort.signal);
 
         const assistantMsg = { role: 'assistant', content: assistantText || '' };
+        if (reasoning && reasoningField) {
+          // Echo reasoning back exactly as the provider gave it. Required by
+          // DeepSeek thinking-mode and some OpenRouter reasoning models when
+          // the conversation continues into tool calls.
+          assistantMsg[reasoningField] = reasoning;
+        }
         if (toolCalls.length) {
           assistantMsg.tool_calls = toolCalls.map(tc => ({
             id: tc.id || `call_${Math.random().toString(36).slice(2)}`,
@@ -443,8 +465,11 @@
     }
 
     let textAcc = '';
+    let reasoningAcc = '';
+    let reasoningField = null;   // which field name to echo back: reasoning_content | reasoning | thinking
     const toolBuf = []; // index -> { id, function: { name, arguments } }
     let textTarget = null;
+    let reasoningTarget = null;
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -465,6 +490,22 @@
         const choice = parsed.choices?.[0];
         if (!choice) continue;
         const delta = choice.delta || {};
+
+        // ── reasoning_content / reasoning / thinking — preserve so we can
+        //    echo back on the next turn (DeepSeek thinking-mode and some
+        //    OpenRouter providers require this when tool calls are used).
+        const rChunk = delta.reasoning_content ?? delta.reasoning ?? delta.thinking;
+        if (typeof rChunk === 'string' && rChunk.length) {
+          if (!reasoningField) {
+            if (delta.reasoning_content !== undefined) reasoningField = 'reasoning_content';
+            else if (delta.reasoning !== undefined) reasoningField = 'reasoning';
+            else reasoningField = 'thinking';
+          }
+          reasoningAcc += rChunk;
+          if (!reasoningTarget) reasoningTarget = addReasoningCard();
+          reasoningTarget.body.textContent = reasoningAcc;
+          scrollToBottom();
+        }
 
         if (delta.content) {
           if (!textTarget) {
@@ -490,7 +531,16 @@
     }
 
     if (textTarget) textTarget.classList.remove('cursor');
-    return { text: textAcc, toolCalls: toolBuf.filter(Boolean) };
+    if (reasoningTarget) {
+      const stateEl = reasoningTarget.summary.querySelector('.reasoning-state');
+      if (stateEl) stateEl.textContent = `${reasoningAcc.length} chars`;
+    }
+    return {
+      text: textAcc,
+      toolCalls: toolBuf.filter(Boolean),
+      reasoning: reasoningAcc,
+      reasoningField
+    };
   }
 
   function buildMessages() {
