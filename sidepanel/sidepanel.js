@@ -689,7 +689,7 @@
     }
 
     if (action === 'goal') {
-      if (!state.activeSession) return;
+      if (!state.activeSession) { addMessage('assistant', '_No active session — open or create one first._', { error: true }); return; }
       const session = state.activeSession;
       const trimmed = (args || '').trim();
       if (!trimmed || trimmed === 'clear' || trimmed === 'off' || trimmed === 'stop') {
@@ -721,7 +721,7 @@
     }
 
     if (action === 'loop') {
-      if (!state.activeSession) return;
+      if (!state.activeSession) { addMessage('assistant', '_No active session — open or create one first._', { error: true }); return; }
       const trimmed = (args || '').trim();
       if (!trimmed || trimmed === 'list' || trimmed === 'status') {
         const mine = [...state.activeLoops].filter(([, l]) => l.sessionId === state.activeSession.id);
@@ -1030,6 +1030,16 @@
     if (state.runtimes[id]?.abort) state.runtimes[id].abort.abort();
     delete state.runtimes[id];
     sessionContentCache?.delete?.(id);
+    // Stop any /loop schedulers attached to this session — otherwise
+    // setInterval keeps firing fireLoop() which then can't load the
+    // session, fails silently, and leaves the row in the goal bar.
+    if (typeof stopLoopsForSession === 'function') stopLoopsForSession(id);
+    if (state.activeSession?.id === id) {
+      state.activeSession = null;
+      if (typeof updateGoalUI === 'function') updateGoalUI();
+    } else if (typeof updateGoalUI === 'function') {
+      updateGoalUI();
+    }
   }
   function createSessionObject(tab) {
     const id = newId();
@@ -1930,7 +1940,13 @@
       // out of steps with the agent still wanting to act. Make that
       // visible so the user doesn't think the agent "just stopped".
       if (stoppedReason === 'maxSteps') {
-        const note = `_Reached the max agent-steps cap (${maxSteps}). The agent still wanted to continue. Raise the limit in **Settings → Max agent steps per turn**, or just say "continue" to keep going._`;
+        // If we hit maxSteps while a goal was active, surface that the
+        // user must either /goal clear OR up the cap — otherwise the
+        // next message will silently auto-continue the goal again.
+        const goalSuffix = session.goal
+          ? ` A goal is still active (\`${session.goal}\`) — type \`/goal clear\` if you want to stop chasing it.`
+          : '';
+        const note = `_Reached the max agent-steps cap (${maxSteps}). The agent still wanted to continue. Raise the limit in **Settings → Max agent steps per turn**, or just say "continue" to keep going.${goalSuffix}_`;
         session.history.push({ role: 'assistant', content: note, _capHit: true });
         if (isActive(session.id)) addMessage('assistant', note, { error: true });
         await persistSession(session);
@@ -2578,11 +2594,14 @@
     });
 
     if (els.shellCopyIdBtn) els.shellCopyIdBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(chrome.runtime.id).then(() => {
-        const orig = els.shellCopyIdBtn.textContent;
-        els.shellCopyIdBtn.textContent = '✓';
-        setTimeout(() => { els.shellCopyIdBtn.textContent = orig; }, 1000);
-      });
+      const orig = els.shellCopyIdBtn.textContent;
+      const flash = (label) => {
+        els.shellCopyIdBtn.textContent = label;
+        setTimeout(() => { els.shellCopyIdBtn.textContent = orig; }, 1200);
+      };
+      navigator.clipboard.writeText(chrome.runtime.id)
+        .then(() => flash('✓'))
+        .catch(() => flash('✗'));
     });
     if (els.shellTestBtn) els.shellTestBtn.addEventListener('click', async () => {
       if (!els.shellStatus) return;

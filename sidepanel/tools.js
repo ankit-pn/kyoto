@@ -431,20 +431,38 @@
       if (format === 'json') return filtered;
       if (format === 'header') return { cookieHeader: filtered.map(c => `${c.name}=${c.value}`).join('; '), count: filtered.length };
       if (format === 'curl-b') return { curl: filtered.map(c => `-b '${c.name}=${c.value}'`).join(' '), count: filtered.length };
-      // netscape cookies.txt
+      // Netscape cookies.txt — spec-compliant for Python cookielib /
+      // curl / yt-dlp.
+      //
+      // The key invariant (which the previous version of this code
+      // violated and broke yt-dlp imports): the first column's leading
+      // dot must agree with the second column ("include subdomains").
+      //   - Domain cookie ("Domain=example.com" in Set-Cookie):
+      //       Chrome reports `.example.com` here. We emit `.example.com`
+      //       TRUE → cookielib accepts.
+      //   - Host-only cookie (no Domain attribute):
+      //       Chrome reports `www.example.com`. We emit `www.example.com`
+      //       FALSE → cookielib accepts. The OLD code emitted
+      //       `.www.example.com` FALSE, which cookielib rejects with
+      //       "domain_specified == initial_dot" AssertionError.
+      // httpOnly cookies are tagged with the conventional `#HttpOnly_`
+      // line prefix that yt-dlp and curl both honour.
       const lines = [
         '# Netscape HTTP Cookie File',
         '# Exported by Kyoto',
+        '# This file may be edited by hand. Generated automatically.',
         ''
       ];
       for (const c of filtered) {
-        const host = c.domain.startsWith('.') ? c.domain : '.' + c.domain;
-        const includeSub = c.domain.startsWith('.') ? 'TRUE' : 'FALSE';
+        const hasLeadingDot = c.domain.startsWith('.');
+        const includeSub = hasLeadingDot ? 'TRUE' : 'FALSE';
+        const host = c.domain;
         const httpsOnly = c.secure ? 'TRUE' : 'FALSE';
         const exp = c.expirationDate ? Math.floor(c.expirationDate) : 0;
-        lines.push([host, includeSub, c.path || '/', httpsOnly, exp, c.name, c.value].join('\t'));
+        const row = [host, includeSub, c.path || '/', httpsOnly, exp, c.name, c.value].join('\t');
+        lines.push(c.httpOnly ? '#HttpOnly_' + row : row);
       }
-      return { netscape: lines.join('\n'), count: filtered.length };
+      return { netscape: lines.join('\n') + '\n', count: filtered.length };
     }
   });
 
@@ -2141,6 +2159,76 @@
     return /HTTP Error 403/.test(text) || /SABR/i.test(text) || /Please sign in/i.test(text);
   }
 
+  // Check if ffmpeg is on the user's PATH. yt-dlp NEEDS ffmpeg to
+  // merge bv*+ba streams; without it we silently fall back to a
+  // single (usually 360p) progressive format.
+  async function _hasFfmpeg() {
+    const candidates = [
+      'ffmpeg',
+      '/opt/homebrew/bin/ffmpeg',
+      '/usr/local/bin/ffmpeg',
+      '/usr/bin/ffmpeg',
+      '/opt/local/bin/ffmpeg'
+    ];
+    for (const c of candidates) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await _shell(`${c} -version >/dev/null 2>&1 && echo OK || echo MISS`, 5000);
+      if (/OK/.test(r.stdout || '')) return c;
+    }
+    return null;
+  }
+
+  // Best-effort ffmpeg installer. macOS gets brew, Linux gets apt /
+  // dnf / pacman / apk in order. Returns { ok, log }.
+  async function _installFfmpeg() {
+    const log = [];
+    const cmds = [
+      // macOS — Homebrew first (most common)
+      '(test -x /opt/homebrew/bin/brew && /opt/homebrew/bin/brew install ffmpeg) || (test -x /usr/local/bin/brew && /usr/local/bin/brew install ffmpeg) || false',
+      // Debian/Ubuntu
+      'command -v apt >/dev/null && sudo -n apt install -y ffmpeg',
+      // Fedora/RHEL
+      'command -v dnf >/dev/null && sudo -n dnf install -y ffmpeg',
+      // Arch
+      'command -v pacman >/dev/null && sudo -n pacman -S --noconfirm ffmpeg',
+      // Alpine
+      'command -v apk >/dev/null && sudo -n apk add ffmpeg'
+    ];
+    for (const c of cmds) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const r = await _shell(c + ' 2>&1', 300000);
+        log.push(`${c.split('&&')[0].trim()} -> exit ${r.exitCode}`);
+        if (r.exitCode === 0) {
+          // eslint-disable-next-line no-await-in-loop
+          const ff = await _hasFfmpeg();
+          if (ff) return { ok: true, ffmpeg: ff, log };
+        }
+      } catch (e) {
+        log.push(`${c} -> ${e.message}`);
+      }
+    }
+    return { ok: false, log };
+  }
+
+  // Attempt a yt-dlp self-update. Works for pipx and pip --user installs.
+  // Cheap, idempotent. Skipped silently on permission errors.
+  async function _ytDlpSelfUpdate(binary) {
+    if (!binary) return { ok: false };
+    // -U works for the standalone binary; for python -m yt_dlp paths
+    // we need pip --upgrade instead.
+    const isModuleInvocation = / -m yt_dlp$/.test(binary);
+    const cmd = isModuleInvocation
+      ? `${binary.split(' ')[0]} -m pip install --user --upgrade yt-dlp 2>&1`
+      : `${binary} -U 2>&1`;
+    try {
+      const r = await _shell(cmd, 120000);
+      return { ok: r.exitCode === 0, stdoutTail: (r.stdout || '').slice(-400) };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
   T({
     name: 'yt_dlp_run',
     group: 'media',
@@ -2217,13 +2305,29 @@
         binary = inst.binary;
       }
 
-      // 2) For YouTube, try a SABR-resistant client tuple first.
+      // 2) Make sure ffmpeg is around for HQ YouTube (bv*+ba merging).
+      // No-op if already installed or the user passed audioOnly+mp3 (which
+      // still needs ffmpeg, but we attempt install lazily on 403 too).
+      let ffmpegLog;
+      const needsFfmpeg = !format || /\+/.test(format) || audioOnly;
+      let ffmpegPath = null;
+      if (needsFfmpeg) {
+        ffmpegPath = await _hasFfmpeg();
+        if (!ffmpegPath) {
+          const inst = await _installFfmpeg();
+          ffmpegLog = inst.log;
+          if (inst.ok) ffmpegPath = inst.ffmpeg;
+        }
+      }
+
+      // 3) For YouTube, try a SABR-resistant client tuple first.
       const isYouTube = /youtube\.com|youtu\.be/i.test(url);
       const clientPlan = isYouTube
         ? ['tv_simply,mweb,web_safari', 'default,tv_simply,mweb,web_safari,web_creator', null]
         : [null];
 
       let lastResult;
+      let attemptedSelfUpdate = false;
       for (const ytClients of clientPlan) {
         const cmd = buildCmd(binary, { ytClients });
         // eslint-disable-next-line no-await-in-loop
@@ -2237,38 +2341,73 @@
             savedPath,
             binary,
             ytClients: ytClients || 'default',
+            ffmpegPath,
             stdoutTail: lines.slice(-5).join('\n'),
-            installLog
+            installLog,
+            ffmpegLog
           };
         }
-        // 403 / SABR — try the next client tuple
-        if (!_is403Sabr(r.stdout) && !_is403Sabr(r.stderr)) break;
+        const sabr = _is403Sabr(r.stdout) || _is403Sabr(r.stderr);
+        // First SABR-shaped failure: try a self-update once. yt-dlp's
+        // SABR workarounds change weekly; an old install is the most
+        // common cause of "all clients 403."
+        if (sabr && !attemptedSelfUpdate && isYouTube) {
+          attemptedSelfUpdate = true;
+          // eslint-disable-next-line no-await-in-loop
+          await _ytDlpSelfUpdate(binary);
+          // Retry the same client tuple after update — don't advance.
+          // eslint-disable-next-line no-await-in-loop
+          const r2 = await _shell(cmd + ' 2>&1', timeoutMs);
+          lastResult = r2;
+          if (r2.exitCode === 0) {
+            const lines = (r2.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+            return {
+              ok: true,
+              savedPath: lines[lines.length - 1] || null,
+              binary,
+              ytClients: ytClients || 'default',
+              ffmpegPath,
+              stdoutTail: lines.slice(-5).join('\n'),
+              installLog,
+              ffmpegLog,
+              note: 'Succeeded after auto-update.'
+            };
+          }
+        }
+        // not SABR-shaped → no point trying alternate client tuples
+        if (!sabr) break;
       }
 
       // None of the attempts worked.
       const r = lastResult;
       const isSabr = _is403Sabr(r?.stdout) || _is403Sabr(r?.stderr);
-      if (r?.exitCode !== 0) {
-        return {
-          error: `yt-dlp exited ${r?.exitCode}`,
-          stdout: (r?.stdout || '').slice(-2000),
-          stderr: (r?.stderr || '').slice(-2000),
-          installLog,
-          binary,
-          hint: isSabr && isYouTube
-            ? [
-                'Hit a YouTube SABR / 403 block. Things to try:',
-                `1. Update yt-dlp to the latest:  ${binary === 'python3 -m yt_dlp' || binary === 'python -m yt_dlp' ? 'pip3 install --user --upgrade yt-dlp' : `${binary} -U`}`,
-                '2. Install ffmpeg (often required to merge HQ formats): `brew install ffmpeg` (macOS) / `sudo apt install ffmpeg` (Linux).',
-                '3. Pass `extraArgs: "--extractor-args youtube:formats=missing_pot --throttled-rate 100K"`.',
-                '4. As a last resort: install the bgutils PO-token plugin (https://github.com/Brainicism/bgutils-ytdlp-pot-provider) — yt-dlp picks it up automatically.'
-              ].join('\n')
+      const updateHint = binary === 'python3 -m yt_dlp' || binary === 'python -m yt_dlp'
+        ? 'pip3 install --user --upgrade yt-dlp'
+        : `${binary} -U`;
+      return {
+        error: `yt-dlp exited ${r?.exitCode}`,
+        stdout: (r?.stdout || '').slice(-2000),
+        stderr: (r?.stderr || '').slice(-2000),
+        installLog,
+        ffmpegLog,
+        binary,
+        ffmpegPath,
+        hint: isSabr && isYouTube
+          ? [
+              'Hit a YouTube SABR / 403 block. yt-dlp tried multiple player clients with an auto-update, all still 403\'d.',
+              `1. Try the latest yt-dlp release manually:  ${updateHint}`,
+              '2. Install the PO-token provider plugin (the real fix for SABR-only accounts):',
+              '     pipx install bgutils-ytdlp-pot-provider',
+              '   yt-dlp picks it up automatically; re-run /dl after that.',
+              '3. Last resort, fetch the lowest tier (often skips SABR):',
+              '     yt_dlp_run { url, format: "worst" }',
+              '4. Or generate the command and paste in a terminal where you have a better-pathed Python:',
+              '     yt_dlp_command { url }'
+            ].join('\n')
+          : isYouTube && !ffmpegPath
+            ? 'ffmpeg not installed and auto-install failed — yt-dlp can\'t merge separate video+audio streams. Try `brew install ffmpeg` (macOS) or `sudo apt install ffmpeg` (Linux).'
             : undefined
-        };
-      }
-      // The earlier loop already returned on success — falling through
-      // here means a non-zero exit that wasn't SABR-shaped.
-      return { error: 'yt-dlp failed', binary, installLog };
+      };
     }
   });
 
