@@ -207,6 +207,14 @@
     return { kind: 'send', text: expanded };
   }
 
+  async function clearChat() {
+    if (!state.activeSession) return;
+    state.activeSession.history = [];
+    state.activeSession.title = 'New chat';
+    await persistSession(state.activeSession);
+    renderSessionHistoryFresh();
+  }
+
   async function handleInlineSlash(action, args) {
     if (action === 'help') {
       const lines = Object.keys(BUILTIN_SLASH).sort().map(k => {
@@ -313,6 +321,14 @@
         apiKeys: state.settings.apiKeys,
         apiKey: ''
       });
+    }
+    // Migrate enabledGroups when a new group is added to defaults.
+    if (Array.isArray(state.settings.enabledGroups)) {
+      const missing = defaults.enabledGroups.filter(g => !state.settings.enabledGroups.includes(g));
+      if (missing.length) {
+        state.settings.enabledGroups = [...state.settings.enabledGroups, ...missing];
+        await chrome.storage.local.set({ enabledGroups: state.settings.enabledGroups });
+      }
     }
     return state.settings;
   }
@@ -488,6 +504,22 @@
     els.chat.appendChild(wrap);
     scrollToBottom();
     return { wrap, body, label };
+  }
+
+  // Inject a pin button into a message wrapper that was rendered live
+  // before we knew its index in history. Re-renderings (via
+  // renderSessionHistoryFresh) include the button by default.
+  function decoratePinButton(wrap, idx, pinned) {
+    if (!wrap) return;
+    const label = wrap.querySelector('.msg-role');
+    if (!label || label.querySelector('.pin-btn')) return;
+    const btn = document.createElement('button');
+    btn.className = 'pin-btn';
+    btn.dataset.idx = String(idx);
+    btn.title = pinned ? 'Unpin' : 'Pin this message (always included in context)';
+    btn.textContent = pinned ? '★' : '☆';
+    label.appendChild(btn);
+    if (pinned) wrap.classList.add('pinned');
   }
 
   // Append a compact "tokens · $cost" chip under the last assistant message.
@@ -827,7 +859,11 @@
     }
 
     session.history.push({ role: 'user', content: text });
-    if (isActive(session.id)) addMessage('user', text);
+    const userIdx = session.history.length - 1;
+    if (isActive(session.id)) {
+      const { wrap } = addMessage('user', text);
+      decoratePinButton(wrap, userIdx, false);
+    }
     await persistSession(session);
 
     const runtime = (state.runtimes[session.id] ??= {});
@@ -859,6 +895,12 @@
           if (isActive(session.id)) renderUsageChip(usage, msg._cost);
         }
         session.history.push(msg);
+        const asstIdx = session.history.length - 1;
+        // Decorate the live-streamed assistant message with a pin button.
+        if (isActive(session.id) && msg.content) {
+          const lastAsst = els.chat.querySelector('.msg.assistant:last-of-type');
+          decoratePinButton(lastAsst, asstIdx, false);
+        }
         await persistSession(session);
 
         if (!toolCalls.length) break;
@@ -1399,6 +1441,12 @@
       if (state.settings.apiKeys?.[cp.id]) {
         delete state.settings.apiKeys[cp.id];
       }
+      // If the deleted custom was the active provider, fall back to a built-in.
+      if (state.settings.provider === cp.id) {
+        state.settings.provider = 'openrouter';
+        reflectProvider('openrouter');
+        els.apiKey.value = state.settings.apiKeys?.openrouter || '';
+      }
       renderCustomProvidersList();
       renderProviderDropdown();
     });
@@ -1468,9 +1516,12 @@
       }).filter(p => p.baseUrl);
 
       // Per-custom-provider key into apiKeys; keep all built-in keys.
+      // Empty form value explicitly removes the stored key (so users can
+      // clear a custom-provider key for keyless local servers).
       const apiKeys = { ...(state.settings.apiKeys || {}) };
       for (const cp of customProviders) {
         if (cp._formKey) apiKeys[cp.id] = cp._formKey;
+        else delete apiKeys[cp.id];
         delete cp._formKey;
       }
       // The "primary" provider key (selected in the form) goes in too.
@@ -1489,7 +1540,6 @@
       })).filter(s => s.url);
 
       // Validation: built-ins need a key; customs may not.
-      const cfg = PROVIDERS[provider] || customProviders.find(p => p.id === provider);
       const isCustom = !PROVIDERS[provider];
       if (!isCustom && !apiKey) { els.saveStatus.textContent = 'API key required.'; els.saveStatus.className = 'status err'; return; }
       if (!model) { els.saveStatus.textContent = 'Select a model from the list.'; els.saveStatus.className = 'status err'; return; }
@@ -1544,6 +1594,14 @@
         sendMessage(q);
       } else if (msg?.type === 'ASK_PAGE') {
         els.input.focus();
+      }
+    });
+
+    // Keep state.memoryIndex in sync when memory tools mutate storage.
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      if (changes.kyoto_memory_index) {
+        state.memoryIndex = changes.kyoto_memory_index.newValue || [];
       }
     });
 
