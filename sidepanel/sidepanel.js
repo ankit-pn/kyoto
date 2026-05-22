@@ -174,10 +174,18 @@
   async function loadSettings() {
     const stored = await chrome.storage.local.get(Object.keys(defaults));
     state.settings = { ...defaults, ...stored };
-    // Migrate legacy single apiKey to per-provider map
-    if (state.settings.apiKey && !state.settings.apiKeys[state.settings.provider]) {
-      state.settings.apiKeys[state.settings.provider] = state.settings.apiKey;
-      await chrome.storage.local.set({ apiKeys: state.settings.apiKeys });
+    // One-time migrate: legacy single apiKey -> per-provider map, then
+    // clear the legacy field so it can't be used as a wrong-provider
+    // fallback later.
+    if (state.settings.apiKey) {
+      if (!state.settings.apiKeys[state.settings.provider]) {
+        state.settings.apiKeys[state.settings.provider] = state.settings.apiKey;
+      }
+      state.settings.apiKey = '';
+      await chrome.storage.local.set({
+        apiKeys: state.settings.apiKeys,
+        apiKey: ''
+      });
     }
     return state.settings;
   }
@@ -185,9 +193,8 @@
     Object.assign(state.settings, patch);
     await chrome.storage.local.set(patch);
   }
-  function currentApiKey() {
-    return state.settings.apiKeys?.[state.settings.provider] || state.settings.apiKey || '';
-  }
+  function keyFor(provider) { return state.settings.apiKeys?.[provider] || ''; }
+  function currentApiKey() { return keyFor(state.settings.provider); }
 
   // ── Session storage ──────────────────────────────────
   const SESS_KEY = (id) => `kyoto_session_${id}`;
@@ -586,19 +593,28 @@
   async function sendMessage(text) {
     if (!text.trim()) return;
     if (!state.activeSession) return;
-    if (!currentApiKey()) {
-      addMessage('assistant', 'No API key set. Open Settings and add your provider key.', { error: true });
-      openDrawer(); return;
-    }
-    if (!state.settings.model) {
-      addMessage('assistant', 'No model selected. Open Settings and pick a model.', { error: true });
-      openDrawer(); return;
-    }
 
     const session = state.activeSession;
-    // Pin session provider/model on first use
+    // Pin session provider/model on first use from current settings
     if (!session.provider) session.provider = state.settings.provider;
     if (!session.model) session.model = state.settings.model;
+
+    // Key + model checks are keyed off the session's pinned provider,
+    // not the settings provider — they can differ.
+    const sessCfg = PROVIDERS[session.provider];
+    if (!keyFor(session.provider)) {
+      addMessage(
+        'assistant',
+        `No API key for **${sessCfg?.label || session.provider}** (this session is pinned to ${sessCfg?.label || session.provider}). Open Settings, choose that provider, and add a key.`,
+        { error: true }
+      );
+      openDrawer();
+      return;
+    }
+    if (!session.model) {
+      addMessage('assistant', 'No model selected for this session. Pick one from the header (or Settings).', { error: true });
+      openDrawer(); return;
+    }
     // Bind to current tab if floating
     if (session.tabId == null) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -699,8 +715,14 @@
     const { provider, model } = session;
     const { temperature, maxTokens, toolsEnabled, enabledGroups } = state.settings;
     const cfg = PROVIDERS[provider];
-    const apiKey = state.settings.apiKeys?.[provider] || state.settings.apiKey;
-    if (!apiKey) throw new Error(`No API key for ${cfg.label}`);
+    if (!cfg) throw new Error(`Unknown provider on session: ${provider}`);
+    const apiKey = keyFor(provider);
+    if (!apiKey) {
+      throw new Error(
+        `No API key configured for ${cfg.label}. This session is pinned to ${cfg.label}. ` +
+        `Open Settings, select "${cfg.label}" as the Provider, and enter your key.`
+      );
+    }
 
     const messages = buildMessages(session);
     const baseTools = toolsEnabled ? window.KyotoTools.schemas(new Set(enabledGroups)) : [];
@@ -1095,8 +1117,10 @@
       if (!model) { els.saveStatus.textContent = 'Select a model from the list.'; els.saveStatus.className = 'status err'; return; }
 
       const apiKeys = { ...(state.settings.apiKeys || {}), [provider]: apiKey };
+      // Note: we no longer write the legacy single `apiKey` field — it
+      // was acting as a wrong-provider fallback. All keys live in `apiKeys`.
       await saveSettings({
-        provider, apiKey, model, systemPrompt, temperature, maxTokens,
+        provider, model, systemPrompt, temperature, maxTokens,
         toolsEnabled, enabledGroups,
         apiKeys, mcpServers
       });
