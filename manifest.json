@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kyoto — AI browser agent for developers",
-  "version": "14.5.0",
+  "version": "14.6.0",
   "description": "AI browser agent for devs. BYOK any OpenAI-compat provider (OpenRouter / DeepSeek / MiniMax / Ollama / Groq / ...). Per-tab sessions, slash commands, cross-session memory, MCP servers, ~35 dev tools.",
   "minimum_chrome_version": "116",
   "permissions": [

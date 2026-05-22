@@ -85,6 +85,8 @@
     stopBtn: $('stopBtn'),
     newChatBtn: $('newChatBtn'),
     sessionsBtn: $('sessionsBtn'),
+    captureBtn: $('captureBtn'),
+    captureCount: $('captureCount'),
     settingsBtn: $('settingsBtn'),
     closeDrawerBtn: $('closeDrawerBtn'),
     drawer: $('drawer'),
@@ -822,6 +824,292 @@
   // One-shot non-streaming completion using the active provider/model.
   // For internal helpers like skill extraction — no tools, no history,
   // returns plain text.
+  // ─────────────── User-action capture ───────────────────
+  // "Record button" pattern: while active, we inject a tiny event
+  // listener into the page. It captures clicks, fills, submits, key
+  // presses and navigations and forwards them here. On stop we ask
+  // for a skill name + description and distil the timeline into a
+  // markdown playbook via oneShotCompletion, then save to the hub.
+  state.capture = { active: false, events: [], tabId: null, startedAt: 0, startUrl: '' };
+
+  // The function below is serialised + injected into the page by
+  // chrome.scripting.executeScript. It must be self-contained: no
+  // closures, no helpers from this file. Returns { ok } so the
+  // injection promise can detect double-install.
+  function _kyotoCaptureContentScript() {
+    if (window.__kyotoCaptureInstalled) return { ok: true, already: true };
+    window.__kyotoCaptureInstalled = true;
+
+    const esc = (window.CSS && CSS.escape) || (s => String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&'));
+    const VISIBLE_TEXT_MAX = 80;
+    const VALUE_MAX = 200;
+
+    function buildSelector(el) {
+      if (!el || el.nodeType !== 1) return '';
+      if (el.id) return '#' + esc(el.id);
+      const dt = el.getAttribute && el.getAttribute('data-testid');
+      if (dt) return `[data-testid="${esc(dt)}"]`;
+      const aria = el.getAttribute && el.getAttribute('aria-label');
+      if (aria && aria.length < 40) return `[aria-label="${esc(aria)}"]`;
+      const name = el.getAttribute && el.getAttribute('name');
+      if (name) return `${el.tagName.toLowerCase()}[name="${esc(name)}"]`;
+      const parts = [];
+      let cur = el;
+      let depth = 0;
+      while (cur && cur.nodeType === 1 && cur !== document.body && depth < 6) {
+        let part = cur.tagName.toLowerCase();
+        if (cur.id) { parts.unshift('#' + esc(cur.id)); break; }
+        const sib = cur.parentNode ? Array.from(cur.parentNode.children).filter(s => s.tagName === cur.tagName) : [];
+        if (sib.length > 1) {
+          const idx = sib.indexOf(cur) + 1;
+          part += `:nth-of-type(${idx})`;
+        }
+        parts.unshift(part);
+        cur = cur.parentElement;
+        depth++;
+      }
+      return parts.join(' > ');
+    }
+
+    function visibleText(el) {
+      if (!el) return '';
+      const raw = (el.innerText || el.textContent || el.value || '').toString();
+      return raw.replace(/\s+/g, ' ').trim().slice(0, VISIBLE_TEXT_MAX);
+    }
+
+    function maskValue(el) {
+      if (!el) return '';
+      const t = (el.type || '').toLowerCase();
+      if (t === 'password') return '«password»';
+      if (t === 'email')    return '«email»';
+      if (t === 'tel')      return '«phone»';
+      const v = String(el.value ?? '');
+      return v.length > VALUE_MAX ? v.slice(0, VALUE_MAX) + '…' : v;
+    }
+
+    function fire(payload) {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'CAPTURE_EVENT',
+          payload: {
+            ...payload,
+            url: location.href,
+            title: document.title,
+            ts: Date.now(),
+          },
+        });
+      } catch (_e) {}
+    }
+
+    // De-duplicate change events from the same input within a short
+    // window — typing fires many.
+    const _lastFillKey = new Map();
+    function recordFill(el) {
+      const sel = buildSelector(el);
+      const key = sel + '|' + (el.type || '');
+      const now = Date.now();
+      const last = _lastFillKey.get(key) || 0;
+      _lastFillKey.set(key, now);
+      // If we just fired for this input < 800 ms ago, replace by waiting
+      // — naive but good enough. (We always send the latest value on
+      // blur/change so it's not lossy.)
+      if (now - last < 800) return;
+      fire({
+        event: 'fill',
+        selector: sel,
+        inputType: el.type || el.tagName.toLowerCase(),
+        value: maskValue(el),
+        label: visibleText(el.labels?.[0] || (el.closest ? el.closest('label') : null) || el),
+      });
+    }
+
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest ? e.target.closest('a,button,[role="button"],input[type="submit"],input[type="button"],label,summary,[onclick]') || e.target : e.target;
+      if (!el) return;
+      fire({
+        event: 'click',
+        selector: buildSelector(el),
+        text: visibleText(el),
+        tag: el.tagName,
+        href: el.href || null,
+      });
+    }, true);
+
+    document.addEventListener('change', (e) => {
+      const el = e.target;
+      if (!el || !['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return;
+      recordFill(el);
+    }, true);
+
+    // Also fire on blur for inputs so typing-then-tab gets recorded.
+    document.addEventListener('blur', (e) => {
+      const el = e.target;
+      if (!el || !['INPUT', 'TEXTAREA'].includes(el.tagName)) return;
+      if (el.value !== el.defaultValue) recordFill(el);
+    }, true);
+
+    document.addEventListener('submit', (e) => {
+      fire({ event: 'submit', selector: buildSelector(e.target), tag: 'FORM' });
+    }, true);
+
+    document.addEventListener('keydown', (e) => {
+      if (['Enter', 'Escape', 'Tab'].includes(e.key)) {
+        fire({
+          event: 'key',
+          key: e.key,
+          selector: buildSelector(e.target),
+          text: visibleText(e.target),
+        });
+      }
+    }, true);
+
+    fire({ event: 'nav', selector: 'window' });
+    return { ok: true };
+  }
+
+  function updateCaptureUI() {
+    if (!els.captureBtn) return;
+    if (state.capture.active) {
+      els.captureBtn.classList.add('recording');
+      els.captureBtn.title = `Recording on this tab — click to stop (${state.capture.events.length} events)`;
+      if (els.captureCount) els.captureCount.textContent = String(state.capture.events.length);
+    } else {
+      els.captureBtn.classList.remove('recording');
+      els.captureBtn.title = 'Record a skill — capture user actions on this page and save them as a reusable playbook';
+      if (els.captureCount) els.captureCount.textContent = '';
+    }
+  }
+
+  async function startCapture() {
+    if (state.capture.active) return;
+    const tab = await chrome.tabs.query({ active: true, currentWindow: true }).then(arr => arr[0]);
+    if (!tab || !tab.id) { addMessage('assistant', '_No active tab to capture._', { error: true }); return; }
+    if (/^chrome|^edge|^about|^view-source/.test(tab.url || '')) {
+      addMessage('assistant', `_Can\'t capture on \`${tab.url}\` (Chrome blocks content-script injection on internal pages)._`, { error: true });
+      return;
+    }
+    state.capture = {
+      active: true, events: [], tabId: tab.id,
+      startedAt: Date.now(), startUrl: tab.url || '',
+    };
+    updateCaptureUI();
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: false },
+        func: _kyotoCaptureContentScript,
+      });
+    } catch (e) {
+      state.capture.active = false;
+      updateCaptureUI();
+      addMessage('assistant', `_Capture failed: ${e.message}_`, { error: true });
+      return;
+    }
+    // Re-inject after navigation — content scripts die on full reload.
+    state.capture._navListener = (tabId, info) => {
+      if (!state.capture.active) return;
+      if (tabId !== state.capture.tabId || info.status !== 'complete') return;
+      chrome.scripting.executeScript({
+        target: { tabId, allFrames: false },
+        func: _kyotoCaptureContentScript,
+      }).catch(() => {});
+    };
+    chrome.tabs.onUpdated.addListener(state.capture._navListener);
+    addMessage('assistant', `_● Recording on \`${urlDomain(tab.url || '')}\`. Do the workflow you want to teach the agent. Click the red dot in the header when done._`);
+  }
+
+  async function stopCapture() {
+    if (!state.capture.active) return;
+    const events = state.capture.events.slice();
+    const startUrl = state.capture.startUrl;
+    if (state.capture._navListener) {
+      try { chrome.tabs.onUpdated.removeListener(state.capture._navListener); } catch {}
+    }
+    state.capture = { active: false, events: [], tabId: null, startedAt: 0, startUrl: '' };
+    updateCaptureUI();
+
+    if (!events.length) {
+      addMessage('assistant', '_Capture stopped — no events recorded. Try again on a page where you can interact._', { error: true });
+      return;
+    }
+
+    const skip = await window.KyotoAskUser({
+      question: `Captured ${events.length} actions on ${urlDomain(startUrl)}. What should this skill be called?`,
+      placeholder: 'e.g. "Reply to a Linear ticket as resolved"',
+      options: ['Discard recording'],
+    });
+    if (!skip || skip.answer === 'Discard recording') {
+      addMessage('assistant', '_Recording discarded._');
+      return;
+    }
+    const name = (skip.answer || '').trim();
+    if (!name) { addMessage('assistant', '_No name provided — recording discarded._', { error: true }); return; }
+    await saveCapturedSkill(name, events, startUrl);
+  }
+
+  async function saveCapturedSkill(name, events, startUrl) {
+    addMessage('assistant', `_💡 Distilling ${events.length} captured actions into a skill…_`);
+    const domain = urlDomain(startUrl) || 'global';
+
+    // Compact serialisation — keep it tight to save tokens.
+    const compact = events.slice(0, 200).map((e, i) => {
+      const ts = (e.ts || 0) - (events[0]?.ts || e.ts || 0);
+      const head = `[${(ts / 1000).toFixed(1)}s] ${e.event}`;
+      const parts = [head];
+      if (e.selector) parts.push(`sel=${e.selector}`);
+      if (e.text)     parts.push(`text="${e.text.replace(/"/g, '\\"')}"`);
+      if (e.value !== undefined && e.value !== '') parts.push(`value=${e.value}`);
+      if (e.key)      parts.push(`key=${e.key}`);
+      if (e.href)     parts.push(`href=${e.href}`);
+      if (e.url && (i === 0 || e.url !== events[i - 1]?.url)) parts.push(`url=${e.url}`);
+      return parts.join(' · ');
+    }).join('\n');
+
+    const prompt =
+      'You are an automation skill writer. The user demonstrated a workflow on a website by recording their actions. ' +
+      'Distil this into a clean, reproducible markdown playbook a future AI agent can follow with tools like page_click + page_fill + tab_navigate. ' +
+      'Output ONLY a JSON object: { "description": "<one-line summary, <200 chars>", "content": "<markdown playbook>", "tags": ["<kebab-case>", "..."] }. ' +
+      'In the content:\n' +
+      '- Start with ### Goal (one sentence) then ### Prereqs (auth state, page).\n' +
+      '- Then ### Steps — numbered list. Each step references the CSS selector AND the visible text/label so a future agent can find the element even if selectors drift. Quote concrete values that are NOT secrets; leave placeholders («password», «email», etc) as-is.\n' +
+      '- Then ### Gotchas — anything tricky (multi-step modals, async loads, retries).\n' +
+      '- Keep under ~400 words. Concise > comprehensive.\n\n' +
+      `Skill name: ${name}\n` +
+      `Starting URL: ${startUrl}\n` +
+      `Domain: ${domain}\n` +
+      `Captured events (${events.length}, abbreviated to 200):\n${compact}`;
+
+    let raw;
+    try { raw = await oneShotCompletion(prompt, { maxTokens: 1500, temperature: 0.2 }); }
+    catch (e) { addMessage('assistant', `_Distillation failed: ${e.message}_`, { error: true }); return; }
+    const m = raw && raw.match(/\{[\s\S]*\}/);
+    if (!m) { addMessage('assistant', '_Distillation returned no JSON — saving raw event log instead._'); }
+    let parsed = {};
+    try { parsed = m ? JSON.parse(m[0]) : {}; } catch (e) {
+      addMessage('assistant', `_Bad JSON from model — saving raw event log. (${e.message})_`, { error: true });
+    }
+    const content = parsed.content || ('### Captured event log\n\n```\n' + compact + '\n```');
+    const description = parsed.description || `Recorded workflow on ${domain}`;
+    const tags = Array.isArray(parsed.tags) ? parsed.tags : ['recorded'];
+
+    if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not available._', { error: true }); return; }
+    const cfg = await window.KyotoSkillHub.config();
+    if (!cfg.url || !cfg.key) {
+      addMessage('assistant', '_Skills hub not configured. Set URL + API key in Settings → Skills hub, then re-record._', { error: true });
+      return;
+    }
+    const save = await window.KyotoSkillHub.save({
+      domain, name, description, content,
+      tags: tags.slice(0, 6),
+      createdBy: 'user',
+    });
+    if (save?.error) { addMessage('assistant', `_Skill save failed: ${save.error}_`, { error: true }); return; }
+    addMessage('assistant', `_💡 Saved skill **${name}** under \`${domain}\` (\`${save.skill_id}\`). ${events.length} captured actions distilled into ${content.length} chars of playbook._`);
+    // Refresh the per-domain cache so the system prompt picks it up.
+    if (typeof refreshSkillsForDomain === 'function') {
+      try { _skillsDomainCache.delete(domain); await refreshSkillsForDomain(domain); } catch {}
+    }
+  }
+
   async function oneShotCompletion(prompt, { maxTokens = 800, temperature = 0.2 } = {}) {
     const { provider, model } = state.settings;
     const cfg = getProviderConfig(provider);
@@ -3443,8 +3731,24 @@
         sendMessage(q);
       } else if (msg?.type === 'ASK_PAGE') {
         els.input.focus();
+      } else if (msg?.type === 'CAPTURE_EVENT' && state.capture.active && msg.payload) {
+        // Coalesce: drop trailing duplicate fill events for the same selector.
+        const last = state.capture.events[state.capture.events.length - 1];
+        if (last && last.event === 'fill' && msg.payload.event === 'fill' && last.selector === msg.payload.selector) {
+          state.capture.events[state.capture.events.length - 1] = msg.payload;
+        } else {
+          state.capture.events.push(msg.payload);
+        }
+        updateCaptureUI();
       }
     });
+
+    if (els.captureBtn) {
+      els.captureBtn.addEventListener('click', async () => {
+        if (state.capture.active) await stopCapture();
+        else await startCapture();
+      });
+    }
 
     // Keep state.memoryIndex in sync when memory tools mutate storage.
     chrome.storage.onChanged.addListener((changes, area) => {
