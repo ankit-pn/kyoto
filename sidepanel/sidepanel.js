@@ -405,9 +405,8 @@
     els.keyHint.innerHTML = `Get a key at <a href="${cfg.keysUrl}" target="_blank" rel="noopener">${new URL(cfg.keysUrl).host}</a>.`;
   }
   function updateModelLine() {
-    const session = state.activeSession;
-    const provider = session?.provider || state.settings.provider;
-    const model = session?.model || state.settings.model;
+    const provider = state.settings.provider;
+    const model = state.settings.model;
     const cfg = PROVIDERS[provider] || { label: provider };
     if (!model) { els.modelLineText.textContent = cfg.label; return; }
     const short = model.includes('/') ? model.split('/').slice(1).join('/') : model;
@@ -595,24 +594,24 @@
     if (!state.activeSession) return;
 
     const session = state.activeSession;
-    // Pin session provider/model on first use from current settings
-    if (!session.provider) session.provider = state.settings.provider;
-    if (!session.model) session.model = state.settings.model;
+    // Provider and model are global (state.settings) — sessions only own
+    // their conversation history. Snapshot them onto the session for
+    // historical record-keeping, but don't let stale values block a send.
+    session.provider = state.settings.provider;
+    session.model = state.settings.model;
 
-    // Key + model checks are keyed off the session's pinned provider,
-    // not the settings provider — they can differ.
     const sessCfg = PROVIDERS[session.provider];
     if (!keyFor(session.provider)) {
       addMessage(
         'assistant',
-        `No API key for **${sessCfg?.label || session.provider}** (this session is pinned to ${sessCfg?.label || session.provider}). Open Settings, choose that provider, and add a key.`,
+        `No API key for **${sessCfg?.label || session.provider}**. Open Settings, choose that provider, and add a key.`,
         { error: true }
       );
       openDrawer();
       return;
     }
     if (!session.model) {
-      addMessage('assistant', 'No model selected for this session. Pick one from the header (or Settings).', { error: true });
+      addMessage('assistant', 'No model selected. Pick one from the header (or Settings).', { error: true });
       openDrawer(); return;
     }
     // Bind to current tab if floating
@@ -712,8 +711,7 @@
 
   // One streamed model call. Returns accumulated text + tool calls + reasoning.
   async function streamOnce(session, signal) {
-    const { provider, model } = session;
-    const { temperature, maxTokens, toolsEnabled, enabledGroups } = state.settings;
+    const { provider, model, temperature, maxTokens, toolsEnabled, enabledGroups } = state.settings;
     const cfg = PROVIDERS[provider];
     if (!cfg) throw new Error(`Unknown provider on session: ${provider}`);
     const apiKey = keyFor(provider);
@@ -976,10 +974,6 @@
       const item = e.target.closest('.popover-item');
       if (!item?.dataset.model) return;
       await saveSettings({ model: item.dataset.model });
-      if (state.activeSession) {
-        state.activeSession.model = item.dataset.model;
-        await persistSession(state.activeSession);
-      }
       updateModelLine();
       closeModelPopover();
     });
