@@ -1182,17 +1182,20 @@
       if (typeof value === 'string') {
         try { value = JSON.parse(value); } catch (e) { return { error: `Invalid JSON: ${e.message}` }; }
       }
+      // Sanitise so the generated TS is always syntactically valid even
+      // when the model passes "my api" or "user data" as rootName.
+      const safeName = capitalise(rootName) || 'Root';
       const shapes = new Map();
       if (Array.isArray(value)) {
-        collectShapes(value, rootName, shapes);
-        const root = `export type ${rootName}List = ${rootName}[];`;
-        return { types: [renderShapes(shapes), root].filter(Boolean).join('\n\n'), root: `${rootName}List` };
+        collectShapes(value, safeName, shapes);
+        const root = `export type ${safeName}List = ${safeName}[];`;
+        return { types: [renderShapes(shapes), root].filter(Boolean).join('\n\n'), root: `${safeName}List` };
       }
       if (value && typeof value === 'object') {
-        collectShapes(value, rootName, shapes);
-        return { types: renderShapes(shapes), root: rootName };
+        collectShapes(value, safeName, shapes);
+        return { types: renderShapes(shapes), root: safeName };
       }
-      return { types: `export type ${rootName} = ${inferTSType(value)};`, root: rootName };
+      return { types: `export type ${safeName} = ${inferTSType(value)};`, root: safeName };
     }
   });
 

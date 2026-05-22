@@ -163,7 +163,9 @@
     if (!state.settings?.redactSensitive) return str;
     return String(str)
       .replace(/(Bearer\s+)[A-Za-z0-9._\-+/=]{16,}/g, '$1<REDACTED>')
-      .replace(/eyJ[A-Za-z0-9._\-+/=]{30,}\.[A-Za-z0-9._\-+/=]{10,}/g, 'eyJ<JWT-REDACTED>')
+      // 3-segment dot-delimited base64 JWT. Dot is NOT in the char class
+      // so each segment is bounded cleanly (no greedy backtrack).
+      .replace(/eyJ[A-Za-z0-9_\-+/=]+\.[A-Za-z0-9_\-+/=]+\.[A-Za-z0-9_\-+/=]+/g, 'eyJ<JWT-REDACTED>')
       .replace(/sk-(?:proj-|or-v1-)?[A-Za-z0-9_\-]{20,}/g, (m) => m.slice(0, 8) + '<REDACTED>')
       .replace(/\b[a-f0-9]{40,}\b/g, (m) => `${m.slice(0, 6)}<HEX-${m.length}-REDACTED>`)
       .replace(/(("?(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret|password|x-api-key))"?\s*[:=]\s*"?)[A-Za-z0-9._\-+/]{8,}/gi, '$1<REDACTED>');
