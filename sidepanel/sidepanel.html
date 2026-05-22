@@ -16,6 +16,9 @@
       </button>
     </div>
     <div class="hdr-r">
+      <button class="ibtn" id="sessionsBtn" title="Sessions">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+      </button>
       <button class="ibtn" id="newChatBtn" title="New chat">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
       </button>
@@ -75,6 +78,16 @@
     </div>
   </div>
 
+  <!-- Sessions popover -->
+  <div class="popover hidden popover-right" id="sessionsPopover">
+    <div class="popover-hdr">
+      <input type="text" id="sessionsSearch" placeholder="Search sessions…" autocomplete="off" />
+    </div>
+    <div class="popover-body" id="sessionsList">
+      <p class="popover-empty">No sessions yet.</p>
+    </div>
+  </div>
+
   <!-- Settings drawer -->
   <div class="overlay hidden" id="overlay"></div>
   <aside class="drawer hidden" id="drawer">
@@ -91,6 +104,7 @@
         <select id="provider">
           <option value="openrouter">OpenRouter</option>
           <option value="deepseek">DeepSeek</option>
+          <option value="minimax">MiniMax</option>
         </select>
       </div>
 
@@ -156,6 +170,14 @@
         <p class="hint">Required for response-body capture, network modification, and full DevTools control. Chrome shows a yellow banner on the tab.</p>
       </div>
 
+      <h3 class="drawer-section">MCP servers</h3>
+      <div id="mcpServersList"></div>
+      <div class="mcp-actions">
+        <button class="btn-mini" id="mcpAddBtn" type="button">+ Add server</button>
+        <p class="status" id="mcpStatus"></p>
+      </div>
+      <p class="hint">Each enabled server's tools/list is loaded on Save, registered under group <code>mcp:&lt;name&gt;</code> and offered to the model. JSON-RPC over HTTP (POST).</p>
+
       <h3 class="drawer-section">Opencode offload</h3>
 
       <div class="field">
@@ -179,6 +201,7 @@
 
   <script src="../lib/marked.min.js"></script>
   <script src="tools.js"></script>
+  <script src="mcp.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>
