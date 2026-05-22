@@ -429,7 +429,9 @@
     '/pip':        'Install the package(s) "{{args}}" via micropip in the Python sandbox, then `python_exec` a small import test to confirm.',
     '/media':      'Use `media_detect` on this tab to list every media URL (video / audio / streams) found in the DOM and recent network traffic. Then suggest the best one to download.',
     '/download':   'Use `media_download` to grab this URL into the user\'s Downloads folder: {{args}}',
-    '/s3':         'Upload the URL/file described in "{{args}}" to S3 via `s3_upload` and return the resulting S3 URL.'
+    '/s3':         'Upload the URL/file described in "{{args}}" to S3 via `s3_upload` and return the resulting S3 URL.',
+    '/yt':         'Use `youtube_extract` on this tab. Show me the title + duration, list any progressive/adaptive formats with direct URLs (needsCipher:false), and the HLS / DASH manifest URLs if present. If everything needs ciphering, fall back to `yt_dlp_command`.',
+    '/ytdl':       'Use `yt_dlp_command` to generate a yt-dlp invocation for this tab. {{args}}'
   };
 
   function expandSlash(text) {

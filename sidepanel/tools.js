@@ -1468,6 +1468,119 @@
     }
   });
 
+  // ──────── YOUTUBE (best-effort, signature-cipher caveat) ────────
+  T({
+    name: 'youtube_extract',
+    group: 'media',
+    description:
+      'Extract YouTube streaming data (formats, URLs, metadata) from the active YouTube tab by reading ytInitialPlayerResponse. ' +
+      'For each format you get a `url` plus a `needsCipher` flag. ' +
+      'Formats with `needsCipher: false` and a non-null `url` work directly with `media_download`. ' +
+      'Formats with `needsCipher: true` are signature-encrypted and in-browser deciphering is brittle — use `yt_dlp_command` instead. ' +
+      'Live streams usually expose `hlsManifestUrl`; modern long-form video usually only has adaptive formats with ciphered URLs.',
+    parameters: OBJ({ tabId: NUM }),
+    handler: async ({ tabId } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      return scrip(tabId, () => {
+        let pr = window.ytInitialPlayerResponse
+          || (window.ytplayer && window.ytplayer.config && window.ytplayer.config.args && window.ytplayer.config.args.player_response);
+        if (typeof pr === 'string') {
+          try { pr = JSON.parse(pr); } catch { pr = null; }
+        }
+        if (!pr) {
+          // Last-resort scrape of the inline script
+          const html = document.documentElement.innerHTML;
+          const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;\s*(?:var |<\/script>)/);
+          if (m) { try { pr = JSON.parse(m[1]); } catch {} }
+        }
+        if (!pr) {
+          return { error: 'Not a YouTube watch / shorts / music page, or player response unavailable.' };
+        }
+        const sd = pr.streamingData || {};
+        const vd = pr.videoDetails || {};
+
+        const mapFmt = (f) => ({
+          itag: f.itag,
+          mimeType: f.mimeType,
+          quality: f.qualityLabel || f.audioQuality,
+          bitrate: f.bitrate,
+          fps: f.fps,
+          width: f.width,
+          height: f.height,
+          contentLength: f.contentLength,
+          durationMs: f.approxDurationMs,
+          url: f.url || null,
+          needsCipher: !f.url && !!f.signatureCipher
+        });
+        return {
+          videoId: vd.videoId,
+          title: vd.title,
+          author: vd.author,
+          channelId: vd.channelId,
+          durationSec: vd.lengthSeconds ? Number(vd.lengthSeconds) : null,
+          viewCount: vd.viewCount ? Number(vd.viewCount) : null,
+          isLive: !!vd.isLive || !!vd.isLiveContent,
+          thumbnails: (vd.thumbnail && vd.thumbnail.thumbnails) || [],
+          progressive: (sd.formats || []).map(mapFmt),
+          adaptive: (sd.adaptiveFormats || []).map(mapFmt),
+          hlsManifestUrl: sd.hlsManifestUrl || null,
+          dashManifestUrl: sd.dashManifestUrl || null
+        };
+      });
+    }
+  });
+
+  T({
+    name: 'yt_dlp_command',
+    group: 'media',
+    description:
+      'Generate a ready-to-paste yt-dlp command for the active YouTube tab. Honest fallback for when in-browser extraction fails (signature ciphers, throttled n-param, age-gated content). ' +
+      'Does NOT run anything — returns the command string for the user to paste into their terminal. ' +
+      'Defaults to best video+audio merge; pass audioOnly: true for an MP3 extraction; pass a custom `format` selector to override.',
+    parameters: OBJ({
+      tabId: NUM,
+      audioOnly: BOOL,
+      format: STR,
+      outputDir: STR,
+      useBrowserCookies: BOOL
+    }),
+    handler: async ({ tabId, audioOnly = false, format, outputDir, useBrowserCookies = true } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      const tab = await chrome.tabs.get(tabId);
+      const url = tab?.url || '';
+      if (!/youtube\.com|youtu\.be|youtube-nocookie\.com/.test(url)) {
+        return { error: `Active tab isn't a YouTube URL: ${url}` };
+      }
+      const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+      const parts = ['yt-dlp'];
+      if (useBrowserCookies) parts.push('--cookies-from-browser', 'chrome');
+      if (audioOnly) {
+        parts.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
+      } else if (format) {
+        parts.push('-f', sq(format));
+      } else {
+        // Modern default: best video + best audio merged into mp4 when possible
+        parts.push('-f', sq('bv*+ba/b'), '--merge-output-format', 'mp4');
+      }
+      const out = outputDir
+        ? `${outputDir.replace(/\/+$/, '')}/%(title)s.%(ext)s`
+        : '%(title)s.%(ext)s';
+      parts.push('-o', sq(out));
+      parts.push(sq(url));
+
+      return {
+        command: parts.join(' '),
+        url,
+        hints: [
+          'Install: `pipx install yt-dlp` (recommended) or `brew install yt-dlp` / `pip install yt-dlp`.',
+          useBrowserCookies ? '`--cookies-from-browser chrome` reuses your logged-in YouTube cookies (helps with age-gates / Premium / members-only). Close Chrome first if it complains about a locked cookie DB.' : null,
+          audioOnly ? 'Audio-only requires ffmpeg installed (used to remux to MP3).' : 'Default merge target is mp4; needs ffmpeg installed.',
+          'For a playlist URL, yt-dlp downloads every video; add `--playlist-items 1-10` to limit.'
+        ].filter(Boolean)
+      };
+    }
+  });
+
   // ──────── ARBITRARY URL FETCH + EXTRACT ────────
   T({
     name: 'web_fetch_extract',
