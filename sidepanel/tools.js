@@ -2336,10 +2336,22 @@
     return { ok: false, log };
   }
 
-  // Heuristic: did this look like YouTube's SABR-only 403?
+  // Heuristic: did this look like YouTube's SABR-only experiment biting?
+  // SABR doesn't always surface as "403". When cookies are passed and
+  // every audio/video stream is SABR-gated, yt-dlp instead reports:
+  //   "Requested format is not available"      (audioOnly path)
+  //   "Only images are available for download" (default format path)
+  //   "The page needs to be reloaded"          (cipher-gated)
+  //   "Please sign in to confirm…"             (consent gate)
+  // We treat all of these as SABR-shaped so the no-cookies retry fires.
   function _is403Sabr(text) {
     if (!text) return false;
-    return /HTTP Error 403/.test(text) || /SABR/i.test(text) || /Please sign in/i.test(text);
+    return /HTTP Error 403/.test(text)
+      || /SABR/i.test(text)
+      || /Please sign in/i.test(text)
+      || /needs to be reloaded/i.test(text)
+      || /Requested format is not available/i.test(text)
+      || /Only images are available for download/i.test(text);
   }
 
   // Check if ffmpeg is on the user's PATH. yt-dlp NEEDS ffmpeg to
@@ -2470,9 +2482,9 @@
       }
 
       const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-      const buildCmd = (binary, { ytClients } = {}) => {
+      const buildCmd = (binary, { ytClients, noCookies = false } = {}) => {
         const parts = [binary];
-        if (useBrowserCookies) parts.push('--cookies-from-browser', 'chrome');
+        if (useBrowserCookies && !noCookies) parts.push('--cookies-from-browser', 'chrome');
         if (audioOnly) {
           parts.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
         } else if (format) {
@@ -2480,7 +2492,13 @@
         } else {
           parts.push('-f', sq('bv*+ba/b'), '--merge-output-format', 'mp4');
         }
-        if (ytClients && /youtube\.com|youtu\.be/i.test(url)) {
+        // Only pin a client tuple when cookies are in play. Empirically
+        // (the saved `youtube-sabr-bypass` skill confirmed it): dropping
+        // cookies AND letting yt-dlp auto-pick its default client makes
+        // it select `android_vr`, which serves plain non-SABR URLs and
+        // doesn't 403. Pinning a different client tuple cookieless would
+        // skip android_vr entirely and re-introduce the failure.
+        if (!noCookies && ytClients && /youtube\.com|youtu\.be/i.test(url)) {
           // Multi-client fallback works around YouTube's SABR-only experiment
           // (see yt-dlp issue #12482). tv_simply / web_safari / mweb still
           // serve plain https segment URLs at the time of writing.
@@ -2543,6 +2561,7 @@
 
       let lastResult;
       let attemptedSelfUpdate = false;
+      let attemptedNoCookies = false;
       let attemptedPotProvider = false;
       let potProviderLog;
       for (const ytClients of clientPlan) {
@@ -2565,7 +2584,7 @@
             potProviderLog
           };
         }
-        const sabr = _is403Sabr(r.stdout) || _is403Sabr(r.stderr);
+        let sabr = _is403Sabr(r.stdout) || _is403Sabr(r.stderr);
         // First SABR-shaped failure: try a self-update once. yt-dlp's
         // SABR workarounds change weekly; an old install is the most
         // common cause of "all clients 403."
@@ -2591,6 +2610,38 @@
               note: 'Succeeded after auto-update.'
             };
           }
+          sabr = _is403Sabr(r2.stdout) || _is403Sabr(r2.stderr);
+        }
+
+        // BAKED-IN SKILL: drop cookies + client args. Real failing
+        // sessions proved that with cookies, every SABR-resistant
+        // client still 403'd / "format not available"-d; without
+        // cookies yt-dlp auto-picks `android_vr` which serves plain
+        // non-SABR URLs. Single-shot; only when the caller actually
+        // asked for browser cookies. Surfaces as "Requested format is
+        // not available" for audioOnly calls, which `_is403Sabr` now
+        // detects.
+        if (sabr && useBrowserCookies && !attemptedNoCookies && isYouTube) {
+          attemptedNoCookies = true;
+          const noCookieCmd = buildCmd(binary, { noCookies: true });
+          // eslint-disable-next-line no-await-in-loop
+          const rnc = await _shell(noCookieCmd + ' 2>&1', timeoutMs);
+          lastResult = rnc;
+          if (rnc.exitCode === 0) {
+            const lines = (rnc.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+            return {
+              ok: true,
+              savedPath: lines[lines.length - 1] || null,
+              binary,
+              ytClients: 'android_vr (auto, no cookies)',
+              ffmpegPath,
+              stdoutTail: lines.slice(-5).join('\n'),
+              installLog,
+              ffmpegLog,
+              note: 'Succeeded after dropping --cookies-from-browser — SABR was cookie-induced.'
+            };
+          }
+          sabr = _is403Sabr(rnc.stdout) || _is403Sabr(rnc.stderr);
         }
         // Persistent SABR after self-update → real fix is the PO-token
         // provider plugin. Try once to install it (needs Node.js) and
