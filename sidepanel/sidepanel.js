@@ -96,6 +96,8 @@
     useContext: $('useContext'),
     visionBtn: $('visionBtn'),
     toolsEnabled: $('toolsEnabled'),
+    maxAgentSteps: $('maxAgentSteps'),
+    maxAutoContinues: $('maxAutoContinues'),
     toolGroups: $('toolGroups'),
     redactSensitive: $('redactSensitive'),
     auditEnabled: $('auditEnabled'),
@@ -515,6 +517,10 @@
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
+    // Agentic loop limits. opencode's pattern: high default, exposed
+    // as config. Too low and complex multi-tool tasks die half-way.
+    maxAgentSteps: 50,
+    maxAutoContinues: 2,
     theme: 'system',           // 'system' | 'light' | 'dark'
     density: 'comfortable',    // 'comfortable' | 'compact'
     hideReasoning: false,
@@ -1309,9 +1315,14 @@
       els.stopBtn.classList.remove('hidden');
     }
     try {
-      const maxSteps = 12;
+      const maxSteps = Math.max(1, Math.min(200, Number(state.settings.maxAgentSteps) || 50));
+      const maxAutoContinues = Math.max(0, Math.min(10, Number(state.settings.maxAutoContinues) || 2));
+      let autoContinues = 0;
+      let stoppedReason = 'maxSteps'; // overwritten if we break naturally
+
+      stepLoop:
       for (let step = 0; step < maxSteps; step++) {
-        const { text: at, toolCalls, reasoning, reasoningField, usage } = await streamOnce(session, runtime.abort.signal);
+        const { text: at, toolCalls, reasoning, reasoningField, usage, finishReason } = await streamOnce(session, runtime.abort.signal);
 
         const msg = { role: 'assistant', content: at || '' };
         if (reasoning && reasoningField) msg[reasoningField] = reasoning;
@@ -1328,6 +1339,7 @@
           if (cost != null) msg._cost = cost;
           if (isActive(session.id)) renderUsageChip(usage, msg._cost);
         }
+        if (finishReason) msg._finishReason = finishReason;
         session.history.push(msg);
         const asstIdx = session.history.length - 1;
         // Decorate the live-streamed assistant message with a pin button.
@@ -1337,7 +1349,22 @@
         }
         await persistSession(session);
 
-        if (!toolCalls.length) break;
+        // Branch on finish_reason + tool_calls:
+        //   tool_calls (or non-empty toolCalls list) -> run tools, loop again
+        //   length + no tools -> auto-continue (capped)
+        //   stop / content_filter / other -> done
+        if (!toolCalls.length) {
+          if (finishReason === 'length' && autoContinues < maxAutoContinues) {
+            autoContinues++;
+            const note = `_[auto-continue ${autoContinues}/${maxAutoContinues} — model output was cut off by max_tokens]_`;
+            session.history.push({ role: 'user', content: 'Continue from where you left off. Do not repeat content already shown.' });
+            if (isActive(session.id)) addMessage('assistant', note);
+            await persistSession(session);
+            continue stepLoop;
+          }
+          stoppedReason = finishReason || 'done';
+          break stepLoop;
+        }
 
         for (const tc of msg.tool_calls) {
           let args; try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = { _raw: tc.function.arguments }; }
@@ -1376,6 +1403,16 @@
           });
           await persistSession(session);
         }
+      }
+
+      // If we exited via the for-loop condition (not via break), we ran
+      // out of steps with the agent still wanting to act. Make that
+      // visible so the user doesn't think the agent "just stopped".
+      if (stoppedReason === 'maxSteps') {
+        const note = `_Reached the max agent-steps cap (${maxSteps}). The agent still wanted to continue. Raise the limit in **Settings → Max agent steps per turn**, or just say "continue" to keep going._`;
+        session.history.push({ role: 'assistant', content: note, _capHit: true });
+        if (isActive(session.id)) addMessage('assistant', note, { error: true });
+        await persistSession(session);
       }
     } catch (e) {
       if (e.name === 'AbortError') {
@@ -1498,6 +1535,7 @@
     let reasoningAcc = '';
     let reasoningField = null;
     let usage = null;
+    let finishReason = null;
     const toolBuf = [];
     let textTarget = null;
     let reasoningTarget = null;
@@ -1520,6 +1558,7 @@
         if (parsed.usage) usage = parsed.usage; // usage chunk (terminal in OAI-compat streams)
         const choice = parsed.choices?.[0];
         if (!choice) continue;
+        if (choice.finish_reason) finishReason = choice.finish_reason; // stop | length | tool_calls | content_filter
         const delta = choice.delta || {};
 
         const rChunk = delta.reasoning_content ?? delta.reasoning ?? delta.thinking;
@@ -1586,7 +1625,8 @@
       toolCalls: toolBuf.filter(Boolean),
       reasoning: reasoningAcc,
       reasoningField,
-      usage
+      usage,
+      finishReason
     };
   }
 
@@ -1654,6 +1694,8 @@
     els.temperature.value = state.settings.temperature;
     els.maxTokens.value = state.settings.maxTokens;
     els.toolsEnabled.checked = !!state.settings.toolsEnabled;
+    if (els.maxAgentSteps) els.maxAgentSteps.value = state.settings.maxAgentSteps ?? 50;
+    if (els.maxAutoContinues) els.maxAutoContinues.value = state.settings.maxAutoContinues ?? 2;
     els.redactSensitive.checked = state.settings.redactSensitive !== false;
     els.auditEnabled.checked = state.settings.auditEnabled !== false;
     if (els.auditStatus) els.auditStatus.textContent = `${(state.auditLog || []).length} entries`;
@@ -2091,6 +2133,8 @@
       const temperature = Math.max(0, Math.min(2, Number(els.temperature.value) || 0.7));
       const maxTokens = Math.max(64, Math.min(131072, Number(els.maxTokens.value) || 8192));
       const toolsEnabled = !!els.toolsEnabled.checked;
+      const maxAgentSteps = Math.max(1, Math.min(200, Number(els.maxAgentSteps?.value) || 50));
+      const maxAutoContinues = Math.max(0, Math.min(10, Number(els.maxAutoContinues?.value) || 2));
       const enabledGroups = Array.from(els.toolGroups.querySelectorAll('input[type=checkbox]'))
         .filter(c => c.checked).map(c => c.dataset.group);
 
@@ -2150,7 +2194,7 @@
 
       await saveSettings({
         provider, model, systemPrompt, temperature, maxTokens,
-        toolsEnabled, enabledGroups,
+        toolsEnabled, maxAgentSteps, maxAutoContinues, enabledGroups,
         apiKeys, mcpServers, customProviders, customSlashCommands, customTools,
         redactSensitive, auditEnabled, hideReasoning, theme, density
       });

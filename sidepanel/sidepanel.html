@@ -191,6 +191,18 @@
         <p class="hint">When on, models that support tools can drive the browser via Kyoto's tool registry.</p>
       </div>
 
+      <div class="field-row">
+        <div class="field">
+          <label>Max agent steps per turn</label>
+          <input type="number" id="maxAgentSteps" min="1" max="200" step="1" value="50" />
+        </div>
+        <div class="field">
+          <label>Max auto-continues on cutoff</label>
+          <input type="number" id="maxAutoContinues" min="0" max="10" step="1" value="2" />
+        </div>
+      </div>
+      <p class="hint">Max steps = how many tool-call rounds the agent can do in a single send (default 50; opencode uses ~50). Auto-continues = how many times Kyoto will silently say "continue" when the model hits its output-token cap mid-thought.</p>
+
       <div class="field">
         <label>Tool groups</label>
         <div id="toolGroups" class="grp-list"></div>
