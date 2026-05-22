@@ -1,12 +1,22 @@
 {
   "manifest_version": 3,
-  "name": "PageChat AI - Chat with Any Webpage",
-  "version": "2.0.0",
-  "description": "Chat with any webpage using AI. Opens a sidebar directly on the page with well-formatted responses.",
-  "permissions": ["activeTab", "storage", "scripting"],
-  "host_permissions": ["https://openrouter.ai/*"],
+  "name": "PageChat — OpenRouter & DeepSeek",
+  "version": "3.0.0",
+  "description": "Ask any AI model about the current page. Bring your own OpenRouter or DeepSeek key — pick from hundreds of models.",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "activeTab",
+    "scripting",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "https://openrouter.ai/*",
+    "https://api.deepseek.com/*"
+  ],
   "action": {
-    "default_title": "Toggle PageChat AI Sidebar",
+    "default_title": "Open PageChat",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
@@ -14,21 +24,20 @@
     }
   },
   "background": {
-    "service_worker": "background/background.js"
+    "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content/content.js", "content/sidebar.js"],
-      "run_at": "document_end"
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      },
+      "description": "Open PageChat side panel"
     }
-  ],
-  "web_accessible_resources": [
-    {
-      "matches": ["<all_urls>"],
-      "resources": ["lib/marked.min.js"]
-    }
-  ],
+  },
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
