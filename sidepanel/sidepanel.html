@@ -246,6 +246,14 @@
         <p class="hint">Granted at install time. Required for response-body capture, network modification, and full DevTools control via <code>debugger_attach</code> / <code>debugger_send</code>. Chrome shows a yellow banner on the tab while attached. If you see "Not granted", reload the extension on <code>chrome://extensions</code> (the ⤴ button takes you there).</p>
       </div>
 
+      <h3 class="drawer-section">Workspace (virtual files)</h3>
+      <p class="hint">A scratch filesystem the agent uses to store scraped data outside the conversation context (lives in IndexedDB — GB-scale quota, survives reloads). Tools: <code>fs_write / fs_read / fs_append / fs_list / fs_zip</code>. Slash: <code>/ls</code>, <code>/zip</code>, <code>/clearfs</code>.</p>
+      <div class="mcp-actions">
+        <span id="workspaceSummary" class="status">—</span>
+        <button class="btn-mini" id="workspaceZipBtn" type="button">Download ZIP</button>
+        <button class="btn-mini" id="workspaceClearBtn" type="button">Clear</button>
+      </div>
+
       <h3 class="drawer-section">Shell bridge (native messaging)</h3>
       <p class="hint">The <code>shell_exec</code> tool lets the agent run real shell commands on your machine via a small Python host installed under your home directory. Once installed, no sudo or open port is involved — Chrome speaks to it over stdio.</p>
       <div class="field">
@@ -354,6 +362,8 @@
   <iframe id="pythonSandbox" src="../sandbox/python.html" style="display:none" title="python sandbox"></iframe>
 
   <script src="../lib/marked.min.js"></script>
+  <script src="../lib/fflate.min.js"></script>
+  <script src="vfs.js"></script>
   <script src="models-registry.js"></script>
   <script src="tools.js"></script>
   <script src="mcp.js"></script>

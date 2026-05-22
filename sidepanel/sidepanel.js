@@ -121,6 +121,9 @@
     s3Endpoint: $('s3Endpoint'),
     s3TestBtn: $('s3TestBtn'),
     s3Status: $('s3Status'),
+    workspaceSummary: $('workspaceSummary'),
+    workspaceZipBtn: $('workspaceZipBtn'),
+    workspaceClearBtn: $('workspaceClearBtn'),
     shellExtId: $('shellExtId'),
     shellCopyIdBtn: $('shellCopyIdBtn'),
     shellInstallCmd: $('shellInstallCmd'),
@@ -454,7 +457,10 @@
     '/sh':         'Run this shell command on the user\'s machine via `shell_exec`: {{args}}',
     '/shell':      'Run this shell command on the user\'s machine via `shell_exec`: {{args}}',
     '/goal':       '[CMD]:goal',
-    '/loop':       '[CMD]:loop'
+    '/loop':       '[CMD]:loop',
+    '/ls':         'Use `fs_list` to show every file in the workspace. Format as a small tree.',
+    '/zip':        'Use `fs_zip` to package the entire workspace into a ZIP and download it.',
+    '/clearfs':    '[CMD]:clearfs'
   };
 
   // ── Goal + loop primitives (inspired by Claude Code) ─────────
@@ -530,6 +536,25 @@
   function isGoalDoneText(text) {
     if (!text) return false;
     return /\[\s*goal[_\s-]?done\s*\]|\[\s*goal[_\s-]?complete\s*\]|\[\s*task[_\s-]?complete\s*\]/i.test(text);
+  }
+
+  function fmtBytes(n) {
+    if (!n) return '0 B';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+  async function updateWorkspaceUI() {
+    if (!els.workspaceSummary || !window.KyotoVFS) return;
+    try {
+      const t = await window.KyotoVFS.total();
+      els.workspaceSummary.textContent = t.fileCount
+        ? `${t.fileCount} file${t.fileCount === 1 ? '' : 's'} · ${fmtBytes(t.totalBytes)}`
+        : 'empty';
+    } catch (e) {
+      els.workspaceSummary.textContent = `error: ${e.message}`;
+    }
   }
 
   function updateGoalUI() {
@@ -611,6 +636,17 @@
     }
     if (action === 'open_sessions') { toggleSessionsPopover(); return; }
     if (action === 'open_settings') { openDrawer(); return; }
+
+    if (action === 'clearfs') {
+      if (!window.KyotoVFS) { addMessage('assistant', '_VFS not loaded._', { error: true }); return; }
+      const t = await window.KyotoVFS.total();
+      if (!t.fileCount) { addMessage('assistant', '_Workspace is already empty._'); return; }
+      if (!confirm(`Delete all ${t.fileCount} workspace files (${(t.totalBytes / 1024).toFixed(1)} KB)? This can't be undone.`)) return;
+      await window.KyotoVFS.clear();
+      addMessage('assistant', `_Cleared workspace (${t.fileCount} files, ${(t.totalBytes / 1024).toFixed(1)} KB freed)._`);
+      updateWorkspaceUI();
+      return;
+    }
 
     if (action === 'goal') {
       if (!state.activeSession) return;
@@ -815,7 +851,7 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell'],
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs'],
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
@@ -2122,6 +2158,7 @@
     if (els.shellInstallCmd) els.shellInstallCmd.value = `curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${extId}`;
     if (els.shellInstallCmdWin) els.shellInstallCmdWin.value = `$env:KYOTO_EXT_ID="${extId}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex`;
     if (els.shellStatus) els.shellStatus.textContent = '';
+    updateWorkspaceUI();
     renderToolGroupCheckboxes();
     renderProviderDropdown();
     renderCustomProvidersList();
@@ -2369,6 +2406,23 @@
     });
 
     if (els.testConnBtn) els.testConnBtn.addEventListener('click', testConnection);
+
+    if (els.workspaceZipBtn) els.workspaceZipBtn.addEventListener('click', async () => {
+      try {
+        const r = await window.KyotoTools.call('fs_zip', {});
+        if (r?.error) throw new Error(r.error);
+        els.workspaceSummary.textContent = `Downloaded ${r.fileCount} files · ${fmtBytes(r.bytes)}`;
+      } catch (e) {
+        els.workspaceSummary.textContent = `Error: ${e.message}`;
+      }
+    });
+    if (els.workspaceClearBtn) els.workspaceClearBtn.addEventListener('click', async () => {
+      const t = await window.KyotoVFS.total();
+      if (!t.fileCount) { els.workspaceSummary.textContent = 'empty'; return; }
+      if (!confirm(`Delete all ${t.fileCount} workspace files (${fmtBytes(t.totalBytes)})? This can't be undone.`)) return;
+      await window.KyotoVFS.clear();
+      updateWorkspaceUI();
+    });
 
     if (els.shellCopyIdBtn) els.shellCopyIdBtn.addEventListener('click', () => {
       navigator.clipboard.writeText(chrome.runtime.id).then(() => {
@@ -2916,6 +2970,7 @@
     wireEvents();
     renderSessionHistoryFresh();
     updateGoalUI();
+    updateWorkspaceUI();
     refreshPageContext();
 
     // Init MCP servers in background

@@ -110,6 +110,7 @@ Toggle groups on/off in **Settings → Tool groups**.
 | **minimax** | `minimax_web_search` (Google-grade web), `minimax_understand_image`, `minimax_describe_tab` (capture + analyze in one call) |
 | **media** | `media_detect`, `media_download` (local or S3, for direct file URLs), `s3_upload`, **`yt_dlp_run`** (full-quality download via shell bridge), `youtube_extract`, `youtube_capture_streams`, `yt_dlp_command` |
 | **shell** | `shell_exec` (run a command via the native messaging host), `shell_ping` |
+| **fs** | Virtual workspace (IndexedDB, GB-scale): `fs_write`, `fs_append`, `fs_read` (offset/limit chunks), `fs_list`, `fs_stat`, `fs_delete`, `fs_move`, `fs_total`, `fs_zip` (download as ZIP), `fs_clear` |
 
 Plus any MCP-server tools (auto-namespaced `mcp__<server>__<tool>`) and custom JS tools you define.
 
