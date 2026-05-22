@@ -19,6 +19,9 @@
       <button class="ibtn" id="sessionsBtn" title="Sessions">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
       </button>
+      <button class="ibtn" id="popOutBtn" title="Open in a standalone window">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      </button>
       <button class="ibtn" id="newChatBtn" title="New chat">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
       </button>
@@ -149,6 +152,38 @@
       <p class="hint" id="maxTokensHint">Max output tokens caps the model's <em>response</em> length, not the input. Pulled from <a href="https://models.dev" target="_blank" rel="noopener">models.dev</a>; clamped automatically at request time.</p>
 
       <div class="field">
+        <button class="btn-mini" id="testConnBtn" type="button">Test connection</button>
+        <span class="status" id="testConnStatus"></span>
+        <p class="hint">Sends a 1-token "ping" through the configured provider/model/key.</p>
+      </div>
+
+      <h3 class="drawer-section">Appearance</h3>
+      <div class="field-row">
+        <div class="field">
+          <label>Theme</label>
+          <select id="themeSelect">
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Density</label>
+          <select id="densitySelect">
+            <option value="comfortable">Comfortable</option>
+            <option value="compact">Compact</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label class="check-row">
+          <input type="checkbox" id="hideReasoning" />
+          <span>Hide reasoning ("thinking") cards by default</span>
+        </label>
+        <p class="hint">When on, the reasoning channel from DeepSeek thinking-mode / OpenRouter reasoning providers is still captured (and echoed back as the API requires) but no card is rendered.</p>
+      </div>
+
+      <div class="field">
         <label class="check-row">
           <input type="checkbox" id="toolsEnabled" checked />
           <span>Enable tool calling (agent mode)</span>
@@ -214,6 +249,15 @@
         <p class="status" id="mcpStatus"></p>
       </div>
       <p class="hint">Each enabled server's tools/list is loaded on Save, registered under group <code>mcp:&lt;name&gt;</code> and offered to the model. JSON-RPC over HTTP (POST).</p>
+
+      <h3 class="drawer-section">Backup</h3>
+      <div class="mcp-actions">
+        <button class="btn-mini" id="exportSettingsBtn" type="button">Export settings</button>
+        <button class="btn-mini" id="importSettingsBtn" type="button">Import settings</button>
+        <input type="file" id="importSettingsInput" accept="application/json" style="display:none" />
+        <p class="status" id="backupStatus"></p>
+      </div>
+      <p class="hint">Exports a JSON file with provider keys, custom providers, MCP servers, slash commands, prefs. Import merges keys back. Sessions and memories are NOT included.</p>
 
       <button class="btn-primary" id="saveBtn">Save</button>
       <p class="status" id="saveStatus"></p>

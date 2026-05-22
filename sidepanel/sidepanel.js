@@ -99,6 +99,16 @@
     toolGroups: $('toolGroups'),
     redactSensitive: $('redactSensitive'),
     auditEnabled: $('auditEnabled'),
+    themeSelect: $('themeSelect'),
+    densitySelect: $('densitySelect'),
+    hideReasoning: $('hideReasoning'),
+    testConnBtn: $('testConnBtn'),
+    testConnStatus: $('testConnStatus'),
+    popOutBtn: $('popOutBtn'),
+    exportSettingsBtn: $('exportSettingsBtn'),
+    importSettingsBtn: $('importSettingsBtn'),
+    importSettingsInput: $('importSettingsInput'),
+    backupStatus: $('backupStatus'),
     downloadAuditBtn: $('downloadAuditBtn'),
     clearAuditBtn: $('clearAuditBtn'),
     auditStatus: $('auditStatus'),
@@ -169,6 +179,176 @@
       .replace(/sk-(?:proj-|or-v1-)?[A-Za-z0-9_\-]{20,}/g, (m) => m.slice(0, 8) + '<REDACTED>')
       .replace(/\b[a-f0-9]{40,}\b/g, (m) => `${m.slice(0, 6)}<HEX-${m.length}-REDACTED>`)
       .replace(/(("?(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret|password|x-api-key))"?\s*[:=]\s*"?)[A-Za-z0-9._\-+/]{8,}/gi, '$1<REDACTED>');
+  }
+
+  function applyAppearance() {
+    const theme = state.settings?.theme || 'system';
+    document.body.classList.remove('theme-light', 'theme-dark');
+    if (theme === 'light') document.body.classList.add('theme-light');
+    else if (theme === 'dark') document.body.classList.add('theme-dark');
+    document.body.classList.toggle('density-compact', state.settings?.density === 'compact');
+  }
+
+  function downloadJson(data, filename) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    chrome.downloads.download({ url, filename, saveAs: true })
+      .catch(() => chrome.tabs.create({ url }));
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+  function downloadText(text, filename, mime = 'text/markdown') {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    chrome.downloads.download({ url, filename, saveAs: true })
+      .catch(() => chrome.tabs.create({ url }));
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  function sessionToMarkdown(session) {
+    const lines = [];
+    lines.push(`# ${session.title || 'Untitled session'}`);
+    lines.push('');
+    lines.push(`- **Session id:** \`${session.id}\``);
+    lines.push(`- **Created:** ${new Date(session.createdAt).toISOString()}`);
+    if (session.url) lines.push(`- **URL:** ${session.url}`);
+    if (session.provider) lines.push(`- **Provider/model:** ${session.provider} · ${session.model || ''}`);
+    lines.push('');
+    for (const m of session.history || []) {
+      if (m.role === 'user') {
+        lines.push('---');
+        lines.push(`### 🧑 User${m._pinned ? ' ★' : ''}`);
+        lines.push('');
+        if (typeof m.content === 'string') lines.push(m.content);
+        else if (Array.isArray(m.content)) {
+          for (const part of m.content) {
+            if (part.type === 'text') lines.push(part.text);
+            else if (part.type === 'image_url') lines.push(`\n![image](${part.image_url?.url || ''})\n`);
+          }
+        }
+        lines.push('');
+      } else if (m.role === 'assistant') {
+        lines.push(`### 🤖 Assistant${m._pinned ? ' ★' : ''}${m._error ? ' (error)' : ''}`);
+        if (m._usage) lines.push(`*${m._usage.prompt_tokens || 0} in · ${m._usage.completion_tokens || 0} out tokens*`);
+        lines.push('');
+        if (m.content) lines.push(typeof m.content === 'string' ? m.content : contentText(m.content));
+        if (m.tool_calls?.length) {
+          for (const tc of m.tool_calls) {
+            lines.push('');
+            lines.push(`> ⚙ tool call: \`${tc.function.name}\``);
+            lines.push('> ```json');
+            try { JSON.parse(tc.function.arguments || '{}'); lines.push('> ' + (tc.function.arguments || '{}').split('\n').join('\n> ')); }
+            catch { lines.push('> ' + tc.function.arguments); }
+            lines.push('> ```');
+          }
+        }
+        lines.push('');
+      } else if (m.role === 'tool') {
+        lines.push(`<details><summary>tool result: <code>${m.name || ''}</code></summary>`);
+        lines.push('');
+        lines.push('```json');
+        lines.push((m.content || '').slice(0, 8000));
+        lines.push('```');
+        lines.push('</details>');
+        lines.push('');
+      }
+    }
+    return lines.join('\n');
+  }
+
+  async function exportSessionMarkdown(sessionId) {
+    const session = sessionId === state.activeSession?.id
+      ? state.activeSession
+      : await loadFullSession(sessionId);
+    if (!session) return;
+    const md = sessionToMarkdown(session);
+    const safeTitle = (session.title || 'session').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60);
+    downloadText(md, `kyoto-${safeTitle}-${session.id.slice(-8)}.md`);
+  }
+
+  async function forkSession(sessionId) {
+    const orig = await loadFullSession(sessionId);
+    if (!orig) return;
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const copy = createSessionObject(tab);
+    copy.title = (orig.title || 'session') + ' (fork)';
+    // Deep clone history so subsequent edits don't leak back into the original.
+    copy.history = JSON.parse(JSON.stringify(orig.history || []));
+    await persistSession(copy);
+    state.tabToSession[copy.tabId] = copy.id;
+    return copy;
+  }
+
+  async function testConnection() {
+    if (!els.testConnStatus) return;
+    const provider = els.provider.value;
+    const apiKey = els.apiKey.value.trim();
+    const model = els.model.value;
+    const cfg = getProviderConfig(provider);
+    if (!cfg) { els.testConnStatus.textContent = 'Unknown provider'; els.testConnStatus.className = 'status err'; return; }
+    if (!model) { els.testConnStatus.textContent = 'Pick a model first'; els.testConnStatus.className = 'status err'; return; }
+    if (!apiKey && !cfg.isCustom) { els.testConnStatus.textContent = 'API key required'; els.testConnStatus.className = 'status err'; return; }
+    els.testConnStatus.textContent = 'Testing…'; els.testConnStatus.className = 'status';
+    const t0 = Date.now();
+    try {
+      const res = await fetch(cfg.chatUrl, {
+        method: 'POST',
+        headers: cfg.headers(apiKey),
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false })
+      });
+      const elapsed = Date.now() - t0;
+      if (!res.ok) {
+        const txt = await res.text();
+        els.testConnStatus.textContent = `HTTP ${res.status} in ${elapsed}ms — ${txt.slice(0, 160)}`;
+        els.testConnStatus.className = 'status err';
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      els.testConnStatus.textContent = `✓ ${elapsed}ms · ${cfg.label}`;
+      els.testConnStatus.className = 'status ok';
+    } catch (e) {
+      els.testConnStatus.textContent = `Network error: ${e.message}`;
+      els.testConnStatus.className = 'status err';
+    }
+  }
+
+  async function exportSettings() {
+    const dump = await chrome.storage.local.get(null);
+    // Strip session bodies / huge keys; keep settings + secrets only.
+    const filtered = {};
+    for (const [k, v] of Object.entries(dump)) {
+      if (k.startsWith('kyoto_session_')) continue;
+      if (k.startsWith('kyoto_memory_')) continue;
+      if (k === 'kyoto_audit_log') continue;
+      if (k === 'kyoto_cookie_snapshot') continue;
+      if (k === 'kyoto_models_dev_cache') continue;
+      filtered[k] = v;
+    }
+    downloadJson({ kyoto: true, version: 9, exportedAt: new Date().toISOString(), settings: filtered },
+      `kyoto-settings-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+    if (els.backupStatus) {
+      els.backupStatus.textContent = 'Exported.';
+      els.backupStatus.className = 'status ok';
+    }
+  }
+
+  function importSettingsFile(file) {
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed?.kyoto || typeof parsed.settings !== 'object') {
+          throw new Error('Not a Kyoto settings export.');
+        }
+        // Merge by setting every top-level key from settings into storage.
+        await chrome.storage.local.set(parsed.settings);
+        els.backupStatus.textContent = 'Imported — reload the side panel to apply.';
+        els.backupStatus.className = 'status ok';
+      } catch (e) {
+        els.backupStatus.textContent = `Failed: ${e.message}`;
+        els.backupStatus.className = 'status err';
+      }
+    };
+    reader.readAsText(file);
   }
 
   function auditAppend(entry) {
@@ -327,6 +507,9 @@
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
+    theme: 'system',           // 'system' | 'light' | 'dark'
+    density: 'comfortable',    // 'comfortable' | 'compact'
+    hideReasoning: false,
     // Custom OpenAI-compat providers: [{ id, label, baseUrl, modelsPath, chatPath, authHeader, authPrefix }]
     // id is "custom_<slug>"; selected via the same provider dropdown.
     customProviders: [],
@@ -505,7 +688,7 @@
     } else if (m.role === 'assistant') {
       // reasoning block first (if any)
       const rContent = m.reasoning_content || m.reasoning || m.thinking;
-      if (rContent) {
+      if (rContent && !state.settings?.hideReasoning) {
         const card = addReasoningCard();
         card.body.textContent = rContent;
         const stateEl = card.summary.querySelector('.reasoning-state');
@@ -839,13 +1022,49 @@
     setTimeout(() => els.sessionsSearch.focus(), 0);
   }
   function closeSessionsPopover() { els.sessionsPopover.classList.add('hidden'); }
+  // In-memory cache for content search. Populated lazily.
+  const sessionContentCache = new Map();
+  let contentHits = new Set(); // session ids whose content matched the last deep search
+  let lastSearchTerm = '';
+
+  async function deepSearchSessions(q) {
+    // Don't even try for very short queries — title/URL filter already covers them.
+    contentHits = new Set();
+    lastSearchTerm = q;
+    if (!q || q.length < 3) return;
+    const lq = q.toLowerCase();
+    for (const meta of state.sessionsIndex) {
+      // Skip ones whose title/URL already match — they'll show via the metadata filter.
+      if ((meta.title || '').toLowerCase().includes(lq)) continue;
+      if ((meta.url || '').toLowerCase().includes(lq)) continue;
+      let full = sessionContentCache.get(meta.id);
+      if (!full) {
+        full = await loadFullSession(meta.id);
+        sessionContentCache.set(meta.id, full);
+      }
+      if (full?.history?.some(m => contentText(m.content).toLowerCase().includes(lq))) {
+        contentHits.add(meta.id);
+      }
+      // If the user has typed something newer in the meantime, abort.
+      if (lastSearchTerm !== q) return;
+    }
+    // Re-render with the new hits if the query hasn't changed.
+    if (lastSearchTerm === q) renderSessionsList();
+  }
+
   function renderSessionsList() {
     const q = els.sessionsSearch.value.trim().toLowerCase();
     const items = state.sessionsIndex
-      .filter(s => !q || (s.title || '').toLowerCase().includes(q) || (s.url || '').toLowerCase().includes(q))
+      .filter(s => {
+        if (!q) return true;
+        if ((s.title || '').toLowerCase().includes(q)) return true;
+        if ((s.url || '').toLowerCase().includes(q)) return true;
+        return contentHits.has(s.id);
+      })
       .slice(0, 200);
     if (!items.length) {
-      els.sessionsList.innerHTML = '<p class="popover-empty">No sessions yet. Start a chat in any tab.</p>';
+      const hint = q.length >= 3 ? 'No sessions match (searched titles, URLs, and history content).' : 'No sessions yet. Start a chat in any tab.';
+      els.sessionsList.innerHTML = `<p class="popover-empty">${esc(hint)}</p>`;
       return;
     }
     const html = items.map(s => {
@@ -853,16 +1072,20 @@
       const busy = !!state.runtimes[s.id]?.busy;
       const dot = busy ? '<span class="sess-dot busy" title="Streaming"></span>' : (s.tabId != null ? '<span class="sess-dot bound" title="Bound to tab"></span>' : '<span class="sess-dot" title="Unbound"></span>');
       const url = s.url ? (() => { try { return new URL(s.url).host; } catch { return s.url; } })() : '—';
+      const hitTag = q && contentHits.has(s.id) && !(s.title || '').toLowerCase().includes(q) && !(s.url || '').toLowerCase().includes(q)
+        ? ' <span class="hit-tag">content match</span>' : '';
       return `
         <div class="sess-item${isCurrent ? ' active' : ''}" data-id="${esc(s.id)}">
           <div class="sess-row">
             ${dot}
-            <span class="sess-title">${esc(s.title || 'Untitled')}</span>
+            <span class="sess-title">${esc(s.title || 'Untitled')}${hitTag}</span>
             <span class="sess-time">${esc(fmtTime(s.lastActive))}</span>
           </div>
           <div class="sess-row sub">
             <span class="sess-url">${esc(url)}</span>
             <span class="sess-actions">
+              <button class="sess-act" data-act="fork" title="Fork (duplicate as new)">⎘</button>
+              <button class="sess-act" data-act="export" title="Export as Markdown">⇣</button>
               <button class="sess-act" data-act="rename" title="Rename">✎</button>
               <button class="sess-act" data-act="bind" title="${s.tabId != null ? 'Unbind from tab' : 'Bind to current tab'}">${s.tabId != null ? '⌧' : '⌘'}</button>
               <button class="sess-act" data-act="delete" title="Delete">×</button>
@@ -1171,7 +1394,7 @@
             else reasoningField = 'thinking';
           }
           reasoningAcc += rChunk;
-          if (isActive(session.id)) {
+          if (isActive(session.id) && !state.settings?.hideReasoning) {
             if (!reasoningTarget) reasoningTarget = addReasoningCard();
             reasoningTarget.body.textContent = reasoningAcc;
             scrollToBottom();
@@ -1212,7 +1435,7 @@
     // targets were wiped. Render the accumulated text/reasoning once on
     // completion so they don't end up only in history.
     if (isActive(session.id)) {
-      if (reasoningAcc && (!reasoningTarget || !reasoningTarget.body.isConnected)) {
+      if (reasoningAcc && !state.settings?.hideReasoning && (!reasoningTarget || !reasoningTarget.body.isConnected)) {
         const card = addReasoningCard();
         card.body.textContent = reasoningAcc;
         const stateEl = card.summary.querySelector('.reasoning-state');
@@ -1298,6 +1521,11 @@
     els.redactSensitive.checked = state.settings.redactSensitive !== false;
     els.auditEnabled.checked = state.settings.auditEnabled !== false;
     if (els.auditStatus) els.auditStatus.textContent = `${(state.auditLog || []).length} entries`;
+    if (els.themeSelect) els.themeSelect.value = state.settings.theme || 'system';
+    if (els.densitySelect) els.densitySelect.value = state.settings.density || 'comfortable';
+    if (els.hideReasoning) els.hideReasoning.checked = !!state.settings.hideReasoning;
+    if (els.testConnStatus) els.testConnStatus.textContent = '';
+    if (els.backupStatus) els.backupStatus.textContent = '';
     renderToolGroupCheckboxes();
     renderProviderDropdown();
     renderCustomProvidersList();
@@ -1466,6 +1694,33 @@
       state.auditLog = [];
       if (els.auditStatus) { els.auditStatus.textContent = `Cleared ${n} entries.`; els.auditStatus.className = 'status ok'; }
     });
+
+    if (els.popOutBtn) els.popOutBtn.addEventListener('click', () => {
+      chrome.windows.create({
+        url: chrome.runtime.getURL('sidepanel/sidepanel.html'),
+        type: 'popup',
+        width: 480, height: 720
+      }).catch(() => {});
+    });
+
+    if (els.testConnBtn) els.testConnBtn.addEventListener('click', testConnection);
+
+    if (els.themeSelect) els.themeSelect.addEventListener('change', async () => {
+      await saveSettings({ theme: els.themeSelect.value });
+      applyAppearance();
+    });
+    if (els.densitySelect) els.densitySelect.addEventListener('change', async () => {
+      await saveSettings({ density: els.densitySelect.value });
+      applyAppearance();
+    });
+
+    if (els.exportSettingsBtn) els.exportSettingsBtn.addEventListener('click', exportSettings);
+    if (els.importSettingsBtn) els.importSettingsBtn.addEventListener('click', () => els.importSettingsInput?.click());
+    if (els.importSettingsInput) els.importSettingsInput.addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      if (file) importSettingsFile(file);
+      e.target.value = '';
+    });
     els.newChatBtn.addEventListener('click', async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       const session = await createSession(tab);
@@ -1490,7 +1745,13 @@
     });
 
     els.sessionsBtn.addEventListener('click', toggleSessionsPopover);
-    els.sessionsSearch.addEventListener('input', renderSessionsList);
+    let searchDebounce;
+    els.sessionsSearch.addEventListener('input', () => {
+      renderSessionsList();
+      clearTimeout(searchDebounce);
+      const q = els.sessionsSearch.value.trim();
+      searchDebounce = setTimeout(() => deepSearchSessions(q), 250);
+    });
     els.sessionsList.addEventListener('click', async (e) => {
       const act = e.target.closest('.sess-act');
       const item = e.target.closest('.sess-item');
@@ -1531,6 +1792,11 @@
           }
           await persistSession(full);
           renderSessionsList();
+        } else if (action === 'fork') {
+          const copy = await forkSession(id);
+          if (copy) { closeSessionsPopover(); switchToSession(copy, { fromUser: true }); }
+        } else if (action === 'export') {
+          await exportSessionMarkdown(id);
         }
         return;
       }
@@ -1700,13 +1966,17 @@
 
       const redactSensitive = !!els.redactSensitive.checked;
       const auditEnabled = !!els.auditEnabled.checked;
+      const hideReasoning = !!els.hideReasoning?.checked;
+      const theme = els.themeSelect?.value || state.settings.theme || 'system';
+      const density = els.densitySelect?.value || state.settings.density || 'comfortable';
 
       await saveSettings({
         provider, model, systemPrompt, temperature, maxTokens,
         toolsEnabled, enabledGroups,
         apiKeys, mcpServers, customProviders, customSlashCommands,
-        redactSensitive, auditEnabled
+        redactSensitive, auditEnabled, hideReasoning, theme, density
       });
+      applyAppearance();
 
       // Re-init MCP tools after settings change
       els.mcpStatus.textContent = 'Reconnecting MCP servers…';
@@ -1799,6 +2069,7 @@
   // ── Boot ─────────────────────────────────────────────
   (async () => {
     await loadSettings();
+    applyAppearance();
     // Kick off models.dev registry load (cached, non-blocking after first run)
     if (window.KyotoModels) window.KyotoModels.init().catch(() => {});
     state.sessionsIndex = await loadSessionsIndex();
