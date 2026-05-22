@@ -251,7 +251,9 @@
     if (action === 'open_settings') { openDrawer(); return; }
     if (action === 'vision_one_shot') {
       // /see <prompt> — capture screenshot now and send as a multimodal
-      // user message in one shot, regardless of the visionBtn toggle.
+      // user message. Also clears any pending toggle so the *next*
+      // message doesn't double-attach.
+      if (state.visionPending) { state.visionPending = false; updateVisionUI(); }
       try {
         const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 80 });
         const prompt = args || 'Describe what you see in this screenshot in detail.';
@@ -880,7 +882,9 @@
           { type: 'image_url', image_url: { url: dataUrl } }
         ]);
       } catch (e) {
-        addMessage('assistant', `Screenshot failed: ${e.message}`, { error: true });
+        // Restore the user's typed text so they can retry without losing it.
+        if (els.input) { els.input.value = text; els.input.dispatchEvent(new Event('input')); }
+        addMessage('assistant', `Screenshot failed: ${e.message}. Your message has been restored to the composer.`, { error: true });
         return;
       }
     }
