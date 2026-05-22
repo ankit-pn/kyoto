@@ -143,8 +143,14 @@
     workspaceClearBtn: $('workspaceClearBtn'),
     shellExtId: $('shellExtId'),
     shellCopyIdBtn: $('shellCopyIdBtn'),
+    shellInstallLabel: $('shellInstallLabel'),
     shellInstallCmd: $('shellInstallCmd'),
-    shellInstallCmdWin: $('shellInstallCmdWin'),
+    shellInstallCopyBtn: $('shellInstallCopyBtn'),
+    shellInstallToggleAltBtn: $('shellInstallToggleAltBtn'),
+    shellInstallAltWrap: $('shellInstallAltWrap'),
+    shellInstallAltLabel: $('shellInstallAltLabel'),
+    shellInstallCmdAlt: $('shellInstallCmdAlt'),
+    shellInstallCopyAltBtn: $('shellInstallCopyAltBtn'),
     shellTestBtn: $('shellTestBtn'),
     shellStatus: $('shellStatus'),
     downloadAuditBtn: $('downloadAuditBtn'),
@@ -2211,8 +2217,40 @@
     if (els.s3Status) els.s3Status.textContent = '';
     const extId = chrome.runtime.id;
     if (els.shellExtId) els.shellExtId.value = extId;
-    if (els.shellInstallCmd) els.shellInstallCmd.value = `curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${extId}`;
-    if (els.shellInstallCmdWin) els.shellInstallCmdWin.value = `$env:KYOTO_EXT_ID="${extId}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex`;
+
+    // OS-detect so we only show the relevant install command up front.
+    // userAgentData is the modern API; fall back to UA string parsing.
+    const os = (() => {
+      const data = navigator.userAgentData;
+      if (data?.platform) {
+        const p = data.platform.toLowerCase();
+        if (p.includes('mac')) return 'macos';
+        if (p.includes('win')) return 'windows';
+        if (p.includes('linux') || p.includes('chrome os')) return 'linux';
+      }
+      const ua = (navigator.userAgent || '').toLowerCase();
+      if (/mac|iphone|ipad|ipod/.test(ua)) return 'macos';
+      if (/win/.test(ua)) return 'windows';
+      if (/linux|cros|x11/.test(ua)) return 'linux';
+      return 'unknown';
+    })();
+    const unixCmd = `curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${extId}`;
+    const winCmd  = `$env:KYOTO_EXT_ID="${extId}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex`;
+    const isWin = os === 'windows';
+    if (els.shellInstallLabel) els.shellInstallLabel.textContent = isWin
+      ? 'One-line install (Windows · PowerShell)'
+      : os === 'macos' ? 'One-line install (macOS · bash)'
+      : os === 'linux' ? 'One-line install (Linux · bash)'
+      : 'One-line install (Linux / macOS · bash)';
+    if (els.shellInstallCmd) els.shellInstallCmd.value = isWin ? winCmd : unixCmd;
+    if (els.shellInstallCmdAlt) els.shellInstallCmdAlt.value = isWin ? unixCmd : winCmd;
+    if (els.shellInstallAltLabel) els.shellInstallAltLabel.textContent = isWin
+      ? 'Linux / macOS · bash'
+      : 'Windows · PowerShell';
+    // Always start collapsed; user clicks "Show command for a different OS" to expand.
+    if (els.shellInstallAltWrap) els.shellInstallAltWrap.classList.add('hidden');
+    if (els.shellInstallToggleAltBtn) els.shellInstallToggleAltBtn.textContent = 'Show command for a different OS';
+
     if (els.shellStatus) els.shellStatus.textContent = '';
     updateWorkspaceUI();
     renderToolGroupCheckboxes();
@@ -2478,6 +2516,48 @@
       if (!confirm(`Delete all ${t.fileCount} workspace files (${fmtBytes(t.totalBytes)})? This can't be undone.`)) return;
       await window.KyotoVFS.clear();
       updateWorkspaceUI();
+    });
+
+    const copyToClipboard = (text, btn) => {
+      const flash = (msg) => {
+        const orig = btn.textContent;
+        btn.textContent = msg;
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+      };
+      // navigator.clipboard works in extension pages; the textarea
+      // fallback covers older Chromiums and the case where the
+      // document isn't focused.
+      (navigator.clipboard?.writeText?.(text) || Promise.reject())
+        .then(() => flash('✓ Copied'))
+        .catch(() => {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand('copy'); flash('✓ Copied'); }
+          catch { flash('Copy failed'); }
+          finally { ta.remove(); }
+        });
+    };
+    if (els.shellInstallCopyBtn) els.shellInstallCopyBtn.addEventListener('click', () => {
+      copyToClipboard(els.shellInstallCmd.value, els.shellInstallCopyBtn);
+    });
+    if (els.shellInstallCopyAltBtn) els.shellInstallCopyAltBtn.addEventListener('click', () => {
+      copyToClipboard(els.shellInstallCmdAlt.value, els.shellInstallCopyAltBtn);
+    });
+    if (els.shellInstallToggleAltBtn) els.shellInstallToggleAltBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const wrap = els.shellInstallAltWrap;
+      if (!wrap) return;
+      const showing = wrap.classList.toggle('hidden');
+      // toggle returns the new state of "is class present" — if it just
+      // ADDED .hidden, we're hiding. Flip the label accordingly.
+      els.shellInstallToggleAltBtn.textContent = showing
+        ? 'Show command for a different OS'
+        : 'Hide command for the other OS';
     });
 
     if (els.shellCopyIdBtn) els.shellCopyIdBtn.addEventListener('click', () => {

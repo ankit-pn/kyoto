@@ -264,12 +264,21 @@
         </div>
       </div>
       <div class="field">
-        <label>One-line install (Linux / macOS)</label>
-        <textarea id="shellInstallCmd" readonly rows="2" style="font-family:'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;font-size:11px"></textarea>
+        <label id="shellInstallLabel">One-line install</label>
+        <div class="install-row">
+          <textarea id="shellInstallCmd" readonly rows="2" style="font-family:'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;font-size:11px"></textarea>
+          <button class="btn-mini install-copy" id="shellInstallCopyBtn" type="button" title="Copy to clipboard">Copy</button>
+        </div>
+        <p class="hint">
+          <a href="#" id="shellInstallToggleAltBtn">Show command for a different OS</a>
+        </p>
       </div>
-      <div class="field">
-        <label>One-line install (Windows PowerShell)</label>
-        <textarea id="shellInstallCmdWin" readonly rows="2" style="font-family:'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;font-size:11px"></textarea>
+      <div class="field hidden" id="shellInstallAltWrap">
+        <label id="shellInstallAltLabel"></label>
+        <div class="install-row">
+          <textarea id="shellInstallCmdAlt" readonly rows="2" style="font-family:'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;font-size:11px"></textarea>
+          <button class="btn-mini install-copy" id="shellInstallCopyAltBtn" type="button" title="Copy to clipboard">Copy</button>
+        </div>
       </div>
       <div class="mcp-actions">
         <button class="btn-mini" id="shellTestBtn" type="button">Test connection</button>

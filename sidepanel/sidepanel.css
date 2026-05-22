@@ -415,6 +415,28 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* ── Install command row (Settings → Shell bridge) ─ */
+.install-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.install-row textarea {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+}
+.install-row .install-copy {
+  flex-shrink: 0;
+  align-self: stretch;
+  min-width: 64px;
+}
+.install-row .install-copy.copied {
+  background: var(--ok);
+  color: white;
+  border-color: var(--ok);
+}
+
 /* ── Goal / loop bar ────────────────────── */
 .goal-bar {
   display: flex; flex-direction: column; gap: 4px;
