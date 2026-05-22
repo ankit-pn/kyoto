@@ -240,6 +240,39 @@ body {
 .msg-body th { background: var(--bg-elev); font-weight: 600; }
 .msg-body hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 
+/* ── Usage chip + pin button ─────────────── */
+.msg.pinned {
+  border-left: 2px solid var(--warn);
+  padding-left: 8px;
+  margin-left: -10px;
+}
+
+.pin-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 4px;
+  margin-left: 6px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+.pin-btn:hover { color: var(--warn); background: var(--bg-elev2); }
+.msg.pinned .pin-btn { color: var(--warn); }
+
+.usage-chip {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  background: var(--bg-elev2);
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+}
+
 /* ── Streaming banner ───────────────────── */
 .streaming-banner {
   margin: 12px 0;

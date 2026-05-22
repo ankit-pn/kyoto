@@ -104,7 +104,11 @@
     pinSessionBtn: $('pinSessionBtn'),
     mcpServersList: $('mcpServersList'),
     mcpAddBtn: $('mcpAddBtn'),
-    mcpStatus: $('mcpStatus')
+    mcpStatus: $('mcpStatus'),
+    customProvidersList: $('customProvidersList'),
+    customProviderAddBtn: $('customProviderAddBtn'),
+    customSlashList: $('customSlashList'),
+    customSlashAddBtn: $('customSlashAddBtn')
   };
 
   // ── State ────────────────────────────────────────────
@@ -158,6 +162,82 @@
   function newId() { return 'sess_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
   function isActive(sessionId) { return state.activeSession?.id === sessionId; }
 
+  // ── Slash commands ───────────────────────────────────
+  // Built-in commands. {{args}} expands to whatever followed the command.
+  // Commands prefixed with [CMD]: are handled inline by the panel, not
+  // sent to the model.
+  const BUILTIN_SLASH = {
+    '/help':       '[CMD]:help',
+    '/clear':      '[CMD]:clear',
+    '/pin':        '[CMD]:pin_last_assistant',
+    '/sessions':   '[CMD]:open_sessions',
+    '/settings':   '[CMD]:open_settings',
+    '/summarize':  'Summarize the current page in 5 concise bullet points.',
+    '/explain':    'Explain the main concept on this page in simple terms. {{args}}',
+    '/eli5':       "Explain this page like I'm 10 years old.",
+    '/keypoints':  'What are the key takeaways from this page?',
+    '/cookies':    'Use `cookies_analyze` on the current site, then summarise which cookies look like session/auth tokens vs tracking.',
+    '/clone-session': 'Use `cookies_analyze`, then `cookies_export` with format "netscape" for this site. Show me the cookies.txt block.',
+    '/curl':       'Use `cookies_export` with format "curl-b" for this site and give me a curl command I can paste.',
+    '/network':    'Start a tab-scoped network capture via `network_capture_start`. List the latest requests with `network_capture_list`. Summarise interesting endpoints. {{args}}',
+    '/api':        'Use `page_fetch_intercept` to hook fetch/XHR on this page, then tell me what API endpoints it calls and their shapes once I trigger some action. {{args}}',
+    '/eval':       'Run this JS in the page via `page_eval` and report the result: {{args}}',
+    '/screenshot': 'Capture a screenshot of this tab with `tab_screenshot` and describe what you see.',
+    '/memory':     'List my saved memories using `memory_list`. {{args}}',
+    '/remember':   'Save this as a long-lived memory using `memory_add`. Title and content based on: {{args}}',
+    '/recall':     'Search my saved memories using `memory_search` for: {{args}}',
+    '/inspect':    'Use `page_query` to inspect "{{args}}" on the current page and describe what you find (tag, attrs, text, visibility).',
+    '/perf':       'Run `page_performance` on the current tab and summarise the navigation timing and paint metrics.'
+  };
+
+  function expandSlash(text) {
+    const trimmed = text.trimStart();
+    if (!trimmed.startsWith('/')) return { kind: 'send', text };
+    const spaceIdx = trimmed.search(/\s/);
+    const cmd = (spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx)).toLowerCase();
+    const args = spaceIdx === -1 ? '' : trimmed.slice(spaceIdx + 1).trim();
+    // Look up: built-ins, then customs
+    const custom = (state.settings.customSlashCommands || []).find(c => `/${c.name.replace(/^\/+/, '')}`.toLowerCase() === cmd);
+    const template = custom?.prompt ?? BUILTIN_SLASH[cmd];
+    if (!template) return { kind: 'send', text };
+    if (typeof template === 'string' && template.startsWith('[CMD]:')) {
+      return { kind: 'inline', action: template.slice(6), args };
+    }
+    const expanded = template.replace(/\{\{args\}\}/g, args).trim();
+    return { kind: 'send', text: expanded };
+  }
+
+  async function handleInlineSlash(action, args) {
+    if (action === 'help') {
+      const lines = Object.keys(BUILTIN_SLASH).sort().map(k => {
+        const v = BUILTIN_SLASH[k];
+        return `- \`${k}\` ${v.startsWith('[CMD]:') ? '_(panel action)_' : ''}`;
+      });
+      addMessage('assistant', `**Slash commands**\n\n${lines.join('\n')}\n\nUse \`{{args}}\` in custom prompts (Settings → Custom slash commands).`);
+      return;
+    }
+    if (action === 'clear') {
+      clearChat();
+      return;
+    }
+    if (action === 'pin_last_assistant') {
+      if (!state.activeSession) return;
+      const hist = state.activeSession.history;
+      for (let i = hist.length - 1; i >= 0; i--) {
+        if (hist[i].role === 'assistant') {
+          hist[i]._pinned = !hist[i]._pinned;
+          await persistSession(state.activeSession);
+          renderSessionHistoryFresh();
+          return;
+        }
+      }
+      addMessage('assistant', '_No assistant message to pin yet._', { error: true });
+      return;
+    }
+    if (action === 'open_sessions') { toggleSessionsPopover(); return; }
+    if (action === 'open_settings') { openDrawer(); return; }
+  }
+
   // ── Settings persistence ─────────────────────────────
   const defaults = {
     provider: 'openrouter',
@@ -168,9 +248,55 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc'],
-    mcpServers: []
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory'],
+    mcpServers: [],
+    // Custom OpenAI-compat providers: [{ id, label, baseUrl, modelsPath, chatPath, authHeader, authPrefix }]
+    // id is "custom_<slug>"; selected via the same provider dropdown.
+    customProviders: [],
+    // Built-in slash command map. Users can override via customSlashCommands.
+    customSlashCommands: []
   };
+
+  // Provider resolver — returns the same shape as the built-in PROVIDERS
+  // entries (label, chatUrl, modelsUrl, keysUrl, placeholder, headers, parseModels)
+  // for any provider id, whether built-in or custom.
+  function getProviderConfig(providerKey) {
+    if (!providerKey) return null;
+    if (PROVIDERS[providerKey]) return PROVIDERS[providerKey];
+    const cp = (state.settings?.customProviders || []).find(p => p.id === providerKey);
+    if (!cp) return null;
+    const base = (cp.baseUrl || '').replace(/\/+$/, '');
+    const chatPath = cp.chatPath || '/chat/completions';
+    const modelsPath = cp.modelsPath || '/models';
+    const authHeader = cp.authHeader || 'Authorization';
+    const authPrefix = cp.authPrefix ?? 'Bearer ';
+    return {
+      label: cp.label || cp.id,
+      chatUrl: base + chatPath,
+      modelsUrl: base + modelsPath,
+      keysUrl: cp.keysUrl || base,
+      placeholder: cp.placeholder || 'API key…',
+      headers: (key) => {
+        const h = { 'Content-Type': 'application/json' };
+        if (key) h[authHeader] = `${authPrefix}${key}`;
+        return h;
+      },
+      parseModels: (data) => (data.data || data.models || []).map(m => ({
+        id: m.id || m.model || m.name,
+        name: m.id || m.model || m.name,
+        group: cp.id,
+        supportsTools: true
+      })),
+      defaultModel: cp.defaultModel || '',
+      isCustom: true,
+      cp
+    };
+  }
+
+  // List of every provider id (built-in + custom) in dropdown order.
+  function allProviderKeys() {
+    return [...Object.keys(PROVIDERS), ...(state.settings?.customProviders || []).map(p => p.id)];
+  }
 
   async function loadSettings() {
     const stored = await chrome.storage.local.get(Object.keys(defaults));
@@ -271,7 +397,7 @@
       return;
     }
     els.empty.classList.add('hidden');
-    for (const m of session.history) renderHistoryEntry(m);
+    session.history.forEach((m, i) => renderHistoryEntry(m, i));
     const rt = state.runtimes[session.id];
     if (rt?.busy) {
       const banner = document.createElement('div');
@@ -287,10 +413,10 @@
     }
   }
 
-  function renderHistoryEntry(m) {
+  function renderHistoryEntry(m, idx) {
     ensureEmptyHidden();
     if (m.role === 'user') {
-      addMessage('user', m.content);
+      addMessage('user', m.content, { historyIndex: idx, pinned: !!m._pinned });
     } else if (m.role === 'assistant') {
       // reasoning block first (if any)
       const rContent = m.reasoning_content || m.reasoning || m.thinking;
@@ -300,7 +426,9 @@
         const stateEl = card.summary.querySelector('.reasoning-state');
         if (stateEl) stateEl.textContent = `${rContent.length} chars`;
       }
-      if (m.content) addMessage('assistant', m.content, { error: !!m._error });
+      if (m.content) addMessage('assistant', m.content, { error: !!m._error, historyIndex: idx, pinned: !!m._pinned });
+      // Token usage chip (replay)
+      if (m._usage) renderUsageChip(m._usage, m._cost);
       // Tool calls (then matching tool results follow as separate history entries)
       if (m.tool_calls?.length) {
         for (const tc of m.tool_calls) {
@@ -337,10 +465,20 @@
   function addMessage(role, content, opts = {}) {
     ensureEmptyHidden();
     const wrap = document.createElement('div');
-    wrap.className = `msg ${role}${opts.error ? ' error' : ''}`;
+    wrap.className = `msg ${role}${opts.error ? ' error' : ''}${opts.pinned ? ' pinned' : ''}`;
     const label = document.createElement('div');
     label.className = `msg-role ${opts.error ? 'error' : role}`;
     label.textContent = opts.error ? 'Error' : role === 'user' ? 'You' : 'Assistant';
+
+    if (opts.historyIndex != null && !opts.error) {
+      const pin = document.createElement('button');
+      pin.className = 'pin-btn';
+      pin.dataset.idx = opts.historyIndex;
+      pin.title = opts.pinned ? 'Unpin' : 'Pin this message (always included in context)';
+      pin.textContent = opts.pinned ? '★' : '☆';
+      label.appendChild(pin);
+    }
+
     const body = document.createElement('div');
     body.className = 'msg-body';
     if (role === 'assistant' || opts.error) body.innerHTML = renderMarkdown(content);
@@ -349,7 +487,27 @@
     wrap.appendChild(body);
     els.chat.appendChild(wrap);
     scrollToBottom();
-    return { wrap, body };
+    return { wrap, body, label };
+  }
+
+  // Append a compact "tokens · $cost" chip under the last assistant message.
+  function renderUsageChip(usage, costUsd) {
+    if (!usage) return;
+    const fmtN = window.KyotoModels?.formatN || ((n) => String(n));
+    const fmtU = window.KyotoModels?.formatUsd || ((n) => `$${(n || 0).toFixed(4)}`);
+    const lastMsg = els.chat.querySelector('.msg.assistant:last-of-type');
+    if (!lastMsg) return;
+    if (lastMsg.querySelector('.usage-chip')) return;
+    const chip = document.createElement('div');
+    chip.className = 'usage-chip';
+    const parts = [
+      `${fmtN(usage.prompt_tokens || 0)}↧`,
+      `${fmtN(usage.completion_tokens || 0)}↥`
+    ];
+    if (costUsd != null) parts.push(fmtU(costUsd));
+    chip.textContent = parts.join(' · ');
+    chip.title = `Input ${usage.prompt_tokens || 0} · Output ${usage.completion_tokens || 0} · Total ${usage.total_tokens || 0}` + (costUsd != null ? ` · ${fmtU(costUsd)}` : '');
+    lastMsg.appendChild(chip);
   }
 
   function addReasoningCard() {
@@ -400,15 +558,22 @@
 
   // ── Provider UI ──────────────────────────────────────
   function reflectProvider(provider) {
-    const cfg = PROVIDERS[provider];
+    const cfg = getProviderConfig(provider) || { label: provider, placeholder: 'API key…', keysUrl: '' };
     els.keyLabel.textContent = `${cfg.label} API key`;
     els.apiKey.placeholder = cfg.placeholder;
-    els.keyHint.innerHTML = `Get a key at <a href="${cfg.keysUrl}" target="_blank" rel="noopener">${new URL(cfg.keysUrl).host}</a>.`;
+    let hint = '';
+    if (cfg.keysUrl) {
+      try { hint = `Get a key at <a href="${cfg.keysUrl}" target="_blank" rel="noopener">${new URL(cfg.keysUrl).host}</a>.`; }
+      catch { hint = `Get a key at <a href="${cfg.keysUrl}" target="_blank" rel="noopener">${cfg.keysUrl}</a>.`; }
+    } else if (cfg.isCustom) {
+      hint = `Custom OpenAI-compatible endpoint. Leave the key empty for local servers (Ollama, LM Studio) that don't require auth.`;
+    }
+    els.keyHint.innerHTML = hint;
   }
   function updateModelLine() {
     const provider = state.settings.provider;
     const model = state.settings.model;
-    const cfg = PROVIDERS[provider] || { label: provider };
+    const cfg = getProviderConfig(provider) || { label: provider };
     if (!model) { els.modelLineText.textContent = cfg.label; return; }
     const short = model.includes('/') ? model.split('/').slice(1).join('/') : model;
     const info = window.KyotoModels?.get(provider, model);
@@ -440,14 +605,19 @@
 
   // ── Models ───────────────────────────────────────────
   async function fetchModels(provider, apiKey) {
-    if (!apiKey) {
+    const cfg = getProviderConfig(provider);
+    if (!cfg) {
+      els.modelHint.textContent = `Unknown provider: ${provider}`;
+      return;
+    }
+    // Custom providers may not need an API key (e.g. local Ollama).
+    if (!apiKey && !cfg.isCustom) {
       state.allModels = [];
       els.model.innerHTML = '';
       els.modelHint.textContent = 'Enter an API key to load models.';
       return;
     }
     els.modelHint.textContent = 'Loading models…';
-    const cfg = PROVIDERS[provider];
     try {
       const res = await fetch(cfg.modelsUrl, { headers: cfg.headers(apiKey) });
       if (!res.ok) {
@@ -611,6 +781,14 @@
     }
   }
 
+  // ── Submit / slash command pre-processor ─────────────
+  async function submitInput(raw) {
+    if (!raw || !raw.trim()) return;
+    const { kind, text, action, args } = expandSlash(raw);
+    if (kind === 'inline') { await handleInlineSlash(action, args); return; }
+    return sendMessage(text);
+  }
+
   // ── Chat loop ────────────────────────────────────────
   async function sendMessage(text) {
     if (!text.trim()) return;
@@ -623,8 +801,9 @@
     session.provider = state.settings.provider;
     session.model = state.settings.model;
 
-    const sessCfg = PROVIDERS[session.provider];
-    if (!keyFor(session.provider)) {
+    const sessCfg = getProviderConfig(session.provider);
+    const needsKey = !sessCfg?.isCustom; // custom providers can be keyless (Ollama, LM Studio)
+    if (needsKey && !keyFor(session.provider)) {
       addMessage(
         'assistant',
         `No API key for **${sessCfg?.label || session.provider}**. Open Settings, choose that provider, and add a key.`,
@@ -662,7 +841,7 @@
     try {
       const maxSteps = 12;
       for (let step = 0; step < maxSteps; step++) {
-        const { text: at, toolCalls, reasoning, reasoningField } = await streamOnce(session, runtime.abort.signal);
+        const { text: at, toolCalls, reasoning, reasoningField, usage } = await streamOnce(session, runtime.abort.signal);
 
         const msg = { role: 'assistant', content: at || '' };
         if (reasoning && reasoningField) msg[reasoningField] = reasoning;
@@ -672,6 +851,12 @@
             type: 'function',
             function: { name: tc.function.name, arguments: tc.function.arguments || '{}' }
           }));
+        }
+        if (usage) {
+          msg._usage = usage;
+          const cost = window.KyotoModels?.costFor(state.settings.provider, state.settings.model, usage);
+          if (cost != null) msg._cost = cost;
+          if (isActive(session.id)) renderUsageChip(usage, msg._cost);
         }
         session.history.push(msg);
         await persistSession(session);
@@ -735,12 +920,12 @@
   // One streamed model call. Returns accumulated text + tool calls + reasoning.
   async function streamOnce(session, signal) {
     const { provider, model, temperature, maxTokens, toolsEnabled, enabledGroups } = state.settings;
-    const cfg = PROVIDERS[provider];
-    if (!cfg) throw new Error(`Unknown provider on session: ${provider}`);
+    const cfg = getProviderConfig(provider);
+    if (!cfg) throw new Error(`Unknown provider: ${provider}`);
     const apiKey = keyFor(provider);
-    if (!apiKey) {
+    if (!apiKey && !cfg.isCustom) {
       throw new Error(
-        `No API key configured for ${cfg.label}. This session is pinned to ${cfg.label}. ` +
+        `No API key configured for ${cfg.label}. ` +
         `Open Settings, select "${cfg.label}" as the Provider, and enter your key.`
       );
     }
@@ -761,7 +946,10 @@
       messages,
       temperature: Number(temperature),
       max_tokens: effectiveMax,
-      stream: true
+      stream: true,
+      // Ask OpenAI-compat providers to include a final usage chunk so we
+      // can show token counts and cost.
+      stream_options: { include_usage: true }
     };
     if (tools.length) {
       body.tools = tools;
@@ -782,6 +970,7 @@
     let textAcc = '';
     let reasoningAcc = '';
     let reasoningField = null;
+    let usage = null;
     const toolBuf = [];
     let textTarget = null;
     let reasoningTarget = null;
@@ -801,6 +990,7 @@
         const data = line.slice(5).trim();
         if (data === '[DONE]') break;
         let parsed; try { parsed = JSON.parse(data); } catch { continue; }
+        if (parsed.usage) usage = parsed.usage; // usage chunk (terminal in OAI-compat streams)
         const choice = parsed.choices?.[0];
         if (!choice) continue;
         const delta = choice.delta || {};
@@ -864,7 +1054,13 @@
         addMessage('assistant', textAcc);
       }
     }
-    return { text: textAcc, toolCalls: toolBuf.filter(Boolean), reasoning: reasoningAcc, reasoningField };
+    return {
+      text: textAcc,
+      toolCalls: toolBuf.filter(Boolean),
+      reasoning: reasoningAcc,
+      reasoningField,
+      usage
+    };
   }
 
   function buildMessages(session) {
@@ -880,15 +1076,43 @@
       'Render responses in Markdown.'
     );
     if (state.settings.systemPrompt) systemParts.push(state.settings.systemPrompt);
+
+    // Pinned-message awareness — purely advisory; pinned messages are
+    // already present in history, but flagging them helps the model
+    // weigh them appropriately.
+    const pinnedTexts = session.history
+      .filter(m => m._pinned && m.content)
+      .map((m, i) => `[pinned ${i + 1}, role=${m.role}] ${m.content.slice(0, 800)}`);
+    if (pinnedTexts.length) {
+      systemParts.push(
+        `The user has pinned the following messages — treat them as elevated context:\n\n${pinnedTexts.join('\n\n')}`
+      );
+    }
+
+    // Cross-session memories — surface titles so the model knows what
+    // memory_get / memory_search can return.
+    if (state.memoryIndex?.length) {
+      systemParts.push(
+        `You have ${state.memoryIndex.length} saved memories available. Titles: ${state.memoryIndex.slice(0, 30).map(m => `"${m.title}"`).join(', ')}. Call \`memory_search\` or \`memory_get\` (with the id from \`memory_list\`) to read full content. Save new long-lived info with \`memory_add\`.`
+      );
+    }
+
     if (els.useContext.checked && state.page?.content && isActive(session.id)) {
       systemParts.push(
         `Current page context:\nTitle: ${state.page.title}\nURL: ${state.page.url}\n\n--- PAGE CONTENT ---\n${state.page.content}\n--- END PAGE CONTENT ---`
       );
     }
-    // Strip our UI-only fields from history copy
+
+    // Strip our UI-only fields from history copy. Kept fields: role,
+    // content, tool_calls, tool_call_id, name, plus the reasoning field
+    // we echo back (reasoning_content / reasoning / thinking).
     const cleaned = session.history.map(m => {
-      const { _error, ...rest } = m;
-      return rest;
+      const out = {};
+      for (const k of Object.keys(m)) {
+        if (k.startsWith('_')) continue;
+        out[k] = m[k];
+      }
+      return out;
     });
     return [{ role: 'system', content: systemParts.join('\n\n') }, ...cleaned];
   }
@@ -904,11 +1128,16 @@
     els.maxTokens.value = state.settings.maxTokens;
     els.toolsEnabled.checked = !!state.settings.toolsEnabled;
     renderToolGroupCheckboxes();
+    renderProviderDropdown();
+    renderCustomProvidersList();
+    renderCustomSlashList();
     renderMcpList();
     refreshDebuggerStatus();
     reflectProvider(state.settings.provider);
     updateMaxTokensHint();
-    if (currentApiKey()) fetchModels(state.settings.provider, currentApiKey());
+    if (currentApiKey() || getProviderConfig(state.settings.provider)?.isCustom) {
+      fetchModels(state.settings.provider, currentApiKey());
+    }
   }
   function closeDrawer() {
     els.drawer.classList.add('hidden');
@@ -944,6 +1173,60 @@
     }
   }
 
+  function renderProviderDropdown() {
+    if (!els.provider) return;
+    const prev = els.provider.value;
+    const opts = [];
+    for (const key of Object.keys(PROVIDERS)) {
+      opts.push(`<option value="${esc(key)}">${esc(PROVIDERS[key].label)}</option>`);
+    }
+    for (const cp of (state.settings.customProviders || [])) {
+      opts.push(`<option value="${esc(cp.id)}">${esc(cp.label || cp.id)} (custom)</option>`);
+    }
+    els.provider.innerHTML = opts.join('');
+    if (allProviderKeys().includes(prev)) els.provider.value = prev;
+    else if (allProviderKeys().includes(state.settings.provider)) els.provider.value = state.settings.provider;
+  }
+
+  function renderCustomProvidersList() {
+    const list = state.settings.customProviders || [];
+    if (!list.length) {
+      els.customProvidersList.innerHTML = '<p class="hint">No custom providers yet. Click + to add one.</p>';
+      return;
+    }
+    els.customProvidersList.innerHTML = list.map((cp, i) => `
+      <div class="mcp-row" data-idx="${i}">
+        <div class="mcp-row-l">
+          <input type="text" class="cp-label" placeholder="display name (e.g. Ollama)" value="${esc(cp.label || '')}" />
+          <input type="text" class="cp-base" placeholder="base URL (e.g. http://localhost:11434/v1)" value="${esc(cp.baseUrl || '')}" />
+          <input type="password" class="cp-key" placeholder="API key (optional for local servers)" value="${esc(state.settings.apiKeys?.[cp.id] || '')}" />
+        </div>
+        <div class="mcp-row-r">
+          <button class="btn-mini cp-del" type="button">×</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function renderCustomSlashList() {
+    const list = state.settings.customSlashCommands || [];
+    if (!list.length) {
+      els.customSlashList.innerHTML = '<p class="hint">No custom commands yet. Click + to add one.</p>';
+      return;
+    }
+    els.customSlashList.innerHTML = list.map((c, i) => `
+      <div class="mcp-row" data-idx="${i}">
+        <div class="mcp-row-l">
+          <input type="text" class="cs-name" placeholder="name (without /)" value="${esc(c.name || '')}" />
+          <input type="text" class="cs-prompt" placeholder="template — use {{args}} for arguments" value="${esc(c.prompt || '')}" />
+        </div>
+        <div class="mcp-row-r">
+          <button class="btn-mini cs-del" type="button">×</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
   function renderMcpList() {
     const servers = state.settings.mcpServers || [];
     if (!servers.length) {
@@ -976,12 +1259,12 @@
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         const v = els.input.value; els.input.value = ''; els.input.style.height = 'auto';
-        sendMessage(v);
+        submitInput(v);
       }
     });
     els.sendBtn.addEventListener('click', () => {
       const v = els.input.value; els.input.value = ''; els.input.style.height = 'auto';
-      sendMessage(v);
+      submitInput(v);
     });
     els.stopBtn.addEventListener('click', () => {
       const sid = state.activeSession?.id;
@@ -1098,6 +1381,43 @@
       chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` });
     });
 
+    els.customProviderAddBtn.addEventListener('click', () => {
+      const id = 'custom_' + Math.random().toString(36).slice(2, 8);
+      state.settings.customProviders = [
+        ...(state.settings.customProviders || []),
+        { id, label: 'My provider', baseUrl: '' }
+      ];
+      renderCustomProvidersList();
+    });
+    els.customProvidersList.addEventListener('click', (e) => {
+      const row = e.target.closest('.mcp-row');
+      if (!row || !e.target.classList.contains('cp-del')) return;
+      const idx = Number(row.dataset.idx);
+      const cp = (state.settings.customProviders || [])[idx];
+      if (!cp) return;
+      state.settings.customProviders.splice(idx, 1);
+      if (state.settings.apiKeys?.[cp.id]) {
+        delete state.settings.apiKeys[cp.id];
+      }
+      renderCustomProvidersList();
+      renderProviderDropdown();
+    });
+
+    els.customSlashAddBtn.addEventListener('click', () => {
+      state.settings.customSlashCommands = [
+        ...(state.settings.customSlashCommands || []),
+        { name: '', prompt: '' }
+      ];
+      renderCustomSlashList();
+    });
+    els.customSlashList.addEventListener('click', (e) => {
+      const row = e.target.closest('.mcp-row');
+      if (!row || !e.target.classList.contains('cs-del')) return;
+      const idx = Number(row.dataset.idx);
+      state.settings.customSlashCommands.splice(idx, 1);
+      renderCustomSlashList();
+    });
+
     els.mcpAddBtn.addEventListener('click', () => {
       state.settings.mcpServers = [...(state.settings.mcpServers || []), { name: '', url: '', auth: '', enabled: true }];
       renderMcpList();
@@ -1134,23 +1454,50 @@
       const toolsEnabled = !!els.toolsEnabled.checked;
       const enabledGroups = Array.from(els.toolGroups.querySelectorAll('input[type=checkbox]'))
         .filter(c => c.checked).map(c => c.dataset.group);
+
+      // Read back custom providers from the UI rows, preserving id/order.
+      const existingCustom = state.settings.customProviders || [];
+      const customProviders = Array.from(els.customProvidersList.querySelectorAll('.mcp-row')).map((row, i) => {
+        const prev = existingCustom[i] || {};
+        return {
+          id: prev.id || 'custom_' + Math.random().toString(36).slice(2, 8),
+          label: row.querySelector('.cp-label').value.trim() || 'Custom',
+          baseUrl: row.querySelector('.cp-base').value.trim(),
+          _formKey: row.querySelector('.cp-key').value.trim() // pulled out below
+        };
+      }).filter(p => p.baseUrl);
+
+      // Per-custom-provider key into apiKeys; keep all built-in keys.
+      const apiKeys = { ...(state.settings.apiKeys || {}) };
+      for (const cp of customProviders) {
+        if (cp._formKey) apiKeys[cp.id] = cp._formKey;
+        delete cp._formKey;
+      }
+      // The "primary" provider key (selected in the form) goes in too.
+      if (apiKey) apiKeys[provider] = apiKey;
+
+      const customSlashCommands = Array.from(els.customSlashList.querySelectorAll('.mcp-row')).map(row => ({
+        name: row.querySelector('.cs-name').value.trim().replace(/^\/+/, ''),
+        prompt: row.querySelector('.cs-prompt').value.trim()
+      })).filter(c => c.name && c.prompt);
+
       const mcpServers = Array.from(els.mcpServersList.querySelectorAll('.mcp-row')).map(row => ({
-        name: row.querySelector('.mcp-name').value.trim(),
-        url: row.querySelector('.mcp-url').value.trim(),
-        auth: row.querySelector('.mcp-auth').value.trim(),
-        enabled: row.querySelector('.mcp-enabled').checked
+        name: row.querySelector('.mcp-name')?.value.trim() || '',
+        url: row.querySelector('.mcp-url')?.value.trim() || '',
+        auth: row.querySelector('.mcp-auth')?.value.trim() || '',
+        enabled: row.querySelector('.mcp-enabled')?.checked || false
       })).filter(s => s.url);
 
-      if (!apiKey) { els.saveStatus.textContent = 'API key required.'; els.saveStatus.className = 'status err'; return; }
+      // Validation: built-ins need a key; customs may not.
+      const cfg = PROVIDERS[provider] || customProviders.find(p => p.id === provider);
+      const isCustom = !PROVIDERS[provider];
+      if (!isCustom && !apiKey) { els.saveStatus.textContent = 'API key required.'; els.saveStatus.className = 'status err'; return; }
       if (!model) { els.saveStatus.textContent = 'Select a model from the list.'; els.saveStatus.className = 'status err'; return; }
 
-      const apiKeys = { ...(state.settings.apiKeys || {}), [provider]: apiKey };
-      // Note: we no longer write the legacy single `apiKey` field — it
-      // was acting as a wrong-provider fallback. All keys live in `apiKeys`.
       await saveSettings({
         provider, model, systemPrompt, temperature, maxTokens,
         toolsEnabled, enabledGroups,
-        apiKeys, mcpServers
+        apiKeys, mcpServers, customProviders, customSlashCommands
       });
 
       // Re-init MCP tools after settings change
@@ -1166,7 +1513,7 @@
       setTimeout(() => { els.saveStatus.textContent = ''; closeDrawer(); }, 600);
     });
 
-    els.chat.addEventListener('click', (e) => {
+    els.chat.addEventListener('click', async (e) => {
       const chip = e.target.closest('.chip');
       if (chip?.dataset.prompt) { sendMessage(chip.dataset.prompt); return; }
       const copy = e.target.closest('.copy-btn');
@@ -1176,6 +1523,18 @@
           copy.textContent = 'Copied';
           setTimeout(() => { copy.textContent = orig; }, 1200);
         });
+        return;
+      }
+      const pinBtn = e.target.closest('.pin-btn');
+      if (pinBtn && state.activeSession) {
+        const idx = Number(pinBtn.dataset.idx);
+        const msg = state.activeSession.history[idx];
+        if (!msg) return;
+        msg._pinned = !msg._pinned;
+        await persistSession(state.activeSession);
+        pinBtn.textContent = msg._pinned ? '★' : '☆';
+        pinBtn.title = msg._pinned ? 'Unpin' : 'Pin this message (always included in context)';
+        pinBtn.closest('.msg')?.classList.toggle('pinned', !!msg._pinned);
       }
     });
 
@@ -1229,6 +1588,10 @@
     state.sessionsIndex = await loadSessionsIndex();
     state.tabToSession = {};
     state.sessionsIndex.forEach(s => { if (s.tabId != null) state.tabToSession[s.tabId] = s.id; });
+
+    // Load memory index so the system prompt can list available memories
+    const memGot = await chrome.storage.local.get('kyoto_memory_index');
+    state.memoryIndex = memGot.kyoto_memory_index || [];
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     let session = null;

@@ -99,6 +99,7 @@
         return {
           context: m.limit?.context,
           output: m.limit?.output,
+          cost: m.cost ? { input: m.cost.input, output: m.cost.output } : null,
           name: m.name || modelId,
           source: 'models.dev'
         };
@@ -117,6 +118,26 @@
     return get(provider, modelId)?.context || null;
   }
 
+  // usage = { prompt_tokens, completion_tokens } (OpenAI shape)
+  // returns USD cost as a number, or null when unknown
+  function costFor(provider, modelId, usage) {
+    if (!usage) return null;
+    const info = get(provider, modelId);
+    if (!info?.cost) return null;
+    const inUsd = (usage.prompt_tokens || 0) * (info.cost.input || 0) / 1_000_000;
+    const outUsd = (usage.completion_tokens || 0) * (info.cost.output || 0) / 1_000_000;
+    return inUsd + outUsd;
+  }
+
+  function formatUsd(n) {
+    if (n == null) return '';
+    if (n === 0) return '$0';
+    if (n < 0.0001) return '<$0.0001';
+    if (n < 0.01) return `$${n.toFixed(4)}`;
+    if (n < 1) return `$${n.toFixed(3)}`;
+    return `$${n.toFixed(2)}`;
+  }
+
   function formatN(n) {
     if (!n) return '—';
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
@@ -129,7 +150,9 @@
     get,
     maxOutput,
     contextLength,
+    costFor,
     formatN,
+    formatUsd,
     getRegistry: () => registry,
     lastFetchedAt: () => lastFetchedAt
   };

@@ -754,6 +754,124 @@
     handler: async (args = {}) => bg('CHECK_PERMISSION', args)
   });
 
+  // ──────── MEMORY (cross-session) ────────
+  // Persistent notes the user (or the agent) can write, search, and recall.
+  // Storage:
+  //   kyoto_memory_index : array of { id, title, tags, createdAt, updatedAt }
+  //   kyoto_memory_<id>  : full record { id, title, content, tags, createdAt, updatedAt }
+  const MEM_INDEX_KEY = 'kyoto_memory_index';
+  const MEM_KEY = (id) => `kyoto_memory_${id}`;
+  function memNewId() { return 'mem_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+
+  async function memLoadIndex() {
+    const g = await chrome.storage.local.get(MEM_INDEX_KEY);
+    return g[MEM_INDEX_KEY] || [];
+  }
+  async function memWriteIndex(idx) { await chrome.storage.local.set({ [MEM_INDEX_KEY]: idx }); }
+
+  T({
+    name: 'memory_add',
+    group: 'memory',
+    description: 'Save a long-lived note that will be available in every future session. Use for: user preferences, repeated context, useful snippets, API keys / URLs the user names, important facts. Returns the new memory id.',
+    parameters: OBJ({
+      title: STR,
+      content: STR,
+      tags: { type: 'array', items: STR }
+    }, ['title', 'content']),
+    handler: async ({ title, content, tags = [] }) => {
+      const id = memNewId();
+      const now = Date.now();
+      const record = { id, title, content, tags, createdAt: now, updatedAt: now };
+      await chrome.storage.local.set({ [MEM_KEY(id)]: record });
+      const idx = await memLoadIndex();
+      idx.unshift({ id, title, tags, createdAt: now, updatedAt: now });
+      await memWriteIndex(idx);
+      return { id, saved: true };
+    }
+  });
+
+  T({
+    name: 'memory_list',
+    group: 'memory',
+    description: 'List all saved memories (metadata only — id, title, tags, timestamps). Use this first to see what is available before reading.',
+    parameters: OBJ({ limit: NUM }),
+    handler: async ({ limit = 200 } = {}) => {
+      const idx = await memLoadIndex();
+      return { total: idx.length, items: idx.slice(0, limit) };
+    }
+  });
+
+  T({
+    name: 'memory_get',
+    group: 'memory',
+    description: 'Read the full content of a memory by id.',
+    parameters: OBJ({ id: STR }, ['id']),
+    handler: async ({ id }) => {
+      const g = await chrome.storage.local.get(MEM_KEY(id));
+      return g[MEM_KEY(id)] || { error: 'not found' };
+    }
+  });
+
+  T({
+    name: 'memory_search',
+    group: 'memory',
+    description: 'Simple case-insensitive substring search across memory titles, tags, and content. Returns matching memory metadata.',
+    parameters: OBJ({ query: STR, limit: NUM }, ['query']),
+    handler: async ({ query, limit = 20 }) => {
+      const q = query.toLowerCase();
+      const idx = await memLoadIndex();
+      const matches = [];
+      for (const meta of idx) {
+        if (meta.title.toLowerCase().includes(q) || (meta.tags || []).some(t => t.toLowerCase().includes(q))) {
+          matches.push({ ...meta, _hit: 'title/tags' });
+          continue;
+        }
+        const g = await chrome.storage.local.get(MEM_KEY(meta.id));
+        const full = g[MEM_KEY(meta.id)];
+        if (full?.content?.toLowerCase().includes(q)) matches.push({ ...meta, _hit: 'content' });
+        if (matches.length >= limit) break;
+      }
+      return { total: matches.length, items: matches };
+    }
+  });
+
+  T({
+    name: 'memory_update',
+    group: 'memory',
+    description: 'Update fields of an existing memory. Any field omitted is preserved.',
+    parameters: OBJ({ id: STR, title: STR, content: STR, tags: { type: 'array', items: STR } }, ['id']),
+    handler: async ({ id, title, content, tags }) => {
+      const g = await chrome.storage.local.get(MEM_KEY(id));
+      const current = g[MEM_KEY(id)];
+      if (!current) return { error: 'not found' };
+      if (title !== undefined) current.title = title;
+      if (content !== undefined) current.content = content;
+      if (tags !== undefined) current.tags = tags;
+      current.updatedAt = Date.now();
+      await chrome.storage.local.set({ [MEM_KEY(id)]: current });
+      const idx = await memLoadIndex();
+      const i = idx.findIndex(m => m.id === id);
+      if (i >= 0) {
+        idx[i] = { id, title: current.title, tags: current.tags, createdAt: current.createdAt, updatedAt: current.updatedAt };
+        await memWriteIndex(idx);
+      }
+      return { id, updated: true };
+    }
+  });
+
+  T({
+    name: 'memory_delete',
+    group: 'memory',
+    description: 'Delete a memory by id.',
+    parameters: OBJ({ id: STR }, ['id']),
+    handler: async ({ id }) => {
+      await chrome.storage.local.remove(MEM_KEY(id));
+      const idx = await memLoadIndex();
+      await memWriteIndex(idx.filter(m => m.id !== id));
+      return { id, deleted: true };
+    }
+  });
+
   // ── Public API ───────────────────────────────────────
   window.KyotoTools = {
     list: () => TOOLS.map(t => ({ name: t.name, group: t.group, description: t.description })),

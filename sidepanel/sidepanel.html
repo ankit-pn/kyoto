@@ -171,6 +171,20 @@
         <p class="hint">Granted at install time. Required for response-body capture, network modification, and full DevTools control via <code>debugger_attach</code> / <code>debugger_send</code>. Chrome shows a yellow banner on the tab while attached. If you see "Not granted", reload the extension on <code>chrome://extensions</code> (the ⤴ button takes you there).</p>
       </div>
 
+      <h3 class="drawer-section">Custom OpenAI-compatible providers</h3>
+      <div id="customProvidersList"></div>
+      <div class="mcp-actions">
+        <button class="btn-mini" id="customProviderAddBtn" type="button">+ Add provider</button>
+        <p class="hint">For Ollama / LM Studio / Groq / Together / Fireworks / Anthropic-via-proxy / Gemini-OAI etc. Base URL should be the path up to (but not including) <code>/chat/completions</code>. Examples: <code>http://localhost:11434/v1</code> (Ollama), <code>https://api.groq.com/openai/v1</code>, <code>https://generativelanguage.googleapis.com/v1beta/openai</code> (Gemini). Leave API key empty for keyless local servers.</p>
+      </div>
+
+      <h3 class="drawer-section">Custom slash commands</h3>
+      <div id="customSlashList"></div>
+      <div class="mcp-actions">
+        <button class="btn-mini" id="customSlashAddBtn" type="button">+ Add command</button>
+        <p class="hint">Use <code>{{args}}</code> as a placeholder for whatever the user types after the slash. Example name: <code>tickets</code>, template: <code>Open https://jira.mycorp.com and find ticket {{args}}</code>. Built-ins are listed under <code>/help</code>.</p>
+      </div>
+
       <h3 class="drawer-section">MCP servers</h3>
       <div id="mcpServersList"></div>
       <div class="mcp-actions">
