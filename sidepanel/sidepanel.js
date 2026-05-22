@@ -246,7 +246,7 @@
 
       let settled = false;
       let cardObserver = null;
-      const finish = (answer, viaButton = false) => {
+      const finish = (answer, viaButton = false, cancelled = false) => {
         if (settled) return;
         settled = true;
         if (cardObserver) { try { cardObserver.disconnect(); } catch {} cardObserver = null; }
@@ -261,7 +261,7 @@
           body.appendChild(ans);
           for (const el of card.querySelectorAll('button, input')) el.disabled = true;
         }
-        resolve({ answer, viaButton });
+        resolve({ answer, viaButton, cancelled });
       };
 
       // Auto-cancel if the card is detached (session switch wipes
@@ -269,7 +269,7 @@
       // this the promise hangs forever and the tool loop is stuck.
       cardObserver = new MutationObserver(() => {
         if (!settled && !card.isConnected) {
-          finish('(cancelled — chat view changed)', false);
+          finish('(cancelled — chat view changed)', false, true);
         }
       });
       cardObserver.observe(els.chat, { childList: true });
@@ -322,6 +322,10 @@
     });
   };
 
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
   // ── Marked setup ─────────────────────────────────────
   if (window.marked) {
     marked.setOptions({ breaks: true, gfm: true });
@@ -337,10 +341,17 @@
     marked.Renderer.prototype.link = function (token) {
       return origLink.call(this, token).replace('<a ', '<a target="_blank" rel="noopener" ');
     };
-  }
-
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    // Defense in depth: marked passes raw HTML through by default. A
+    // compromised skill hub or a prompt-injected extraction response
+    // could put `<img src=x onerror=…>` into model output, which would
+    // execute in the extension context. Override both html-token paths
+    // to escape rather than emit raw HTML. (Code blocks remain
+    // verbatim — their renderer uses the original `code` token path.)
+    const safeHtml = (token) => esc(typeof token === 'string' ? token : (token?.text || token?.raw || ''));
+    marked.Renderer.prototype.html = safeHtml;
+    if (marked.Renderer.prototype.inlineHtml) {
+      marked.Renderer.prototype.inlineHtml = safeHtml;
+    }
   }
   function renderMarkdown(text) {
     try { return window.marked ? marked.parse(text || '') : esc(text || ''); }
@@ -705,7 +716,10 @@
       if (!h) return 'global';
       // IPv4
       if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(h)) return h;
-      // IPv6 (parsed.hostname returns "[::1]" without the brackets)
+      // IPv6 — `new URL("http://[::1]/").hostname` returns "[::1]" *with*
+      // the brackets in Chromium; strip them so the value is a clean
+      // domain key for the skill hub.
+      if (h.startsWith('[') && h.endsWith(']')) return h.slice(1, -1);
       if (h.includes(':')) return h;
       // localhost / single-label hostnames
       if (!h.includes('.')) return h;
@@ -1097,7 +1111,13 @@
       placeholder: 'e.g. "Reply to a Linear ticket as resolved"',
       options: ['Discard recording'],
     });
-    if (!skip || skip.answer === 'Discard recording') {
+    if (!skip || skip.cancelled) {
+      // Card was wiped (session switch, /clear) — drop quietly with the
+      // events log so the user can re-record if needed.
+      console.warn('Kyoto: capture stop dialog cancelled; discarded', events.length, 'events');
+      return;
+    }
+    if (skip.answer === 'Discard recording') {
       addMessage('assistant', '_Recording discarded._');
       return;
     }
@@ -3816,6 +3836,17 @@
         // Drop events stamped with a stale session id — guards against
         // cross-tab listeners + lingering messages from a prior session.
         if (msg.sessionId && msg.sessionId !== state.capture.sessionId) return;
+        // Hard cap to keep memory + downstream LLM prompt size bounded.
+        // Long recordings on busy pages (stock tickers, chat apps) would
+        // otherwise grow this buffer without bound.
+        const CAPTURE_EVENTS_CAP = 2000;
+        if (state.capture.events.length >= CAPTURE_EVENTS_CAP) {
+          if (!state.capture._capWarned) {
+            state.capture._capWarned = true;
+            addMessage('assistant', `_⚠ Capture buffer full (${CAPTURE_EVENTS_CAP} events). Further actions are not recorded. Click the red dot to stop and save._`, { error: true });
+          }
+          return;
+        }
         // Coalesce: drop trailing duplicate fill events for the same selector.
         const last = state.capture.events[state.capture.events.length - 1];
         if (last && last.event === 'fill' && msg.payload.event === 'fill' && last.selector === msg.payload.selector) {

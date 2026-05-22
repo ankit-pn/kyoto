@@ -99,14 +99,15 @@ def _require_auth(event):
 
 def _parse_int(v, default, *, max_value=None):
     """Coerce a query/body value to int. Return `default` on bad input
-    rather than crashing the handler with ValueError → 500."""
+    (ValueError → 500 avoided) AND on non-positive input (limit=-5 or
+    limit=0 should not silently produce zero results)."""
     try:
         n = int(v) if v is not None else default
     except (TypeError, ValueError):
         return default
-    if max_value is not None:
-        n = min(n, max_value)
-    return max(0, n)
+    if n <= 0:
+        return default
+    return min(n, max_value) if max_value is not None else n
 
 
 # ---------- handlers --------------------------------------------------------
