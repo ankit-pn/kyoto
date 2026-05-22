@@ -78,11 +78,16 @@
   T({
     name: 'tab_open',
     group: 'browser',
-    description: 'Open a new tab. Optionally make it the active tab.',
-    parameters: OBJ({ url: STR, active: BOOL }, ['url']),
-    handler: async ({ url, active = true }) => {
+    description: 'Open a new tab. Optionally make it the active tab. The new tab automatically inherits the calling agent\'s conversation — switching to it shows the same chat continued, not a fresh session. Set `freshSession: true` to opt out (the new tab becomes a brand-new session, useful when forking unrelated tasks).',
+    parameters: OBJ({ url: STR, active: BOOL, freshSession: BOOL }, ['url']),
+    handler: async ({ url, active = true, freshSession = false }) => {
+      // Mark BEFORE chrome.tabs.create so the side panel's
+      // onCreated handler can adopt the new tab into this session.
+      if (!freshSession && window.__kyotoMarkPendingTabBind) {
+        window.__kyotoMarkPendingTabBind();
+      }
       const tab = await chrome.tabs.create({ url, active });
-      return { id: tab.id, url: tab.url };
+      return { id: tab.id, url: tab.url, inheritedSession: !freshSession };
     }
   });
 

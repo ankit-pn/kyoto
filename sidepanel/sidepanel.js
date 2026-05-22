@@ -156,9 +156,19 @@
     runtimes: {},               // sessionId -> { abort, busy }
     pinnedToSession: false,     // when true, tab switches do NOT swap session
     page: null,                 // page context for active tab
-    allModels: [],
+    allModels: [],               // models for the provider shown in the Settings drawer (legacy alias)
+    modelsByProvider: new Map(), // providerId -> models[] — cross-provider header picker source
     mcpTools: [],                // dynamically-added tool defs
-    visionPending: false         // one-shot: attach screenshot to next message
+    visionPending: false,        // one-shot: attach screenshot to next message
+    pendingAgentTabBind: null    // when set, the next newly-created tab will inherit this session
+  };
+
+  // Tools.js calls this just before chrome.tabs.create so the new tab
+  // adopts the active session's history instead of starting a fresh
+  // conversation. The mapping is consumed (one-shot) by the
+  // chrome.tabs.onCreated handler below.
+  window.__kyotoMarkPendingTabBind = () => {
+    state.pendingAgentTabBind = state.activeSession?.id || null;
   };
 
   // ── Marked setup ─────────────────────────────────────
@@ -1136,6 +1146,19 @@
       return;
     }
     els.modelHint.textContent = 'Loading models…';
+    const isShownProvider = state.settings.provider === provider;
+    const setModels = (list, statusText) => {
+      // Always store into the cross-provider map (so the header picker
+      // sees this provider's models even when another provider is the
+      // current chat target). Only update the Settings drawer's
+      // state.allModels and hint when it's the actively-shown provider.
+      state.modelsByProvider.set(provider, list);
+      if (isShownProvider) {
+        state.allModels = list;
+        els.modelHint.textContent = statusText;
+        renderModelOptions();
+      }
+    };
     try {
       const res = await fetch(cfg.modelsUrl, { headers: cfg.headers(apiKey) });
       if (!res.ok) {
@@ -1145,22 +1168,17 @@
       const data = await res.json();
       const parsed = cfg.parseModels(data).filter(m => m.id);
       if (!parsed.length && cfg.fallbackModels) {
-        state.allModels = cfg.fallbackModels;
-        els.modelHint.textContent = `${state.allModels.length} models (fallback list).`;
+        setModels(cfg.fallbackModels, `${cfg.fallbackModels.length} models (fallback list).`);
       } else {
-        state.allModels = parsed.sort((a, b) => a.id.localeCompare(b.id));
-        els.modelHint.textContent = `${state.allModels.length} models. Pick one and Save.`;
+        const sorted = parsed.sort((a, b) => a.id.localeCompare(b.id));
+        setModels(sorted, `${sorted.length} models. Pick one and Save.`);
       }
-      renderModelOptions();
     } catch (e) {
       if (cfg.fallbackModels) {
-        state.allModels = cfg.fallbackModels;
-        renderModelOptions();
-        els.modelHint.textContent = `${state.allModels.length} models (fallback — /models endpoint unreachable: ${e.message}).`;
+        setModels(cfg.fallbackModels, `${cfg.fallbackModels.length} models (fallback — /models endpoint unreachable: ${e.message}).`);
       } else {
-        state.allModels = [];
-        els.model.innerHTML = '';
-        els.modelHint.textContent = `Failed: ${e.message}`;
+        setModels([], `Failed: ${e.message}`);
+        if (isShownProvider) { state.allModels = []; els.model.innerHTML = ''; }
       }
     }
   }
@@ -1195,37 +1213,79 @@
     if (!currentApiKey()) { openDrawer(); return; }
     els.modelPopover.classList.remove('hidden');
     els.popoverSearch.value = '';
-    if (!state.allModels.length) {
-      els.popoverList.innerHTML = '<p class="popover-empty">Loading…</p>';
-      await fetchModels(state.settings.provider, currentApiKey());
-    }
+    els.popoverList.innerHTML = '<p class="popover-empty">Loading…</p>';
+    // Kick off a refresh of every configured provider's model list. We
+    // don't block on it — partial results render as they arrive.
+    await fetchAllProviderModels({ background: false });
     renderPopoverList();
     setTimeout(() => els.popoverSearch.focus(), 0);
   }
   function closeModelPopover() { els.modelPopover.classList.add('hidden'); }
+
+  // Collect every provider's models (built-in + custom) into a single
+  // list with provider attached. Used by the header model picker so
+  // the user can choose across all configured providers in one menu.
+  function allConfiguredModels() {
+    const out = [];
+    for (const [provider, models] of state.modelsByProvider) {
+      const cfg = getProviderConfig(provider);
+      const label = cfg?.label || provider;
+      for (const m of (models || [])) {
+        out.push({ ...m, _provider: provider, _providerLabel: label });
+      }
+    }
+    return out;
+  }
+
   function renderPopoverList() {
-    if (!state.allModels.length) {
-      els.popoverList.innerHTML = '<p class="popover-empty">No models. Check your key in Settings.</p>';
+    const all = allConfiguredModels();
+    if (!all.length) {
+      els.popoverList.innerHTML = '<p class="popover-empty">No models loaded. Add a provider key in Settings.</p>';
       return;
     }
     const q = els.popoverSearch.value.trim().toLowerCase();
-    const filtered = q ? state.allModels.filter(m => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)) : state.allModels;
+    const filtered = q
+      ? all.filter(m =>
+          m.id.toLowerCase().includes(q)
+          || m.name.toLowerCase().includes(q)
+          || m._providerLabel.toLowerCase().includes(q))
+      : all;
     if (!filtered.length) { els.popoverList.innerHTML = '<p class="popover-empty">No matches.</p>'; return; }
-    const groups = {};
-    filtered.forEach(m => (groups[m.group] = groups[m.group] || []).push(m));
-    const parts = [];
+    // Group by provider so the menu reads "DeepSeek · MiniMax · OpenRouter".
+    const groups = new Map();
+    for (const m of filtered) {
+      if (!groups.has(m._provider)) groups.set(m._provider, []);
+      groups.get(m._provider).push(m);
+    }
     const fmt = window.KyotoModels?.formatN || ((n) => String(n || '—'));
-    const provider = state.settings.provider;
-    Object.keys(groups).sort().forEach(g => {
-      parts.push(`<div class="popover-group">${esc(g)}</div>`);
-      groups[g].forEach(m => {
-        const active = m.id === state.settings.model ? ' active' : '';
-        const info = window.KyotoModels?.get(provider, m.id);
+    const parts = [];
+    [...groups.keys()].sort().forEach(provider => {
+      const label = getProviderConfig(provider)?.label || provider;
+      parts.push(`<div class="popover-group">${esc(label)}</div>`);
+      for (const m of groups.get(provider)) {
+        const active = (m._provider === state.settings.provider && m.id === state.settings.model) ? ' active' : '';
+        const info = window.KyotoModels?.get(m._provider, m.id);
         const caps = info ? `<span class="popover-caps" title="ctx ${info.context ?? '?'} / out ${info.output ?? '?'} · ${info.source}">${fmt(info.context)} / ${fmt(info.output)}</span>` : '';
-        parts.push(`<div class="popover-item${active}" data-model="${esc(m.id)}"><span class="popover-mname">${esc(m.name)}</span>${caps}<span class="check">✓</span></div>`);
-      });
+        parts.push(`<div class="popover-item${active}" data-model="${esc(m.id)}" data-provider="${esc(m._provider)}"><span class="popover-mname">${esc(m.name)}</span>${caps}<span class="check">✓</span></div>`);
+      }
     });
     els.popoverList.innerHTML = parts.join('');
+  }
+
+  // Fetch every provider that has a key in apiKeys. Custom providers
+  // without a key are skipped (only those that DO need one — Ollama
+  // works keyless).
+  async function fetchAllProviderModels({ background = true } = {}) {
+    const keys = state.settings.apiKeys || {};
+    const promises = [];
+    for (const providerId of allProviderKeys()) {
+      const cfg = getProviderConfig(providerId);
+      const key = keys[providerId] || '';
+      // Skip providers we have no way to call.
+      if (!key && !cfg?.isCustom) continue;
+      promises.push(fetchModels(providerId, key).catch(() => {}));
+    }
+    if (!background) await Promise.all(promises);
   }
 
   // ── Sessions popover ─────────────────────────────────
@@ -2185,7 +2245,21 @@
     els.popoverList.addEventListener('click', async (e) => {
       const item = e.target.closest('.popover-item');
       if (!item?.dataset.model) return;
-      await saveSettings({ model: item.dataset.model });
+      const patch = { model: item.dataset.model };
+      // The header picker shows cross-provider models — if the user
+      // picked a model that belongs to a different provider, auto-switch
+      // the active provider too. That's the whole point.
+      const pickedProvider = item.dataset.provider;
+      if (pickedProvider && pickedProvider !== state.settings.provider) {
+        patch.provider = pickedProvider;
+      }
+      await saveSettings(patch);
+      // Keep the Settings drawer in sync if the provider just changed.
+      if (patch.provider) {
+        state.allModels = state.modelsByProvider.get(pickedProvider) || [];
+        if (els.provider) els.provider.value = pickedProvider;
+        reflectProvider(pickedProvider);
+      }
       updateModelLine();
       updateMaxTokensHint();
       closeModelPopover();
@@ -2269,10 +2343,22 @@
       const p = els.provider.value;
       els.apiKey.value = state.settings.apiKeys?.[p] || '';
       reflectProvider(p);
-      state.allModels = [];
-      els.model.innerHTML = '';
-      els.modelHint.textContent = 'Enter an API key to load models.';
-      if (els.apiKey.value.trim()) fetchModels(p, els.apiKey.value.trim());
+      // Use the cross-provider cache if we already have this provider's
+      // models — avoids the dropdown looking empty for a second.
+      const cached = state.modelsByProvider.get(p);
+      if (cached && cached.length) {
+        state.allModels = cached;
+        renderModelOptions();
+        els.modelHint.textContent = `${cached.length} models (cached). Pick one and Save.`;
+      } else {
+        state.allModels = [];
+        els.model.innerHTML = '';
+        els.modelHint.textContent = 'Enter an API key to load models.';
+      }
+      const cfg = getProviderConfig(p);
+      if (els.apiKey.value.trim() || cfg?.isCustom) {
+        fetchModels(p, els.apiKey.value.trim());
+      }
     });
 
     let keyDebounce;
@@ -2470,6 +2556,10 @@
       els.mcpStatus.textContent = `MCP: ${mcpRes.connected}/${mcpRes.total} servers, ${state.mcpTools.length} tools`;
       els.mcpStatus.className = `status ${mcpRes.connected ? 'ok' : ''}`;
 
+      // Refresh the cross-provider model cache — keys / custom
+      // providers / endpoints may all have just changed.
+      fetchAllProviderModels({ background: true }).catch(() => {});
+
       updateModelLine();
       els.saveStatus.textContent = 'Saved.';
       els.saveStatus.className = 'status ok';
@@ -2521,6 +2611,20 @@
       if (area !== 'local') return;
       if (changes.kyoto_memory_index) {
         state.memoryIndex = changes.kyoto_memory_index.newValue || [];
+      }
+    });
+
+    // Agent-opened new tabs inherit the calling session, so a chain like
+    // "find this song -> open YouTube -> play it" doesn't reset
+    // when the new tab is created. The flag is set by tab_open's
+    // handler in tools.js just before chrome.tabs.create; we consume it
+    // here as the new tab's onCreated event fires (which the browser
+    // dispatches strictly before onActivated for the same tab).
+    chrome.tabs.onCreated.addListener((tab) => {
+      const sid = state.pendingAgentTabBind;
+      if (sid) {
+        state.tabToSession[tab.id] = sid;
+        state.pendingAgentTabBind = null;
       }
     });
 
@@ -2593,6 +2697,11 @@
       const mcpRes = await window.KyotoMCP.init(state.settings.mcpServers);
       state.mcpTools = mcpRes.tools;
     }
+
+    // Preload models for every provider that has a key — so the header
+    // picker can show them all without waiting for the user to flip
+    // providers in Settings first.
+    fetchAllProviderModels({ background: true }).catch(() => {});
 
     els.input.focus();
   })();
