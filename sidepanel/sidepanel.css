@@ -597,6 +597,15 @@ body {
 .popover-item.active { background: var(--accent-soft); color: var(--accent); }
 .popover-item .check { opacity: 0; color: var(--accent); }
 .popover-item.active .check { opacity: 1; }
+.popover-mname { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.popover-caps {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+.popover-item.active .popover-caps { color: var(--accent); opacity: 0.8; }
 
 /* ── Settings drawer ────────────────────── */
 .overlay {

@@ -82,6 +82,7 @@
     systemPrompt: $('systemPrompt'),
     temperature: $('temperature'),
     maxTokens: $('maxTokens'),
+    maxTokensHint: $('maxTokensHint'),
     saveBtn: $('saveBtn'),
     saveStatus: $('saveStatus'),
     modelBtn: $('modelBtn'),
@@ -410,7 +411,25 @@
     const cfg = PROVIDERS[provider] || { label: provider };
     if (!model) { els.modelLineText.textContent = cfg.label; return; }
     const short = model.includes('/') ? model.split('/').slice(1).join('/') : model;
-    els.modelLineText.textContent = `${cfg.label} · ${short}`;
+    const info = window.KyotoModels?.get(provider, model);
+    const fmt = window.KyotoModels?.formatN || ((n) => String(n));
+    const caps = info ? ` · ${fmt(info.context)}↧/${fmt(info.output)}↥` : '';
+    els.modelLineText.textContent = `${cfg.label} · ${short}${caps}`;
+    els.modelLineText.title = info ? `Context ${info.context ?? '?'} · Max output ${info.output ?? '?'} · via ${info.source}` : '';
+  }
+
+  function updateMaxTokensHint() {
+    if (!els.maxTokensHint) return;
+    const provider = state.settings.provider;
+    const model = state.settings.model;
+    const info = model ? window.KyotoModels?.get(provider, model) : null;
+    if (!info) return;
+    const fmt = window.KyotoModels?.formatN || ((n) => String(n));
+    const req = Number(els.maxTokens?.value) || state.settings.maxTokens;
+    const effective = Math.min(req, info.output || req);
+    els.maxTokensHint.innerHTML =
+      `Selected model supports up to <strong>${fmt(info.output)}</strong> output tokens, context ${fmt(info.context)}. ` +
+      `Your value will be clamped to <strong>${fmt(effective)}</strong> at request time. Source: ${info.source}.`;
   }
 
   function updateSessionsButton() {
@@ -507,11 +526,15 @@
     const groups = {};
     filtered.forEach(m => (groups[m.group] = groups[m.group] || []).push(m));
     const parts = [];
+    const fmt = window.KyotoModels?.formatN || ((n) => String(n || '—'));
+    const provider = state.settings.provider;
     Object.keys(groups).sort().forEach(g => {
       parts.push(`<div class="popover-group">${esc(g)}</div>`);
       groups[g].forEach(m => {
-        const active = m.id === (state.activeSession?.model || state.settings.model) ? ' active' : '';
-        parts.push(`<div class="popover-item${active}" data-model="${esc(m.id)}"><span>${esc(m.name)}</span><span class="check">✓</span></div>`);
+        const active = m.id === state.settings.model ? ' active' : '';
+        const info = window.KyotoModels?.get(provider, m.id);
+        const caps = info ? `<span class="popover-caps" title="ctx ${info.context ?? '?'} / out ${info.output ?? '?'} · ${info.source}">${fmt(info.context)} / ${fmt(info.output)}</span>` : '';
+        parts.push(`<div class="popover-item${active}" data-model="${esc(m.id)}"><span class="popover-mname">${esc(m.name)}</span>${caps}<span class="check">✓</span></div>`);
       });
     });
     els.popoverList.innerHTML = parts.join('');
@@ -726,11 +749,18 @@
     const baseTools = toolsEnabled ? window.KyotoTools.schemas(new Set(enabledGroups)) : [];
     const tools = [...baseTools, ...state.mcpTools];
 
+    // Clamp max_tokens to whatever models.dev (or our fallback table)
+    // says this model actually supports, so we don't ask for 32K from a
+    // model that maxes at 8K and get a 400.
+    const modelMax = window.KyotoModels?.maxOutput(provider, model, 8192) ?? 8192;
+    const requestedMax = Number(maxTokens) || 8192;
+    const effectiveMax = Math.max(64, Math.min(requestedMax, modelMax));
+
     const body = {
       model,
       messages,
       temperature: Number(temperature),
-      max_tokens: Number(maxTokens),
+      max_tokens: effectiveMax,
       stream: true
     };
     if (tools.length) {
@@ -877,6 +907,7 @@
     renderMcpList();
     refreshDebuggerStatus();
     reflectProvider(state.settings.provider);
+    updateMaxTokensHint();
     if (currentApiKey()) fetchModels(state.settings.provider, currentApiKey());
   }
   function closeDrawer() {
@@ -975,6 +1006,7 @@
       if (!item?.dataset.model) return;
       await saveSettings({ model: item.dataset.model });
       updateModelLine();
+      updateMaxTokensHint();
       closeModelPopover();
     });
 
@@ -1059,6 +1091,8 @@
       keyDebounce = setTimeout(() => fetchModels(els.provider.value, key), 400);
     });
     els.modelSearch.addEventListener('input', renderModelOptions);
+    els.maxTokens.addEventListener('input', updateMaxTokensHint);
+    els.model.addEventListener('change', updateMaxTokensHint);
 
     els.openExtPageBtn.addEventListener('click', () => {
       chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` });
@@ -1190,6 +1224,8 @@
   // ── Boot ─────────────────────────────────────────────
   (async () => {
     await loadSettings();
+    // Kick off models.dev registry load (cached, non-blocking after first run)
+    if (window.KyotoModels) window.KyotoModels.init().catch(() => {});
     state.sessionsIndex = await loadSessionsIndex();
     state.tabToSession = {};
     state.sessionsIndex.forEach(s => { if (s.tabId != null) state.tabToSession[s.tabId] = s.id; });

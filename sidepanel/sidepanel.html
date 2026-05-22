@@ -145,7 +145,7 @@
           <input type="number" id="maxTokens" min="64" max="131072" step="256" value="8192" />
         </div>
       </div>
-      <p class="hint">Max output tokens caps the model's <em>response</em> length, not the input. Most models accept 8K–16K; DeepSeek-V3 / Claude 3.7 / Gemini 2.x allow 64K+. Input/context length is limited separately by the model's context window.</p>
+      <p class="hint" id="maxTokensHint">Max output tokens caps the model's <em>response</em> length, not the input. Pulled from <a href="https://models.dev" target="_blank" rel="noopener">models.dev</a>; clamped automatically at request time.</p>
 
       <div class="field">
         <label class="check-row">
@@ -185,6 +185,7 @@
   </aside>
 
   <script src="../lib/marked.min.js"></script>
+  <script src="models-registry.js"></script>
   <script src="tools.js"></script>
   <script src="mcp.js"></script>
   <script src="sidepanel.js"></script>
