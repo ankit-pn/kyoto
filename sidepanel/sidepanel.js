@@ -268,13 +268,16 @@
   async function forkSession(sessionId) {
     const orig = await loadFullSession(sessionId);
     if (!orig) return;
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const copy = createSessionObject(tab);
+    // Create unbound (tab = null) so the fork doesn't steal the original's
+    // tab binding. User can bind it via the "bind" action if desired.
+    const copy = createSessionObject(null);
     copy.title = (orig.title || 'session') + ' (fork)';
+    copy.url = orig.url;
+    copy.provider = orig.provider;
+    copy.model = orig.model;
     // Deep clone history so subsequent edits don't leak back into the original.
     copy.history = JSON.parse(JSON.stringify(orig.history || []));
     await persistSession(copy);
-    state.tabToSession[copy.tabId] = copy.id;
     return copy;
   }
 
@@ -318,6 +321,8 @@
     for (const [k, v] of Object.entries(dump)) {
       if (k.startsWith('kyoto_session_')) continue;
       if (k.startsWith('kyoto_memory_')) continue;
+      if (k === 'kyoto_sessions_index') continue;   // index would reference missing bodies after import
+      if (k === 'kyoto_memory_index') continue;
       if (k === 'kyoto_audit_log') continue;
       if (k === 'kyoto_cookie_snapshot') continue;
       if (k === 'kyoto_models_dev_cache') continue;
@@ -612,6 +617,9 @@
     else state.sessionsIndex.unshift(meta);
     state.sessionsIndex.sort((a, b) => b.lastActive - a.lastActive);
     await chrome.storage.local.set({ [INDEX_KEY]: state.sessionsIndex });
+    // Invalidate the deep-search content cache so the next search picks
+    // up newly-added messages instead of returning stale matches.
+    sessionContentCache?.delete?.(s.id);
   }
   async function deleteSession(id) {
     await chrome.storage.local.remove(SESS_KEY(id));
@@ -622,6 +630,7 @@
     }
     if (state.runtimes[id]?.abort) state.runtimes[id].abort.abort();
     delete state.runtimes[id];
+    sessionContentCache?.delete?.(id);
   }
   function createSessionObject(tab) {
     const id = newId();
@@ -1184,10 +1193,22 @@
       addMessage('assistant', 'No model selected. Pick one from the header (or Settings).', { error: true });
       openDrawer(); return;
     }
-    // Bind to current tab if floating
+    // Bind to current tab if floating. If another session was previously
+    // bound to this tab (e.g. user forked then started typing on the fork),
+    // clean its tabId so we don't leave a stale reference.
     if (session.tabId == null) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab) { session.tabId = tab.id; session.url = tab.url; state.tabToSession[tab.id] = session.id; }
+      if (tab) {
+        const prevId = state.tabToSession[tab.id];
+        if (prevId && prevId !== session.id) {
+          loadFullSession(prevId).then(prev => {
+            if (prev) { prev.tabId = null; persistSession(prev); }
+          });
+        }
+        session.tabId = tab.id;
+        session.url = tab.url;
+        state.tabToSession[tab.id] = session.id;
+      }
     }
     // First user message → derive title
     if (!session.history.length) {
