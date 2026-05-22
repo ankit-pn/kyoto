@@ -2,7 +2,7 @@
 # Kyoto native messaging host installer (Linux + macOS).
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- <EXTENSION_ID>
+#   curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.sh | bash -s -- <EXTENSION_ID>
 #   curl -fsSL .../install.sh | KYOTO_EXT_ID=<id> bash
 #   ./install.sh <EXTENSION_ID>
 #
@@ -26,7 +26,7 @@ if [[ -z "$EXT_ID" ]]; then
 Usage:
   ./install.sh <EXTENSION_ID>
 or
-  curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh \
+  curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.sh \
     | bash -s -- <EXTENSION_ID>
 
 Find your extension ID at chrome://extensions (toggle Developer mode).
@@ -75,7 +75,7 @@ case "$(uname -s)" in
   *)
     c_red "Unsupported OS: $(uname -s)"
     c_yellow "On Windows, use install.ps1 instead:"
-    c_yellow "  irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex"
+    c_yellow "  irm https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.ps1 | iex"
     exit 1
     ;;
 esac

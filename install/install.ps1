@@ -1,7 +1,7 @@
 # Kyoto native messaging host installer (Windows / PowerShell).
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.ps1 | iex
 #   (then it asks for the extension ID, OR set $env:KYOTO_EXT_ID first)
 #
 #   With explicit ID:

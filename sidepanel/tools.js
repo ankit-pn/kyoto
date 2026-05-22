@@ -1816,7 +1816,7 @@
       port.onDisconnect.addListener(() => {
         const lastErr = chrome.runtime.lastError;
         const e = lastErr
-          ? new Error(`Shell host: ${lastErr.message}. Run the installer? curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${chrome.runtime.id}`)
+          ? new Error(`Shell host: ${lastErr.message}. Run the installer? curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.sh | bash -s -- ${chrome.runtime.id}`)
           : null;
         disconnect(e);
       });
@@ -1854,8 +1854,8 @@
     description:
       'Execute a shell command on the user\'s OS via Kyoto\'s native messaging host. Runs as the user, with their PATH and env. ' +
       'Returns { stdout, stderr, exitCode }. Long-running commands stream nothing — they\'re captured in full and returned at the end (or `error: timed out`). ' +
-      'Requires the host to be installed once: curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- <EXTENSION_ID>. ' +
-      'WINDOWS: irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex. ' +
+      'Requires the host to be installed once: curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.sh | bash -s -- <EXTENSION_ID>. ' +
+      'WINDOWS: irm https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.ps1 | iex. ' +
       'The extension ID is shown in Settings → Shell bridge.',
     parameters: OBJ({
       command: STR,
@@ -1872,8 +1872,8 @@
       } catch (e) {
         return {
           error: e.message,
-          installHint: `Run: curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${chrome.runtime.id}`,
-          installHintWindows: `Run (PowerShell): $env:KYOTO_EXT_ID="${chrome.runtime.id}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex`
+          installHint: `Run: curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.sh | bash -s -- ${chrome.runtime.id}`,
+          installHintWindows: `Run (PowerShell): $env:KYOTO_EXT_ID="${chrome.runtime.id}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.ps1 | iex`
         };
       }
     }
@@ -1892,8 +1892,8 @@
         return {
           ok: false,
           error: e.message,
-          installHint: `curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${chrome.runtime.id}`,
-          installHintWindows: `$env:KYOTO_EXT_ID="${chrome.runtime.id}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex`
+          installHint: `curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.sh | bash -s -- ${chrome.runtime.id}`,
+          installHintWindows: `$env:KYOTO_EXT_ID="${chrome.runtime.id}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.ps1 | iex`
         };
       }
     }

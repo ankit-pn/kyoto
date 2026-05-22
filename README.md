@@ -201,14 +201,14 @@ Kyoto can execute shell commands on your OS via Chrome's native messaging API. A
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh \
+curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.sh \
   | bash -s -- <YOUR_EXTENSION_ID>
 ```
 
 ```powershell
 # Windows (PowerShell)
 $env:KYOTO_EXT_ID = "<YOUR_EXTENSION_ID>"
-irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex
+irm https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.ps1 | iex
 ```
 
 Find `<YOUR_EXTENSION_ID>` at `chrome://extensions` (Developer mode enabled), or open Kyoto → ⚙ Settings → **Shell bridge** — the ID is shown with a copy button, and the install command is pre-filled with your ID.

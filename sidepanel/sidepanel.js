@@ -2251,8 +2251,8 @@
       if (/linux|cros|x11/.test(ua)) return 'linux';
       return 'unknown';
     })();
-    const unixCmd = `curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.sh | bash -s -- ${extId}`;
-    const winCmd  = `$env:KYOTO_EXT_ID="${extId}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto/main/install/install.ps1 | iex`;
+    const unixCmd = `curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.sh | bash -s -- ${extId}`;
+    const winCmd  = `$env:KYOTO_EXT_ID="${extId}"; irm https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.ps1 | iex`;
     const isWin = os === 'windows';
     if (els.shellInstallLabel) els.shellInstallLabel.textContent = isWin
       ? 'One-line install (Windows · PowerShell)'
