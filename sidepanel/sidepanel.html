@@ -244,6 +244,41 @@
         <p class="hint">Granted at install time. Required for response-body capture, network modification, and full DevTools control via <code>debugger_attach</code> / <code>debugger_send</code>. Chrome shows a yellow banner on the tab while attached. If you see "Not granted", reload the extension on <code>chrome://extensions</code> (the ⤴ button takes you there).</p>
       </div>
 
+      <h3 class="drawer-section">AWS S3 (and S3-compatible)</h3>
+      <p class="hint">Credentials for the <code>s3_upload</code> tool and the <code>uploadToS3</code> option in <code>media_download</code>. Works with native AWS S3, Cloudflare R2, Wasabi, MinIO, Backblaze B2 (S3 API), etc.</p>
+      <div class="field-row">
+        <div class="field">
+          <label>Access Key ID</label>
+          <input type="text" id="s3AccessKeyId" placeholder="AKIA…" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label>Region</label>
+          <input type="text" id="s3Region" placeholder="us-east-1" autocomplete="off" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Secret Access Key</label>
+        <input type="password" id="s3SecretAccessKey" placeholder="…" autocomplete="off" />
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Bucket</label>
+          <input type="text" id="s3Bucket" placeholder="my-bucket" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label>Key prefix (optional)</label>
+          <input type="text" id="s3KeyPrefix" placeholder="kyoto/" autocomplete="off" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Custom endpoint (for R2 / Wasabi / MinIO; leave blank for AWS)</label>
+        <input type="text" id="s3Endpoint" placeholder="https://<acct>.r2.cloudflarestorage.com" autocomplete="off" />
+      </div>
+      <div class="mcp-actions">
+        <button class="btn-mini" id="s3TestBtn" type="button">Test upload</button>
+        <p class="status" id="s3Status"></p>
+      </div>
+
       <h3 class="drawer-section">Custom OpenAI-compatible providers</h3>
       <div id="customProvidersList"></div>
       <div class="mcp-actions">

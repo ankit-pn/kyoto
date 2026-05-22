@@ -112,6 +112,14 @@
     importSettingsBtn: $('importSettingsBtn'),
     importSettingsInput: $('importSettingsInput'),
     backupStatus: $('backupStatus'),
+    s3AccessKeyId: $('s3AccessKeyId'),
+    s3SecretAccessKey: $('s3SecretAccessKey'),
+    s3Region: $('s3Region'),
+    s3Bucket: $('s3Bucket'),
+    s3KeyPrefix: $('s3KeyPrefix'),
+    s3Endpoint: $('s3Endpoint'),
+    s3TestBtn: $('s3TestBtn'),
+    s3Status: $('s3Status'),
     downloadAuditBtn: $('downloadAuditBtn'),
     clearAuditBtn: $('clearAuditBtn'),
     auditStatus: $('auditStatus'),
@@ -418,7 +426,10 @@
     '/ts':         'Take the JSON I just pasted (or the latest tool result) and use `json_to_typescript` to generate the TypeScript interfaces. Root name: {{args}}',
     '/postman':    'Export the captured network buffer as a Postman v2.1 collection using `network_postman_export`. Show me the host breakdown.',
     '/py':         'Run this Python via `python_exec` and show me the value + stdout/stderr: {{args}}',
-    '/pip':        'Install the package(s) "{{args}}" via micropip in the Python sandbox, then `python_exec` a small import test to confirm.'
+    '/pip':        'Install the package(s) "{{args}}" via micropip in the Python sandbox, then `python_exec` a small import test to confirm.',
+    '/media':      'Use `media_detect` on this tab to list every media URL (video / audio / streams) found in the DOM and recent network traffic. Then suggest the best one to download.',
+    '/download':   'Use `media_download` to grab this URL into the user\'s Downloads folder: {{args}}',
+    '/s3':         'Upload the URL/file described in "{{args}}" to S3 via `s3_upload` and return the resulting S3 URL.'
   };
 
   function expandSlash(text) {
@@ -614,7 +625,7 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax'],
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media'],
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
@@ -622,6 +633,14 @@
     // as config. Too low and complex multi-tool tasks die half-way.
     maxAgentSteps: 50,
     maxAutoContinues: 2,
+    // AWS S3 / S3-compatible (R2, Wasabi, MinIO, B2-S3) for the
+    // s3_upload and media_download tools.
+    s3AccessKeyId: '',
+    s3SecretAccessKey: '',
+    s3Region: 'us-east-1',
+    s3Bucket: '',
+    s3KeyPrefix: '',
+    s3Endpoint: '',
     theme: 'system',           // 'system' | 'light' | 'dark'
     density: 'comfortable',    // 'comfortable' | 'compact'
     hideReasoning: false,
@@ -1813,6 +1832,13 @@
     if (els.hideReasoning) els.hideReasoning.checked = !!state.settings.hideReasoning;
     if (els.testConnStatus) els.testConnStatus.textContent = '';
     if (els.backupStatus) els.backupStatus.textContent = '';
+    if (els.s3AccessKeyId) els.s3AccessKeyId.value = state.settings.s3AccessKeyId || '';
+    if (els.s3SecretAccessKey) els.s3SecretAccessKey.value = state.settings.s3SecretAccessKey || '';
+    if (els.s3Region) els.s3Region.value = state.settings.s3Region || 'us-east-1';
+    if (els.s3Bucket) els.s3Bucket.value = state.settings.s3Bucket || '';
+    if (els.s3KeyPrefix) els.s3KeyPrefix.value = state.settings.s3KeyPrefix || '';
+    if (els.s3Endpoint) els.s3Endpoint.value = state.settings.s3Endpoint || '';
+    if (els.s3Status) els.s3Status.textContent = '';
     renderToolGroupCheckboxes();
     renderProviderDropdown();
     renderCustomProvidersList();
@@ -2043,6 +2069,47 @@
     });
 
     if (els.testConnBtn) els.testConnBtn.addEventListener('click', testConnection);
+
+    if (els.s3TestBtn) els.s3TestBtn.addEventListener('click', async () => {
+      // Use the in-form values so the user can test BEFORE saving.
+      if (els.s3Status) { els.s3Status.textContent = 'Uploading…'; els.s3Status.className = 'status'; }
+      const access = (els.s3AccessKeyId?.value || '').trim();
+      const secret = (els.s3SecretAccessKey?.value || '').trim();
+      const region = (els.s3Region?.value || '').trim() || 'us-east-1';
+      const bucket = (els.s3Bucket?.value || '').trim();
+      const endpoint = (els.s3Endpoint?.value || '').trim();
+      if (!access || !secret || !bucket) {
+        els.s3Status.textContent = 'Need access key, secret, and bucket.';
+        els.s3Status.className = 'status err';
+        return;
+      }
+      try {
+        // Temporarily stash current settings, write the form values,
+        // call the tool, then restore. Avoids duplicating the signing
+        // logic that lives in tools.js.
+        const prev = await chrome.storage.local.get(['s3AccessKeyId','s3SecretAccessKey','s3Region','s3Bucket','s3Endpoint','s3KeyPrefix']);
+        await chrome.storage.local.set({
+          s3AccessKeyId: access, s3SecretAccessKey: secret,
+          s3Region: region, s3Bucket: bucket, s3Endpoint: endpoint,
+          s3KeyPrefix: (els.s3KeyPrefix?.value || '').trim()
+        });
+        try {
+          const res = await window.KyotoTools.call('s3_upload', {
+            content: `Kyoto test upload at ${new Date().toISOString()}\n`,
+            contentType: 'text/plain',
+            key: `kyoto-test-${Date.now()}.txt`
+          });
+          if (res?.error) throw new Error(res.error);
+          els.s3Status.innerHTML = `✓ Uploaded · <a href="${res.url}" target="_blank" rel="noopener">${res.url.length > 60 ? res.url.slice(0, 60) + '…' : res.url}</a>`;
+          els.s3Status.className = 'status ok';
+        } finally {
+          await chrome.storage.local.set(prev);
+        }
+      } catch (e) {
+        els.s3Status.textContent = `Failed: ${e.message}`;
+        els.s3Status.className = 'status err';
+      }
+    });
 
     if (els.themeSelect) els.themeSelect.addEventListener('change', async () => {
       await saveSettings({ theme: els.themeSelect.value });
@@ -2308,6 +2375,13 @@
         prompt: row.querySelector('.cs-prompt').value.trim()
       })).filter(c => c.name && c.prompt);
 
+      const s3AccessKeyId     = (els.s3AccessKeyId?.value     || '').trim();
+      const s3SecretAccessKey = (els.s3SecretAccessKey?.value || '').trim();
+      const s3Region          = (els.s3Region?.value          || '').trim() || 'us-east-1';
+      const s3Bucket          = (els.s3Bucket?.value          || '').trim();
+      const s3KeyPrefix       = (els.s3KeyPrefix?.value       || '').trim();
+      const s3Endpoint        = (els.s3Endpoint?.value        || '').trim();
+
       const customTools = Array.from(els.customToolsList?.querySelectorAll('.ct-row') || []).map(row => ({
         name: row.querySelector('.ct-name').value.trim(),
         description: row.querySelector('.ct-desc').value.trim(),
@@ -2337,7 +2411,8 @@
         provider, model, systemPrompt, temperature, maxTokens,
         toolsEnabled, maxAgentSteps, maxAutoContinues, enabledGroups,
         apiKeys, mcpServers, customProviders, customSlashCommands, customTools,
-        redactSensitive, auditEnabled, hideReasoning, theme, density
+        redactSensitive, auditEnabled, hideReasoning, theme, density,
+        s3AccessKeyId, s3SecretAccessKey, s3Region, s3Bucket, s3KeyPrefix, s3Endpoint
       });
       applyAppearance();
       compileCustomTools();
