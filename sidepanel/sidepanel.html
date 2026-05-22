@@ -141,10 +141,11 @@
           <input type="number" id="temperature" min="0" max="2" step="0.1" value="0.7" />
         </div>
         <div class="field">
-          <label>Max tokens</label>
-          <input type="number" id="maxTokens" min="64" max="32000" step="64" value="4096" />
+          <label>Max output tokens</label>
+          <input type="number" id="maxTokens" min="64" max="131072" step="256" value="8192" />
         </div>
       </div>
+      <p class="hint">Max output tokens caps the model's <em>response</em> length, not the input. Most models accept 8K–16K; DeepSeek-V3 / Claude 3.7 / Gemini 2.x allow 64K+. Input/context length is limited separately by the model's context window.</p>
 
       <div class="field">
         <label class="check-row">

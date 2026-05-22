@@ -165,7 +165,7 @@
     apiKeys: {},                  // per-provider stored keys
     systemPrompt: '',
     temperature: 0.7,
-    maxTokens: 4096,
+    maxTokens: 8192,
     toolsEnabled: true,
     enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc'],
     mcpServers: []
@@ -1096,7 +1096,7 @@
       const model = els.model.value;
       const systemPrompt = els.systemPrompt.value.trim();
       const temperature = Math.max(0, Math.min(2, Number(els.temperature.value) || 0.7));
-      const maxTokens = Math.max(64, Math.min(32000, Number(els.maxTokens.value) || 4096));
+      const maxTokens = Math.max(64, Math.min(131072, Number(els.maxTokens.value) || 8192));
       const toolsEnabled = !!els.toolsEnabled.checked;
       const enabledGroups = Array.from(els.toolGroups.querySelectorAll('input[type=checkbox]'))
         .filter(c => c.checked).map(c => c.dataset.group);
