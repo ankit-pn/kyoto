@@ -163,6 +163,27 @@
       </div>
 
       <div class="field">
+        <label class="check-row">
+          <input type="checkbox" id="redactSensitive" checked />
+          <span>Mask credentials in tool-result display</span>
+        </label>
+        <p class="hint">Bearer tokens, API keys, JWTs and long hex strings are replaced with placeholders in the chat UI. The model still sees the raw values — this only affects what is rendered.</p>
+      </div>
+
+      <div class="field">
+        <label class="check-row">
+          <input type="checkbox" id="auditEnabled" checked />
+          <span>Record tool-call audit log (this session)</span>
+        </label>
+        <div class="mcp-actions">
+          <button class="btn-mini" id="downloadAuditBtn" type="button">Download audit log</button>
+          <button class="btn-mini" id="clearAuditBtn" type="button">Clear</button>
+          <p class="status" id="auditStatus"></p>
+        </div>
+        <p class="hint">In-memory only — reset when the side panel reloads. Each entry: timestamp, session, tool, args, elapsed ms, error flag, result preview.</p>
+      </div>
+
+      <div class="field">
         <label>Browser permissions</label>
         <div class="perm-row">
           <span>Debugger (CDP / response bodies)</span>

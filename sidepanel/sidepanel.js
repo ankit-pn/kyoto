@@ -97,6 +97,11 @@
     visionBtn: $('visionBtn'),
     toolsEnabled: $('toolsEnabled'),
     toolGroups: $('toolGroups'),
+    redactSensitive: $('redactSensitive'),
+    auditEnabled: $('auditEnabled'),
+    downloadAuditBtn: $('downloadAuditBtn'),
+    clearAuditBtn: $('clearAuditBtn'),
+    auditStatus: $('auditStatus'),
     debuggerStatus: $('debuggerStatus'),
     openExtPageBtn: $('openExtPageBtn'),
     sessionsPopover: $('sessionsPopover'),
@@ -151,6 +156,25 @@
     catch { return esc(text || ''); }
   }
   function jsonString(v) { try { return JSON.stringify(v, null, 2); } catch { return String(v); } }
+
+  // Display-only redaction of common credentials. Model still receives
+  // the raw values — this only affects what we render in the chat.
+  function maskSensitive(str) {
+    if (!state.settings?.redactSensitive) return str;
+    return String(str)
+      .replace(/(Bearer\s+)[A-Za-z0-9._\-+/=]{16,}/g, '$1<REDACTED>')
+      .replace(/eyJ[A-Za-z0-9._\-+/=]{30,}\.[A-Za-z0-9._\-+/=]{10,}/g, 'eyJ<JWT-REDACTED>')
+      .replace(/sk-(?:proj-|or-v1-)?[A-Za-z0-9_\-]{20,}/g, (m) => m.slice(0, 8) + '<REDACTED>')
+      .replace(/\b[a-f0-9]{40,}\b/g, (m) => `${m.slice(0, 6)}<HEX-${m.length}-REDACTED>`)
+      .replace(/(("?(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret|password|x-api-key))"?\s*[:=]\s*"?)[A-Za-z0-9._\-+/]{8,}/gi, '$1<REDACTED>');
+  }
+
+  function auditAppend(entry) {
+    if (!state.settings?.auditEnabled) return;
+    state.auditLog ||= [];
+    state.auditLog.push({ ts: Date.now(), ...entry });
+    if (state.auditLog.length > 1000) state.auditLog.splice(0, state.auditLog.length - 1000);
+  }
   function fmtTime(ts) {
     const d = new Date(ts);
     const now = Date.now();
@@ -194,7 +218,12 @@
     '/har':        'Export the captured network buffer as HAR using `network_har_export`. Show me a summary of how many entries and the top hosts.',
     '/diffcookies': 'First call `cookies_snapshot` for this site with label "before", then wait — when I say "now", call `cookies_diff` with label "before" and show what changed.',
     '/search':     'Use `minimax_web_search` to find: {{args}}. Then summarise the top 3 results with citations.',
-    '/vlm':        'Use `minimax_describe_tab` to analyze the current tab. Prompt: {{args}}'
+    '/vlm':        'Use `minimax_describe_tab` to analyze the current tab. Prompt: {{args}}',
+    '/npm':        'Look up the npm package "{{args}}" using `npm_info`. Show version, license, repo, and dependencies.',
+    '/pypi':       'Look up the PyPI package "{{args}}" using `pypi_info`. Show version, summary, and project URLs.',
+    '/so':         'Use `stackoverflow_search` for: {{args}}. Show the top 5 results with title, score, and link.',
+    '/ts':         'Take the JSON I just pasted (or the latest tool result) and use `json_to_typescript` to generate the TypeScript interfaces. Root name: {{args}}',
+    '/postman':    'Export the captured network buffer as a Postman v2.1 collection using `network_postman_export`. Show me the host breakdown.'
   };
 
   function expandSlash(text) {
@@ -294,6 +323,8 @@
     toolsEnabled: true,
     enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax'],
     mcpServers: [],
+    redactSensitive: true,
+    auditEnabled: true,
     // Custom OpenAI-compat providers: [{ id, label, baseUrl, modelsPath, chatPath, authHeader, authPrefix }]
     // id is "custom_<slug>"; selected via the same provider dropdown.
     customProviders: [],
@@ -494,7 +525,7 @@
       const card = els.chat.querySelector(`.tool-card[data-tool-call-id="${CSS.escape(m.tool_call_id || '')}"]`);
       if (card) {
         const resultBlock = card.querySelector('.tool-result');
-        const txt = m.content;
+        const txt = maskSensitive(m.content);
         resultBlock.textContent = txt.length > 8000 ? txt.slice(0, 8000) + '\n…' : txt;
         const stateEl = card.querySelector('.tool-state');
         if (stateEl) {
@@ -995,15 +1026,27 @@
           }
 
           let result;
+          const tStart = Date.now();
           try { result = await callToolOrMCP(tc.function.name, args); }
           catch (e) { result = { error: e?.message || String(e) }; }
+          const tElapsed = Date.now() - tStart;
           const resultStr = jsonString(result);
           if (card) {
-            card.resultBlock.textContent = resultStr.length > 8000 ? resultStr.slice(0, 8000) + '\n…' : resultStr;
+            const masked = maskSensitive(resultStr);
+            card.resultBlock.textContent = masked.length > 8000 ? masked.slice(0, 8000) + '\n…' : masked;
             const stateEl = card.summary.querySelector('.tool-state');
             stateEl.textContent = result?.error ? 'error' : 'done';
             stateEl.className = `tool-state ${result?.error ? 'err' : 'ok'}`;
           }
+
+          auditAppend({
+            sessionId: session.id,
+            tool: tc.function.name,
+            args,
+            elapsedMs: tElapsed,
+            isError: !!result?.error,
+            resultPreview: resultStr.slice(0, 500)
+          });
 
           session.history.push({
             role: 'tool', tool_call_id: tc.id, name: tc.function.name,
@@ -1250,6 +1293,9 @@
     els.temperature.value = state.settings.temperature;
     els.maxTokens.value = state.settings.maxTokens;
     els.toolsEnabled.checked = !!state.settings.toolsEnabled;
+    els.redactSensitive.checked = state.settings.redactSensitive !== false;
+    els.auditEnabled.checked = state.settings.auditEnabled !== false;
+    if (els.auditStatus) els.auditStatus.textContent = `${(state.auditLog || []).length} entries`;
     renderToolGroupCheckboxes();
     renderProviderDropdown();
     renderCustomProvidersList();
@@ -1394,6 +1440,30 @@
       if (sid && state.runtimes[sid]?.abort) state.runtimes[sid].abort.abort();
     });
     if (els.visionBtn) els.visionBtn.addEventListener('click', toggleVisionPending);
+
+    if (els.downloadAuditBtn) els.downloadAuditBtn.addEventListener('click', () => {
+      const log = state.auditLog || [];
+      const blob = new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      chrome.downloads.download({
+        url,
+        filename: `kyoto-audit-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+        saveAs: true
+      }).catch(() => {
+        // Fallback: open in a new tab
+        chrome.tabs.create({ url });
+      });
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      if (els.auditStatus) {
+        els.auditStatus.textContent = `Downloaded ${log.length} entries.`;
+        els.auditStatus.className = 'status ok';
+      }
+    });
+    if (els.clearAuditBtn) els.clearAuditBtn.addEventListener('click', () => {
+      const n = (state.auditLog || []).length;
+      state.auditLog = [];
+      if (els.auditStatus) { els.auditStatus.textContent = `Cleared ${n} entries.`; els.auditStatus.className = 'status ok'; }
+    });
     els.newChatBtn.addEventListener('click', async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       const session = await createSession(tab);
@@ -1626,10 +1696,14 @@
       if (!isCustom && !apiKey) { els.saveStatus.textContent = 'API key required.'; els.saveStatus.className = 'status err'; return; }
       if (!model) { els.saveStatus.textContent = 'Select a model from the list.'; els.saveStatus.className = 'status err'; return; }
 
+      const redactSensitive = !!els.redactSensitive.checked;
+      const auditEnabled = !!els.auditEnabled.checked;
+
       await saveSettings({
         provider, model, systemPrompt, temperature, maxTokens,
         toolsEnabled, enabledGroups,
-        apiKeys, mcpServers, customProviders, customSlashCommands
+        apiKeys, mcpServers, customProviders, customSlashCommands,
+        redactSensitive, auditEnabled
       });
 
       // Re-init MCP tools after settings change

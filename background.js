@@ -171,6 +171,55 @@ const HANDLERS = {
     if (!rec) return { error: 'not found' };
     return rec;
   },
+  NET_CAPTURE_POSTMAN({ filter, includeSince, name = 'Kyoto capture' } = {}) {
+    let events = capture.events;
+    if (includeSince) events = events.filter(r => r.started >= includeSince);
+    if (filter) {
+      const re = new RegExp(filter, 'i');
+      events = events.filter(r => re.test(r.url));
+    }
+    // Group by host so the collection is readable.
+    const byHost = new Map();
+    for (const r of events) {
+      let host = '';
+      try { host = new URL(r.url).host; } catch { host = 'other'; }
+      if (!byHost.has(host)) byHost.set(host, []);
+      byHost.get(host).push(r);
+    }
+    const items = [...byHost.entries()].map(([host, reqs]) => ({
+      name: host,
+      item: reqs.map(r => {
+        let u;
+        try { u = new URL(r.url); } catch { u = null; }
+        const queryArr = [];
+        if (u) u.searchParams.forEach((v, k) => queryArr.push({ key: k, value: v }));
+        const headers = (r.requestHeaders || []).map(h => ({ key: h.name, value: h.value }));
+        return {
+          name: `${r.method} ${u ? u.pathname || '/' : r.url}`,
+          request: {
+            method: r.method,
+            header: headers,
+            url: u ? {
+              raw: r.url,
+              protocol: (u.protocol || 'https:').replace(':', ''),
+              host: u.hostname.split('.'),
+              path: (u.pathname || '/').replace(/^\/+/, '').split('/'),
+              query: queryArr
+            } : { raw: r.url }
+          },
+          response: []
+        };
+      })
+    }));
+    return {
+      info: {
+        name,
+        _postman_id: 'kyoto-' + Math.random().toString(36).slice(2),
+        schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json'
+      },
+      item: items
+    };
+  },
   NET_CAPTURE_HAR({ filter, includeSince } = {}) {
     let events = capture.events;
     if (includeSince) events = events.filter(r => r.started >= includeSince);
