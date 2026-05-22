@@ -2336,6 +2336,112 @@
     return { ok: false, log };
   }
 
+  // Module-level cache for YouTube auth we've sniffed from an open
+  // tab. PO tokens have a TTL of roughly an hour; we treat anything
+  // captured within the last 45 minutes as fresh enough to reuse.
+  const _ytAuthCache = { poToken: null, visitorData: null, capturedAt: 0 };
+  const YT_AUTH_FRESH_MS = 45 * 60 * 1000;
+
+  // Inject a MAIN-world fetch hook into any open YouTube tab. The hook
+  // watches POST /youtubei/v1/player requests — the body carries the
+  // freshly-minted poToken + visitorData the browser is using. Once
+  // the user plays *any* YouTube video with this hook installed, we
+  // can hand those creds to yt-dlp so it bypasses SABR without
+  // dropping cookies, without Node.js, and without bgutil.
+  async function _captureYoutubeAuth() {
+    // Cache hit — skip the scripting hop.
+    if (_ytAuthCache.poToken && (Date.now() - _ytAuthCache.capturedAt) < YT_AUTH_FRESH_MS) {
+      return { ..._ytAuthCache, fromCache: true };
+    }
+    let tabs;
+    try {
+      tabs = await chrome.tabs.query({ url: ['*://www.youtube.com/*', '*://m.youtube.com/*', '*://music.youtube.com/*'] });
+    } catch { return null; }
+    if (!tabs?.length) return null;
+
+    for (const tab of tabs) {
+      let res;
+      try {
+        res = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          world: 'MAIN',
+          // Idempotent in-page hook. We install once per page-load and
+          // accumulate captured creds in window.__kyotoYtAuth. Subsequent
+          // calls just read the current state.
+          func: () => {
+            try {
+              if (!window.__kyotoYtAuthHook) {
+                window.__kyotoYtAuthHook = true;
+                window.__kyotoYtAuth = window.__kyotoYtAuth || {};
+                const captureFromBody = (body) => {
+                  if (!body) return;
+                  let s = body;
+                  if (typeof s !== 'string') { try { s = String(s); } catch { return; } }
+                  if (!s || s[0] !== '{') return;
+                  try {
+                    const j = JSON.parse(s);
+                    const tok = j?.serviceIntegrityDimensions?.poToken;
+                    const vd  = j?.context?.client?.visitorData;
+                    if (tok) window.__kyotoYtAuth.poToken = tok;
+                    if (vd)  window.__kyotoYtAuth.visitorData = vd;
+                    if (tok || vd) window.__kyotoYtAuth.capturedAt = Date.now();
+                  } catch {}
+                };
+                // fetch hook
+                const origFetch = window.fetch;
+                window.fetch = function (input, init) {
+                  try {
+                    const u = typeof input === 'string' ? input : input?.url;
+                    if (u && /\/youtubei\/v1\/(player|next|browse)/.test(u) && init && init.body) {
+                      captureFromBody(init.body);
+                    }
+                  } catch {}
+                  return origFetch.apply(this, arguments);
+                };
+                // XHR hook (the player still uses XHR in some paths)
+                const xhrSend = XMLHttpRequest.prototype.send;
+                const xhrOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function (method, url) {
+                  this.__kyotoUrl = url;
+                  return xhrOpen.apply(this, arguments);
+                };
+                XMLHttpRequest.prototype.send = function (body) {
+                  try {
+                    if (this.__kyotoUrl && /\/youtubei\/v1\/(player|next|browse)/.test(this.__kyotoUrl)) {
+                      captureFromBody(body);
+                    }
+                  } catch {}
+                  return xhrSend.apply(this, arguments);
+                };
+              }
+              // Always backfill visitor_data from ytcfg if we have it
+              // there — it's stable and lets yt-dlp at least anchor the
+              // session even before we sniff a poToken from a real call.
+              try {
+                const vd = window.ytcfg?.data_?.INNERTUBE_CONTEXT?.client?.visitorData;
+                if (vd && !window.__kyotoYtAuth.visitorData) {
+                  window.__kyotoYtAuth.visitorData = vd;
+                  window.__kyotoYtAuth.capturedAt = window.__kyotoYtAuth.capturedAt || Date.now();
+                }
+              } catch {}
+              return window.__kyotoYtAuth || null;
+            } catch (e) {
+              return { error: e?.message || String(e) };
+            }
+          },
+        });
+      } catch { continue; }
+      const auth = res?.[0]?.result;
+      if (auth && !auth.error && (auth.poToken || auth.visitorData)) {
+        _ytAuthCache.poToken = auth.poToken || _ytAuthCache.poToken;
+        _ytAuthCache.visitorData = auth.visitorData || _ytAuthCache.visitorData;
+        _ytAuthCache.capturedAt = auth.capturedAt || Date.now();
+        return { ..._ytAuthCache, fromCache: false };
+      }
+    }
+    return null;
+  }
+
   // Heuristic: did this look like YouTube's SABR-only experiment biting?
   // SABR doesn't always surface as "403". When cookies are passed and
   // every audio/video stream is SABR-gated, yt-dlp instead reports:
@@ -2482,7 +2588,9 @@
       }
 
       const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-      const buildCmd = (binary, { ytClients, noCookies = false } = {}) => {
+      // ytAuth is captured once below and passed in by ref so retries
+      // can decide whether to include it.
+      const buildCmd = (binary, { ytClients, noCookies = false, ytAuth = null } = {}) => {
         const parts = [binary];
         if (useBrowserCookies && !noCookies) parts.push('--cookies-from-browser', 'chrome');
         if (audioOnly) {
@@ -2498,12 +2606,23 @@
         // it select `android_vr`, which serves plain non-SABR URLs and
         // doesn't 403. Pinning a different client tuple cookieless would
         // skip android_vr entirely and re-introduce the failure.
-        if (!noCookies && ytClients && /youtube\.com|youtu\.be/i.test(url)) {
+        const isYT = /youtube\.com|youtu\.be/i.test(url);
+        const extractorArgs = [];
+        if (!noCookies && ytClients && isYT) {
           // Multi-client fallback works around YouTube's SABR-only experiment
           // (see yt-dlp issue #12482). tv_simply / web_safari / mweb still
           // serve plain https segment URLs at the time of writing.
-          parts.push('--extractor-args', sq(`youtube:player_client=${ytClients}`));
+          extractorArgs.push(`player_client=${ytClients}`);
         }
+        if (ytAuth && isYT) {
+          // Sniffed from an open YouTube tab's player API call. The page
+          // is the "web" client so po_token's context is `web.gvs`
+          // (general video stream content). Visitor data anchors the
+          // session so the token validates server-side.
+          if (ytAuth.poToken) extractorArgs.push(`po_token=web.gvs+${ytAuth.poToken}`);
+          if (ytAuth.visitorData) extractorArgs.push(`visitor_data=${ytAuth.visitorData}`);
+        }
+        if (extractorArgs.length) parts.push('--extractor-args', sq(`youtube:${extractorArgs.join(';')}`));
         const dir = (outputDir || '~/Downloads').replace(/\/+$/, '');
         parts.push('-o', sq(`${dir}/%(title)s.%(ext)s`));
         parts.push('--print', sq('after_move:filepath'));
@@ -2555,6 +2674,17 @@
 
       // 3) For YouTube, try a SABR-resistant client tuple first.
       const isYouTube = /youtube\.com|youtu\.be/i.test(url);
+      // Try to pull a live PO-token + visitor_data from any open YouTube
+      // tab. The hook installs itself on first call and accumulates
+      // creds as the user's player makes its normal /youtubei/v1
+      // requests — so the very first invocation may have nothing yet,
+      // but subsequent ones (after any playback) will. Best-effort: a
+      // null result just means we fall through the existing retry chain.
+      let ytAuth = null;
+      if (isYouTube) {
+        try { ytAuth = await _captureYoutubeAuth(); } catch {}
+      }
+
       const clientPlan = isYouTube
         ? ['tv_simply,mweb,web_safari', 'default,tv_simply,mweb,web_safari,web_creator', null]
         : [null];
@@ -2565,7 +2695,7 @@
       let attemptedPotProvider = false;
       let potProviderLog;
       for (const ytClients of clientPlan) {
-        const cmd = buildCmd(binary, { ytClients });
+        const cmd = buildCmd(binary, { ytClients, ytAuth });
         // eslint-disable-next-line no-await-in-loop
         const r = await _shell(cmd + ' 2>&1', timeoutMs);
         lastResult = r;
