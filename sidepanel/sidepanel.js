@@ -97,6 +97,7 @@
     toolGroups: $('toolGroups'),
     debuggerStatus: $('debuggerStatus'),
     requestDebuggerBtn: $('requestDebuggerBtn'),
+    openExtPageBtn: $('openExtPageBtn'),
     sessionsPopover: $('sessionsPopover'),
     sessionsList: $('sessionsList'),
     sessionsSearch: $('sessionsSearch'),
@@ -1045,11 +1046,34 @@
     });
     els.modelSearch.addEventListener('input', renderModelOptions);
 
-    els.requestDebuggerBtn.addEventListener('click', async () => {
-      const has = els.debuggerStatus.textContent.startsWith('Granted');
-      if (has) await chrome.permissions.remove({ permissions: ['debugger'] });
-      else await chrome.permissions.request({ permissions: ['debugger'] });
-      refreshDebuggerStatus();
+    // Permission prompts must be initiated synchronously within the user
+    // gesture handler — no awaits before the chrome.permissions API call,
+    // otherwise Chrome (especially in side panels) treats the gesture as
+    // expired and silently rejects.
+    els.requestDebuggerBtn.addEventListener('click', () => {
+      const isGranted = els.debuggerStatus.textContent.startsWith('Granted');
+      els.debuggerStatus.textContent = isGranted ? 'Revoking…' : 'Requesting…';
+      els.debuggerStatus.className = 'permstatus';
+
+      const op = isGranted
+        ? chrome.permissions.remove({ permissions: ['debugger'] })
+        : chrome.permissions.request({ permissions: ['debugger'] });
+
+      op.then((result) => {
+        if (!isGranted && result === false) {
+          els.debuggerStatus.textContent = 'Denied or unavailable — use ⤴';
+          els.debuggerStatus.className = 'permstatus err';
+          return;
+        }
+        refreshDebuggerStatus();
+      }).catch((err) => {
+        els.debuggerStatus.textContent = `Error: ${err.message || err}`;
+        els.debuggerStatus.className = 'permstatus err';
+      });
+    });
+
+    els.openExtPageBtn.addEventListener('click', () => {
+      chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` });
     });
 
     els.mcpAddBtn.addEventListener('click', () => {
