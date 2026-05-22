@@ -192,7 +192,9 @@
     '/perf':       'Run `page_performance` on the current tab and summarise the navigation timing and paint metrics.',
     '/see':        '[CMD]:vision_one_shot',
     '/har':        'Export the captured network buffer as HAR using `network_har_export`. Show me a summary of how many entries and the top hosts.',
-    '/diffcookies': 'First call `cookies_snapshot` for this site with label "before", then wait — when I say "now", call `cookies_diff` with label "before" and show what changed.'
+    '/diffcookies': 'First call `cookies_snapshot` for this site with label "before", then wait — when I say "now", call `cookies_diff` with label "before" and show what changed.',
+    '/search':     'Use `minimax_web_search` to find: {{args}}. Then summarise the top 3 results with citations.',
+    '/vlm':        'Capture a tab screenshot via `tab_screenshot`, pass its dataUrl into `minimax_understand_image` with prompt: {{args}}'
   };
 
   function expandSlash(text) {
@@ -290,7 +292,7 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory'],
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax'],
     mcpServers: [],
     // Custom OpenAI-compat providers: [{ id, label, baseUrl, modelsPath, chatPath, authHeader, authPrefix }]
     // id is "custom_<slug>"; selected via the same provider dropdown.

@@ -1087,6 +1087,89 @@
     }
   });
 
+  // ──────── MINIMAX TOKEN-PLAN APIS ────────
+  // Native implementation of the two tools MiniMax's stdio MCP server
+  // exposes (`web_search` and `understand_image`), since browser
+  // extensions can't talk to local stdio MCP servers. Re-uses the
+  // MiniMax API key already in Settings (apiKeys.minimax) — works
+  // even when MiniMax isn't the active chat provider.
+  const MINIMAX_API_BASE = 'https://api.minimax.io';
+
+  async function minimaxKey() {
+    const got = await chrome.storage.local.get('apiKeys');
+    const k = got.apiKeys?.minimax;
+    if (!k) throw new Error('No MiniMax API key in Settings. Add one (Provider = MiniMax) — required for token-plan tools.');
+    return k;
+  }
+  async function minimaxFetch(path, body) {
+    const apiKey = await minimaxKey();
+    const res = await fetch(MINIMAX_API_BASE + path, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'MM-API-Source': 'Kyoto-Extension'
+      },
+      body: JSON.stringify(body)
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { throw new Error(`MiniMax non-JSON response (HTTP ${res.status}): ${text.slice(0, 200)}`); }
+    if (data.base_resp?.status_code && data.base_resp.status_code !== 0) {
+      throw new Error(`MiniMax API ${data.base_resp.status_code}: ${data.base_resp.status_msg || 'unknown error'}`);
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${data.error?.message || text.slice(0, 200)}`);
+    return data;
+  }
+
+  // MiniMax VLM expects a `data:image/...;base64,...` data URL.
+  // The stdio MCP server downloads HTTP(S) images server-side then
+  // base64-encodes; we have to do the same client-side.
+  async function toDataUrl(input) {
+    if (!input) throw new Error('image_url required');
+    if (input.startsWith('data:')) return input;
+    if (input.startsWith('http://') || input.startsWith('https://')) {
+      const r = await fetch(input);
+      if (!r.ok) throw new Error(`Failed to fetch image: HTTP ${r.status}`);
+      const blob = await r.blob();
+      return await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onloadend = () => res(fr.result);
+        fr.onerror = () => rej(new Error('FileReader failed'));
+        fr.readAsDataURL(blob);
+      });
+    }
+    throw new Error('image_url must start with http://, https://, or data:');
+  }
+
+  T({
+    name: 'minimax_web_search',
+    group: 'minimax',
+    description: 'Web search via MiniMax token-plan (Google-grade results). Returns organic results { title, link, snippet, date } and related search suggestions. Requires a MiniMax API key in Settings — works even if MiniMax is not the active chat provider. Best with 3–5 keyword queries; include the year for time-sensitive topics.',
+    parameters: OBJ({ query: STR }, ['query']),
+    handler: async ({ query }) => {
+      if (!query || !query.trim()) throw new Error('query required');
+      const data = await minimaxFetch('/v1/coding_plan/search', { q: query });
+      return {
+        organic: data.organic || [],
+        related_searches: data.related_searches || []
+      };
+    }
+  });
+
+  T({
+    name: 'minimax_understand_image',
+    group: 'minimax',
+    description: 'Vision/VLM analysis via MiniMax token-plan. Pass a `prompt` describing what to extract and an `image_url` (http(s) URL, data URL, or paired with `tab_screenshot` result). Supports JPEG/PNG/WebP. Returns a text description. Tip: capture a screenshot with `tab_screenshot` then feed its dataUrl into this tool for "what is on this page" workflows.',
+    parameters: OBJ({ prompt: STR, image_url: STR }, ['prompt', 'image_url']),
+    handler: async ({ prompt, image_url }) => {
+      if (!prompt) throw new Error('prompt required');
+      const dataUrl = await toDataUrl(image_url);
+      const data = await minimaxFetch('/v1/coding_plan/vlm', { prompt, image_url: dataUrl });
+      return { content: data.content || '' };
+    }
+  });
+
   // ──────── MEMORY (cross-session) ────────
   // Persistent notes the user (or the agent) can write, search, and recall.
   // Storage:
