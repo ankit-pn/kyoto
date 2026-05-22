@@ -1313,10 +1313,28 @@
       if (!bucket) throw new Error('No S3 bucket configured.');
       let bytes, contentType;
       if (args.content != null) {
-        bytes = new TextEncoder().encode(args.content);
-        contentType = args.contentType || 'text/plain; charset=utf-8';
+        // Detect data: URLs so the common "screenshot -> upload" flow
+        // doesn't upload the base64 string as a text file.
+        const dm = typeof args.content === 'string' && args.content.startsWith('data:')
+          ? args.content.match(/^data:([^;,]+)?(?:;([^,]+))?,([\s\S]*)$/)
+          : null;
+        if (dm) {
+          contentType = args.contentType || dm[1] || 'application/octet-stream';
+          if (dm[2] === 'base64') {
+            const bin = atob(dm[3]);
+            bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          } else {
+            bytes = new TextEncoder().encode(decodeURIComponent(dm[3]));
+          }
+        } else {
+          bytes = new TextEncoder().encode(args.content);
+          contentType = args.contentType || 'text/plain; charset=utf-8';
+        }
       } else if (args.sourceUrl) {
-        const r = await fetch(args.sourceUrl);
+        // credentials: 'include' so authenticated URLs work (the user's
+        // cookies are sent — extension has <all_urls> host permission).
+        const r = await fetch(args.sourceUrl, { credentials: 'include' });
         if (!r.ok) throw new Error(`source fetch ${r.status}`);
         bytes = new Uint8Array(await r.arrayBuffer());
         contentType = args.contentType || r.headers.get('content-type') || 'application/octet-stream';
@@ -1439,7 +1457,7 @@
         if (!s.accessKey || !s.secretKey) throw new Error('S3 credentials not configured (Settings → AWS S3).');
         const bucket = s3Bucket || s.bucket;
         if (!bucket) throw new Error('No S3 bucket configured.');
-        const r = await fetch(url);
+        const r = await fetch(url, { credentials: 'include' });
         if (!r.ok) throw new Error(`source fetch ${r.status}`);
         const bytes = new Uint8Array(await r.arrayBuffer());
         const contentType = r.headers.get('content-type') || 'application/octet-stream';
@@ -1490,7 +1508,10 @@
         if (!pr) {
           // Last-resort scrape of the inline script
           const html = document.documentElement.innerHTML;
-          const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;\s*(?:var |<\/script>)/);
+          // [\s\S]+? — `.+?` doesn't span newlines and the YouTube
+          // inline JSON spans them. The non-greedy quantifier stops
+          // at the first `};` followed by the right boundary token.
+          const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]+?\})\s*;\s*(?:var |<\/script>)/);
           if (m) { try { pr = JSON.parse(m[1]); } catch {} }
         }
         if (!pr) {
