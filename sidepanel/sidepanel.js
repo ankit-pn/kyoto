@@ -238,17 +238,34 @@
       body.appendChild(q);
 
       let settled = false;
+      let cardObserver = null;
       const finish = (answer, viaButton = false) => {
         if (settled) return;
         settled = true;
-        card.classList.add('ask-done');
-        const ans = document.createElement('div');
-        ans.className = 'ask-answer';
-        ans.textContent = `→ ${answer}`;
-        body.appendChild(ans);
-        for (const el of card.querySelectorAll('button, input')) el.disabled = true;
+        if (cardObserver) { try { cardObserver.disconnect(); } catch {} cardObserver = null; }
+        // Only render the resolved-state badge if the card is still
+        // attached. If it was wiped by a session switch / chat clear,
+        // there's nothing to decorate.
+        if (card.isConnected) {
+          card.classList.add('ask-done');
+          const ans = document.createElement('div');
+          ans.className = 'ask-answer';
+          ans.textContent = `→ ${answer}`;
+          body.appendChild(ans);
+          for (const el of card.querySelectorAll('button, input')) el.disabled = true;
+        }
         resolve({ answer, viaButton });
       };
+
+      // Auto-cancel if the card is detached (session switch wipes
+      // els.chat.innerHTML, a /clear nukes the chat, etc.). Without
+      // this the promise hangs forever and the tool loop is stuck.
+      cardObserver = new MutationObserver(() => {
+        if (!settled && !card.isConnected) {
+          finish('(cancelled — chat view changed)', false);
+        }
+      });
+      cardObserver.observe(els.chat, { childList: true });
 
       if (options.length) {
         const chips = document.createElement('div');

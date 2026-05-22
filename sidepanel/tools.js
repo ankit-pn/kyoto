@@ -1866,6 +1866,26 @@
     return { send, get extensionId() { return chrome.runtime.id; } };
   })();
 
+  // Capability cache. Older shell hosts silently treat unknown `type`
+  // fields as a plain sync exec, so a `shell_exec_bg` call against an
+  // old host would otherwise run the command for real and time out with
+  // a misleading "no jobId" error. We ping once on first need and
+  // remember the answer.
+  let _hostJobsSupported = null;
+  async function _ensureJobsSupported() {
+    if (_hostJobsSupported !== null) return _hostJobsSupported;
+    try {
+      const r = await ShellHost.send({ type: 'ping' }, 5000);
+      _hostJobsSupported = !!r.jobs;
+    } catch {
+      _hostJobsSupported = false;
+    }
+    return _hostJobsSupported;
+  }
+  function _hostUpgradeHint() {
+    return `Re-run the installer to upgrade: curl -fsSL https://raw.githubusercontent.com/ankit-pn/kyoto-shell-bridge/main/install.sh | bash -s -- ${chrome.runtime.id}`;
+  }
+
   T({
     name: 'shell_exec',
     group: 'shell',
@@ -1926,10 +1946,13 @@
     }, ['command']),
     handler: async ({ command, cwd, env, idleTimeoutMs = 60000 } = {}) => {
       if (!command || !command.trim()) throw new Error('command required');
+      if (!await _ensureJobsSupported()) {
+        return { error: `Shell host doesn't support background jobs (v14.4+ required). ${_hostUpgradeHint()}` };
+      }
       try {
         const r = await ShellHost.send({ type: 'exec_bg', command, cwd, env, idleTimeoutMs }, 10000);
         if (r.error) return { error: r.error };
-        if (!r.jobId) return { error: 'host did not return a jobId — shell bridge may be out of date (need v14.4+). Re-run the installer.' };
+        if (!r.jobId) return { error: 'host did not return a jobId — shell bridge may be out of date. ' + _hostUpgradeHint() };
         return { jobId: r.jobId, idleTimeoutMs: r.idleTimeoutMs ?? idleTimeoutMs };
       } catch (e) { return { error: e.message }; }
     }
@@ -1945,6 +1968,9 @@
     parameters: OBJ({ jobId: STR, clear: BOOL }, ['jobId']),
     handler: async ({ jobId, clear } = {}) => {
       if (!jobId) throw new Error('jobId required');
+      if (!await _ensureJobsSupported()) {
+        return { error: `Shell host doesn't support background jobs. ${_hostUpgradeHint()}` };
+      }
       try {
         const r = await ShellHost.send({ type: 'job_poll', jobId, clear: !!clear }, 10000);
         if (r.error) return { error: r.error };
@@ -1962,6 +1988,9 @@
     parameters: OBJ({ jobId: STR, maxWaitMs: NUM, pollMs: NUM, clear: BOOL }, ['jobId']),
     handler: async ({ jobId, maxWaitMs = 30000, pollMs = 1000, clear } = {}) => {
       if (!jobId) throw new Error('jobId required');
+      if (!await _ensureJobsSupported()) {
+        return { error: `Shell host doesn't support background jobs. ${_hostUpgradeHint()}` };
+      }
       const start = Date.now();
       while (Date.now() - start < maxWaitMs) {
         let r;
@@ -1986,6 +2015,9 @@
     parameters: OBJ({ jobId: STR, reason: STR }, ['jobId']),
     handler: async ({ jobId, reason } = {}) => {
       if (!jobId) throw new Error('jobId required');
+      if (!await _ensureJobsSupported()) {
+        return { error: `Shell host doesn't support background jobs. ${_hostUpgradeHint()}` };
+      }
       try {
         const r = await ShellHost.send({ type: 'job_kill', jobId, reason }, 5000);
         if (r.error) return { error: r.error };
@@ -2000,6 +2032,9 @@
     description: 'List every background job the host knows about — running and completed. Returns { jobs: [{ jobId, command, done, exitCode, idleMs, elapsedMs, killedReason, cwd, idleTimeoutMs }] }.',
     parameters: OBJ(),
     handler: async () => {
+      if (!await _ensureJobsSupported()) {
+        return { error: `Shell host doesn't support background jobs. ${_hostUpgradeHint()}` };
+      }
       try {
         const r = await ShellHost.send({ type: 'jobs_list' }, 5000);
         if (r.error) return { error: r.error };
@@ -2016,7 +2051,8 @@
     handler: async () => {
       try {
         const r = await ShellHost.send({ type: 'ping' }, 5000);
-        return { ok: true, platform: r.platform, cwd: r.cwd, jobsSupported: !!r.jobs };
+        _hostJobsSupported = !!r.jobs;
+        return { ok: true, platform: r.platform, cwd: r.cwd, jobsSupported: _hostJobsSupported };
       } catch (e) {
         return {
           ok: false,

@@ -14,7 +14,7 @@ Bring your own key for any OpenAI-compatible provider (OpenRouter, DeepSeek, Min
 - **Any OpenAI-compatible provider, multiple at once.** Three first-class (OpenRouter / DeepSeek / MiniMax) plus an unlimited "custom" slot for Ollama, LM Studio, Groq, Together, Cerebras, Gemini-OAI, Anthropic-via-LiteLLM, your-own-proxy, etc.
 - **Per-tab sessions.** Every tab owns its own conversation. Switching tabs swaps the visible session; in-flight streams keep running for the tabs you left.
 - **Streaming tool-call loop.** Up to 12 round-trips per turn. Captures `reasoning_content` from DeepSeek thinking-mode and reasoning models, echoes it back as the API requires.
-- **~50 built-in tools** across browser, DOM, cookies, network, storage, devtools, debugger, history, memory, minimax, media, **shell**, devtools-export groups. Plus your own:
+- **~100 built-in tools** across browser, DOM, cookies, network, storage, devtools, debugger, history, memory, minimax, media, **shell** (with background jobs), **meta** (ask_user), devtools-export groups. Plus your own:
   - **Custom JS tools** — write a JS function body in Settings, model can call it.
   - **MCP server support** — JSON-RPC over HTTP; tools auto-registered as `mcp__<server>__<tool>`.
 - **Cost & token visibility.** `stream_options.include_usage` parsed; each assistant message gets a `1.2K↧ · 0.4K↥ · $0.0021` chip from models.dev pricing.
@@ -109,7 +109,8 @@ Toggle groups on/off in **Settings → Tool groups**.
 | **memory** | `memory_add`, `memory_list`, `memory_get`, `memory_search`, `memory_update`, `memory_delete` |
 | **minimax** | `minimax_web_search` (Google-grade web), `minimax_understand_image`, `minimax_describe_tab` (capture + analyze in one call) |
 | **media** | `media_detect`, `media_download` (local or S3, for direct file URLs), `s3_upload`, **`yt_dlp_run`** (full-quality download via shell bridge), `youtube_extract`, `youtube_capture_streams`, `yt_dlp_command` |
-| **shell** | `shell_exec` (run a command via the native messaging host), `shell_ping` |
+| **shell** | `shell_exec` (sync, supports `idleTimeoutMs` — kills only when output goes silent), `shell_exec_bg` + `shell_poll` / `shell_wait` / `shell_kill` / `shell_jobs` (background jobs with idle-based killing), `shell_ping` (reports `jobsSupported`) |
+| **meta** | `ask_user` (interactive chat-card prompt — agent pauses and waits for the user) |
 | **fs** | Virtual workspace (IndexedDB, GB-scale): `fs_write`, `fs_append`, `fs_read` (offset/limit chunks), `fs_list`, `fs_stat`, `fs_delete`, `fs_move`, `fs_total`, `fs_zip` (download as ZIP), `fs_clear` |
 
 Plus any MCP-server tools (auto-namespaced `mcp__<server>__<tool>`) and custom JS tools you define.
@@ -225,7 +226,11 @@ Or in normal chat: *"Run `git status` in `~/projects/foo` and tell me what's cha
 
 The installer writes manifests for every installed Chromium browser it finds (Chrome, Chrome Beta/Canary, Chromium, Edge, Brave, Vivaldi, Opera, Arc on macOS).
 
-Tools: **`shell_exec({ command, cwd?, timeoutMs?, env? })`**, **`shell_ping`**. Slash commands: **`/sh`**, **`/shell`**.
+Sync tools: **`shell_exec({ command, cwd?, timeoutMs?, idleTimeoutMs?, env? })`** (pass `idleTimeoutMs` instead of `timeoutMs` to kill only when output goes silent — no wall-clock cap), **`shell_ping`** (returns `jobsSupported: true` on v14.4+ hosts).
+
+Background tools (run a job, do other work, poll/wait/kill): **`shell_exec_bg`** → `{ jobId }`, **`shell_poll`** → `{ stdout, stderr, done, exitCode, idleMs, elapsedMs, killedReason }`, **`shell_wait`** → blocks until done or `maxWaitMs`, **`shell_kill`**, **`shell_jobs`** (list all). Jobs auto-die if idle past `idleTimeoutMs` (default 60s).
+
+Slash commands: **`/sh`**, **`/shell`**.
 
 ### Real YouTube / Instagram / Twitter / Vimeo / Twitch / TikTok / Bilibili downloads
 
@@ -292,7 +297,7 @@ sidepanel/
   sidepanel.html             the side panel UI
   sidepanel.css
   sidepanel.js               chat loop, sessions, settings, streaming, slash commands, custom-tool compile
-  tools.js                   the ~45 built-in tools
+  tools.js                   the ~100 built-in tools
   mcp.js                     minimal MCP JSON-RPC client (HTTP transport)
   models-registry.js         models.dev fetcher + cost helper + static fallback table
   ../lib/marked.min.js       markdown renderer
