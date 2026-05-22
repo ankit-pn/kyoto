@@ -288,7 +288,10 @@ def _cf_http(cf_token):
 def _cf_upsert_cname(http, zone_id, name, content, *, proxied):
     """Create or update a CNAME record. `name` is the leaf (e.g. 'skills' or full FQDN)."""
     r = http('GET', f'/zones/{zone_id}/dns_records?name={name}&type=CNAME')
-    existing = r.get('result') or []
+    # Defensive: CF's `type=` filter should already constrain results, but
+    # belt-and-braces in case the API misbehaves — we MUST NOT PUT a CNAME
+    # body to e.g. an existing A record's ID.
+    existing = [x for x in (r.get('result') or []) if x.get('type') == 'CNAME']
     payload = {'type': 'CNAME', 'name': name, 'content': content, 'proxied': proxied, 'ttl': 1}
     if existing:
         rid = existing[0]['id']

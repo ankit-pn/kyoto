@@ -22,6 +22,7 @@ This file is uploaded verbatim as the Lambda handler. Keep it
 single-file + stdlib-only (boto3 is provided by the Lambda runtime).
 """
 
+import hmac
 import json
 import os
 import re
@@ -89,9 +90,23 @@ def _require_auth(event):
     if not API_KEY:
         return _resp(500, {'error': 'server misconfigured: SKILL_API_KEY unset'})
     hdrs = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
-    if hdrs.get('x-kyoto-auth') != API_KEY:
+    # Constant-time compare — equality check on strings leaks the matched
+    # prefix length via response time, making the key brute-forceable.
+    if not hmac.compare_digest(hdrs.get('x-kyoto-auth') or '', API_KEY):
         return _resp(401, {'error': 'unauthorized'})
     return None
+
+
+def _parse_int(v, default, *, max_value=None):
+    """Coerce a query/body value to int. Return `default` on bad input
+    rather than crashing the handler with ValueError → 500."""
+    try:
+        n = int(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
+    if max_value is not None:
+        n = min(n, max_value)
+    return max(0, n)
 
 
 # ---------- handlers --------------------------------------------------------
@@ -103,7 +118,7 @@ def _healthz(_event):
 def _list(event):
     qs = event.get('queryStringParameters') or {}
     domain = _norm_domain(qs.get('domain'))
-    limit = min(int(qs.get('limit') or 100), 500)
+    limit = _parse_int(qs.get('limit'), 100, max_value=500)
     r = _table.query(
         KeyConditionExpression=Key('domain').eq(domain),
         Limit=limit,
@@ -206,7 +221,7 @@ def _search(event):
         return _resp(400, {'error': 'invalid JSON body'})
     query = (body.get('query') or '').strip().lower()
     domain = _norm_domain(body.get('domain'))
-    limit = min(int(body.get('limit') or 10), 50)
+    limit = _parse_int(body.get('limit'), 10, max_value=50)
     include_global = bool(body.get('includeGlobal', True))
 
     domains_to_query = [domain]

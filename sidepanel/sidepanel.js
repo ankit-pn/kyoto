@@ -690,15 +690,27 @@
     return /\[\s*goal[_\s-]?done\s*\]|\[\s*goal[_\s-]?complete\s*\]|\[\s*task[_\s-]?complete\s*\]/i.test(text);
   }
 
-  // Heuristic: pull a site domain out of a URL.
+  // Heuristic: pull a site domain out of a URL. Edge cases:
+  //   - chrome://, about:, file:, data: → return 'global' (no real domain)
+  //   - IPv4 / IPv6 / localhost → return the hostname as-is (the last-two-
+  //     segments trick produces nonsense like "1.1" for 192.168.1.1).
+  //   - Multi-part TLDs (co.uk, ne.jp, …) → returns "co.uk" which is wrong
+  //     in principle but acceptable for the dev domains Kyoto sees.
   function urlDomain(u) {
+    if (!u) return 'global';
     try {
-      const h = new URL(u).hostname.replace(/^www\./, '');
-      // eTLD+1: take last 2 segments (good enough for most sites; misses
-      // foo.co.uk style but rare in dev workflows). Use 'global' as
-      // fallback so the agent can still search.
+      const parsed = new URL(u);
+      if (!/^https?:/.test(parsed.protocol)) return 'global';
+      const h = (parsed.hostname || '').replace(/^www\./, '');
+      if (!h) return 'global';
+      // IPv4
+      if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(h)) return h;
+      // IPv6 (parsed.hostname returns "[::1]" without the brackets)
+      if (h.includes(':')) return h;
+      // localhost / single-label hostnames
+      if (!h.includes('.')) return h;
       const parts = h.split('.');
-      return parts.length >= 2 ? parts.slice(-2).join('.') : h || 'global';
+      return parts.slice(-2).join('.');
     } catch { return 'global'; }
   }
 
@@ -803,12 +815,15 @@
       if (isActive(session.id)) addMessage('assistant', `_Skill extraction: missing required fields (name + content)._`, { error: true });
       return;
     }
+    const cleanTags = (Array.isArray(parsed.tags) ? parsed.tags : [])
+      .filter(t => typeof t === 'string' && t.trim())
+      .map(t => t.trim().toLowerCase());
     const save = await window.KyotoSkillHub.save({
-      domain: parsed.domain || domainHint,
+      domain: (typeof parsed.domain === 'string' && parsed.domain) ? parsed.domain : domainHint,
       name: parsed.name,
-      description: parsed.description || '',
+      description: (typeof parsed.description === 'string') ? parsed.description : '',
       content: parsed.content,
-      tags: Array.isArray(parsed.tags) ? parsed.tags : [],
+      tags: cleanTags,
       createdBy: trigger === 'manual' ? 'user' : 'agent',
     });
     if (save?.error) {
@@ -830,13 +845,23 @@
   // presses and navigations and forwards them here. On stop we ask
   // for a skill name + description and distil the timeline into a
   // markdown playbook via oneShotCompletion, then save to the hub.
-  state.capture = { active: false, events: [], tabId: null, startedAt: 0, startUrl: '' };
+  state.capture = { active: false, sessionId: null, events: [], tabId: null, startedAt: 0, startUrl: '' };
 
   // The function below is serialised + injected into the page by
   // chrome.scripting.executeScript. It must be self-contained: no
   // closures, no helpers from this file. Returns { ok } so the
   // injection promise can detect double-install.
-  function _kyotoCaptureContentScript() {
+  //
+  // The session ID is stamped onto every fired event so the side
+  // panel can drop events from a previous (now-stopped) capture
+  // session — without it, listeners that survive across stop→start
+  // cycles or live in the wrong tab can leak events into the new
+  // session and silently corrupt the captured timeline.
+  function _kyotoCaptureContentScript(sessionId) {
+    // On re-injection (idempotent guard): just refresh the session ID
+    // so existing listeners stamp the NEW value. This is the key trick
+    // for cross-session safety.
+    window.__kyotoCaptureSessionId = sessionId;
     if (window.__kyotoCaptureInstalled) return { ok: true, already: true };
     window.__kyotoCaptureInstalled = true;
 
@@ -883,14 +908,30 @@
       if (t === 'password') return '«password»';
       if (t === 'email')    return '«email»';
       if (t === 'tel')      return '«phone»';
+      // Catch payment / OTP / secret-ish inputs that don't use a typed
+      // <input>. Sniff name / aria-label / placeholder / autocomplete
+      // for keywords the user would NOT want in a saved skill log.
+      const hint = [
+        el.getAttribute && el.getAttribute('name'),
+        el.getAttribute && el.getAttribute('aria-label'),
+        el.getAttribute && el.getAttribute('placeholder'),
+        el.getAttribute && el.getAttribute('autocomplete'),
+        el.id,
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (/\b(cc|card|ccv|cvv|cvc|exp|expiry|expir|pan)\b/.test(hint)) return '«card»';
+      if (/\b(otp|totp|2fa|mfa|one[-_ ]?time|verif(?:y|ication)[-_ ]?code|auth[-_ ]?code)\b/.test(hint)) return '«otp»';
+      if (/\b(secret|token|api[-_ ]?key|private[-_ ]?key|ssn|tax[-_ ]?id)\b/.test(hint)) return '«secret»';
       const v = String(el.value ?? '');
       return v.length > VALUE_MAX ? v.slice(0, VALUE_MAX) + '…' : v;
     }
 
     function fire(payload) {
+      const sid = window.__kyotoCaptureSessionId;
+      if (!sid) return;  // capture stopped — drop without sending
       try {
         chrome.runtime.sendMessage({
           type: 'CAPTURE_EVENT',
+          sessionId: sid,
           payload: {
             ...payload,
             url: location.href,
@@ -988,8 +1029,9 @@
       addMessage('assistant', `_Can\'t capture on \`${tab.url}\` (Chrome blocks content-script injection on internal pages)._`, { error: true });
       return;
     }
+    const sessionId = 'cap_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
     state.capture = {
-      active: true, events: [], tabId: tab.id,
+      active: true, sessionId, events: [], tabId: tab.id,
       startedAt: Date.now(), startUrl: tab.url || '',
     };
     updateCaptureUI();
@@ -997,20 +1039,24 @@
       await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: false },
         func: _kyotoCaptureContentScript,
+        args: [sessionId],
       });
     } catch (e) {
-      state.capture.active = false;
+      state.capture = { active: false, sessionId: null, events: [], tabId: null, startedAt: 0, startUrl: '' };
       updateCaptureUI();
       addMessage('assistant', `_Capture failed: ${e.message}_`, { error: true });
       return;
     }
     // Re-inject after navigation — content scripts die on full reload.
+    // We capture the sessionId at registration time so a navigation
+    // event after stopCapture+startCapture re-injects with the NEW id.
     state.capture._navListener = (tabId, info) => {
       if (!state.capture.active) return;
       if (tabId !== state.capture.tabId || info.status !== 'complete') return;
       chrome.scripting.executeScript({
         target: { tabId, allFrames: false },
         func: _kyotoCaptureContentScript,
+        args: [state.capture.sessionId],
       }).catch(() => {});
     };
     chrome.tabs.onUpdated.addListener(state.capture._navListener);
@@ -1021,10 +1067,24 @@
     if (!state.capture.active) return;
     const events = state.capture.events.slice();
     const startUrl = state.capture.startUrl;
+    const tabId = state.capture.tabId;
+    // Unregister BEFORE clearing state so the listener doesn't see a
+    // partial state object during the removal window.
     if (state.capture._navListener) {
       try { chrome.tabs.onUpdated.removeListener(state.capture._navListener); } catch {}
     }
-    state.capture = { active: false, events: [], tabId: null, startedAt: 0, startUrl: '' };
+    // Tell the in-page listeners to start dropping events immediately
+    // by zeroing the session id on the active page. Best-effort: if the
+    // tab navigated/closed, this no-ops cleanly.
+    if (tabId != null) {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId, allFrames: false },
+          func: () => { window.__kyotoCaptureSessionId = null; },
+        });
+      } catch {}
+    }
+    state.capture = { active: false, sessionId: null, events: [], tabId: null, startedAt: 0, startUrl: '' };
     updateCaptureUI();
 
     if (!events.length) {
@@ -1087,9 +1147,17 @@
     try { parsed = m ? JSON.parse(m[0]) : {}; } catch (e) {
       addMessage('assistant', `_Bad JSON from model — saving raw event log. (${e.message})_`, { error: true });
     }
-    const content = parsed.content || ('### Captured event log\n\n```\n' + compact + '\n```');
-    const description = parsed.description || `Recorded workflow on ${domain}`;
-    const tags = Array.isArray(parsed.tags) ? parsed.tags : ['recorded'];
+    // Coerce model output defensively — JSON can be the right SHAPE but
+    // wrong types (tags=string, content=number, …).
+    const content = (typeof parsed.content === 'string' && parsed.content.trim())
+      ? parsed.content
+      : ('### Captured event log\n\n```\n' + compact + '\n```');
+    const description = (typeof parsed.description === 'string' && parsed.description.trim())
+      ? parsed.description
+      : `Recorded workflow on ${domain}`;
+    const tags = (Array.isArray(parsed.tags) ? parsed.tags : ['recorded'])
+      .filter(t => typeof t === 'string' && t.trim())
+      .map(t => t.trim().toLowerCase());
 
     if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not available._', { error: true }); return; }
     const cfg = await window.KyotoSkillHub.config();
@@ -1116,12 +1184,14 @@
     if (!cfg) throw new Error(`unknown provider: ${provider}`);
     const apiKey = keyFor(provider);
     if (!apiKey && !cfg.isCustom) throw new Error(`no API key for ${cfg.label}`);
+    // Delegate header construction to the provider config so non-Bearer
+    // schemes (Anthropic's `x-api-key`, custom providers with bespoke
+    // headers) keep working. Previously hardcoded `authorization: Bearer …`
+    // silently 401'd on non-OpenAI-compat providers.
+    const headers = { 'content-type': 'application/json', ...cfg.headers(apiKey) };
     const res = await fetch(cfg.chatUrl, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-      },
+      headers,
       body: JSON.stringify({
         model,
         messages: [{ role: 'user', content: prompt }],
@@ -3661,6 +3731,17 @@
       const skillsHubKey = (els.skillsHubKey?.value || '').trim();
       const skillsAutoSave = !!(els.skillsAutoSave?.checked);
 
+      // Hub URL/key changed → drop the per-domain cache so stale skills
+      // from the old hub don't keep showing up in the system prompt.
+      const hubChanged =
+        skillsHubUrl !== (state.settings.skillsHubUrl || '') ||
+        skillsHubKey !== (state.settings.skillsHubKey || '');
+      if (hubChanged) {
+        try { _skillsDomainCache.clear(); } catch {}
+        state.skillsForCurrentDomain = [];
+        state.skillsForCurrentDomainKey = null;
+      }
+
       await saveSettings({
         provider, model, systemPrompt, temperature, maxTokens,
         toolsEnabled, maxAgentSteps, maxAutoContinues, enabledGroups,
@@ -3732,6 +3813,9 @@
       } else if (msg?.type === 'ASK_PAGE') {
         els.input.focus();
       } else if (msg?.type === 'CAPTURE_EVENT' && state.capture.active && msg.payload) {
+        // Drop events stamped with a stale session id — guards against
+        // cross-tab listeners + lingering messages from a prior session.
+        if (msg.sessionId && msg.sessionId !== state.capture.sessionId) return;
         // Coalesce: drop trailing duplicate fill events for the same selector.
         const last = state.capture.events[state.capture.events.length - 1];
         if (last && last.event === 'fill' && msg.payload.event === 'fill' && last.selector === msg.payload.selector) {
