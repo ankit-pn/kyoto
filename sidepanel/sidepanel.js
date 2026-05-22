@@ -94,6 +94,7 @@
     ctxTxt: $('ctxTxt'),
     reloadCtxBtn: $('reloadCtxBtn'),
     useContext: $('useContext'),
+    visionBtn: $('visionBtn'),
     toolsEnabled: $('toolsEnabled'),
     toolGroups: $('toolGroups'),
     debuggerStatus: $('debuggerStatus'),
@@ -121,7 +122,8 @@
     pinnedToSession: false,     // when true, tab switches do NOT swap session
     page: null,                 // page context for active tab
     allModels: [],
-    mcpTools: []                // dynamically-added tool defs
+    mcpTools: [],                // dynamically-added tool defs
+    visionPending: false         // one-shot: attach screenshot to next message
   };
 
   // ── Marked setup ─────────────────────────────────────
@@ -187,7 +189,10 @@
     '/remember':   'Save this as a long-lived memory using `memory_add`. Title and content based on: {{args}}',
     '/recall':     'Search my saved memories using `memory_search` for: {{args}}',
     '/inspect':    'Use `page_query` to inspect "{{args}}" on the current page and describe what you find (tag, attrs, text, visibility).',
-    '/perf':       'Run `page_performance` on the current tab and summarise the navigation timing and paint metrics.'
+    '/perf':       'Run `page_performance` on the current tab and summarise the navigation timing and paint metrics.',
+    '/see':        '[CMD]:vision_one_shot',
+    '/har':        'Export the captured network buffer as HAR using `network_har_export`. Show me a summary of how many entries and the top hosts.',
+    '/diffcookies': 'First call `cookies_snapshot` for this site with label "before", then wait — when I say "now", call `cookies_diff` with label "before" and show what changed.'
   };
 
   function expandSlash(text) {
@@ -244,6 +249,33 @@
     }
     if (action === 'open_sessions') { toggleSessionsPopover(); return; }
     if (action === 'open_settings') { openDrawer(); return; }
+    if (action === 'vision_one_shot') {
+      // /see <prompt> — capture screenshot now and send as a multimodal
+      // user message in one shot, regardless of the visionBtn toggle.
+      try {
+        const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 80 });
+        const prompt = args || 'Describe what you see in this screenshot in detail.';
+        return sendMessage([
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: dataUrl } }
+        ]);
+      } catch (e) {
+        addMessage('assistant', `Screenshot failed: ${e.message}`, { error: true });
+      }
+      return;
+    }
+  }
+
+  function toggleVisionPending() {
+    state.visionPending = !state.visionPending;
+    updateVisionUI();
+  }
+  function updateVisionUI() {
+    if (!els.visionBtn) return;
+    els.visionBtn.classList.toggle('active', state.visionPending);
+    els.visionBtn.title = state.visionPending
+      ? 'Screenshot will be attached to the next message. Click to cancel.'
+      : 'Attach a screenshot of the current tab with the next message (requires a vision-capable model)';
   }
 
   // ── Settings persistence ─────────────────────────────
@@ -497,8 +529,27 @@
 
     const body = document.createElement('div');
     body.className = 'msg-body';
-    if (role === 'assistant' || opts.error) body.innerHTML = renderMarkdown(content);
-    else body.textContent = content;
+    if (Array.isArray(content)) {
+      // multimodal — text parts rendered as markdown, image parts as <img>
+      for (const part of content) {
+        if (part.type === 'text' && part.text) {
+          const t = document.createElement('div');
+          if (role === 'assistant' || opts.error) t.innerHTML = renderMarkdown(part.text);
+          else t.textContent = part.text;
+          body.appendChild(t);
+        } else if (part.type === 'image_url' && part.image_url?.url) {
+          const img = document.createElement('img');
+          img.src = part.image_url.url;
+          img.className = 'msg-image';
+          img.loading = 'lazy';
+          body.appendChild(img);
+        }
+      }
+    } else if (role === 'assistant' || opts.error) {
+      body.innerHTML = renderMarkdown(content);
+    } else {
+      body.textContent = content;
+    }
     wrap.appendChild(label);
     wrap.appendChild(body);
     els.chat.appendChild(wrap);
@@ -818,7 +869,30 @@
     if (!raw || !raw.trim()) return;
     const { kind, text, action, args } = expandSlash(raw);
     if (kind === 'inline') { await handleInlineSlash(action, args); return; }
+    // Honour the one-shot vision toggle.
+    if (state.visionPending) {
+      try {
+        const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 80 });
+        state.visionPending = false;
+        updateVisionUI();
+        return sendMessage([
+          { type: 'text', text },
+          { type: 'image_url', image_url: { url: dataUrl } }
+        ]);
+      } catch (e) {
+        addMessage('assistant', `Screenshot failed: ${e.message}`, { error: true });
+        return;
+      }
+    }
     return sendMessage(text);
+  }
+
+  // Extract plain text from either a string or an OpenAI-style
+  // multi-modal content array.
+  function contentText(content) {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) return content.filter(p => p.type === 'text').map(p => p.text).join(' ');
+    return '';
   }
 
   // ── Chat loop ────────────────────────────────────────
@@ -855,7 +929,8 @@
     }
     // First user message → derive title
     if (!session.history.length) {
-      session.title = text.split('\n')[0].slice(0, 60);
+      const textForTitle = contentText(text);
+      session.title = (textForTitle.split('\n')[0] || 'New chat').slice(0, 60);
     }
 
     session.history.push({ role: 'user', content: text });
@@ -1124,7 +1199,7 @@
     // weigh them appropriately.
     const pinnedTexts = session.history
       .filter(m => m._pinned && m.content)
-      .map((m, i) => `[pinned ${i + 1}, role=${m.role}] ${m.content.slice(0, 800)}`);
+      .map((m, i) => `[pinned ${i + 1}, role=${m.role}] ${contentText(m.content).slice(0, 800)}`);
     if (pinnedTexts.length) {
       systemParts.push(
         `The user has pinned the following messages — treat them as elevated context:\n\n${pinnedTexts.join('\n\n')}`
@@ -1312,6 +1387,7 @@
       const sid = state.activeSession?.id;
       if (sid && state.runtimes[sid]?.abort) state.runtimes[sid].abort.abort();
     });
+    if (els.visionBtn) els.visionBtn.addEventListener('click', toggleVisionPending);
     els.newChatBtn.addEventListener('click', async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       const session = await createSession(tab);

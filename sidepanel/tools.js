@@ -754,6 +754,339 @@
     handler: async (args = {}) => bg('CHECK_PERMISSION', args)
   });
 
+  // ──────── HAR EXPORT ────────
+  T({
+    name: 'network_har_export',
+    group: 'network',
+    description: 'Export the captured network events as HAR 1.2 JSON, suitable for opening in DevTools / Insomnia / Postman. Optionally filter by URL substring/regex.',
+    parameters: OBJ({ filter: STR, includeSince: NUM }),
+    handler: async (args = {}) => bg('NET_CAPTURE_HAR', args)
+  });
+
+  // ──────── CURL ⇄ FETCH ────────
+  function parseCurlString(input) {
+    // Strip line continuations and surrounding whitespace
+    const cleaned = input.replace(/\\\n/g, ' ').trim();
+    // Tokenise with quote-awareness
+    const tokens = [];
+    let cur = '', q = null;
+    for (let i = 0; i < cleaned.length; i++) {
+      const c = cleaned[i];
+      if (q) {
+        if (c === q) { q = null; }
+        else if (c === '\\' && cleaned[i + 1] === q) { cur += q; i++; }
+        else { cur += c; }
+      } else if (c === "'" || c === '"') { q = c; }
+      else if (/\s/.test(c)) { if (cur) { tokens.push(cur); cur = ''; } }
+      else { cur += c; }
+    }
+    if (cur) tokens.push(cur);
+    if (!tokens.length || !/^curl$/i.test(tokens[0])) {
+      throw new Error('Input must start with `curl`.');
+    }
+    const out = { method: 'GET', url: '', headers: {}, body: null };
+    for (let i = 1; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t === '-X' || t === '--request') { out.method = tokens[++i].toUpperCase(); }
+      else if (t === '-H' || t === '--header') {
+        const h = tokens[++i];
+        const ci = h.indexOf(':');
+        if (ci > 0) out.headers[h.slice(0, ci).trim()] = h.slice(ci + 1).trim();
+      }
+      else if (t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary') {
+        out.body = tokens[++i];
+        if (out.method === 'GET') out.method = 'POST';
+      }
+      else if (t === '-b' || t === '--cookie') {
+        out.headers['Cookie'] = tokens[++i];
+      }
+      else if (t === '-u' || t === '--user') {
+        out.headers['Authorization'] = 'Basic ' + btoa(tokens[++i]);
+      }
+      else if (t === '-A' || t === '--user-agent') {
+        out.headers['User-Agent'] = tokens[++i];
+      }
+      else if (t === '-e' || t === '--referer') {
+        out.headers['Referer'] = tokens[++i];
+      }
+      else if (t.startsWith('--')) {
+        // Skip unrecognised flags' values heuristically (only consume if next is not URL-like)
+        if (tokens[i + 1] && !/^https?:/.test(tokens[i + 1]) && !tokens[i + 1].startsWith('-')) i++;
+      }
+      else if (t.startsWith('-')) {
+        // Short flag with arg
+        if (tokens[i + 1] && !/^https?:/.test(tokens[i + 1]) && !tokens[i + 1].startsWith('-')) i++;
+      }
+      else if (!out.url) {
+        out.url = t;
+      }
+    }
+    if (!out.url) throw new Error('No URL found in curl command.');
+    return out;
+  }
+
+  T({
+    name: 'curl_to_fetch',
+    group: 'network',
+    description: 'Parse a curl command (any common form: -X, -H, -d/--data, -b/--cookie, -u, etc.) and return an equivalent JavaScript `fetch()` snippet, plus the parsed request as an object.',
+    parameters: OBJ({ curl: STR }, ['curl']),
+    handler: async ({ curl }) => {
+      const r = parseCurlString(curl);
+      const opts = { method: r.method };
+      if (Object.keys(r.headers).length) opts.headers = r.headers;
+      if (r.body != null) opts.body = r.body;
+      const optsJson = JSON.stringify(opts, null, 2);
+      const snippet = `await fetch(${JSON.stringify(r.url)}, ${optsJson});`;
+      return { parsed: r, fetchSnippet: snippet };
+    }
+  });
+
+  T({
+    name: 'fetch_to_curl',
+    group: 'network',
+    description: 'Convert a fetch-style request (url + method/headers/body) into a copy-pasteable curl command.',
+    parameters: OBJ({
+      url: STR,
+      method: STR,
+      headers: { type: 'object', additionalProperties: STR },
+      body: {}
+    }, ['url']),
+    handler: async ({ url, method = 'GET', headers = {}, body } = {}) => {
+      const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+      const parts = ['curl', '-X', method.toUpperCase(), sq(url)];
+      for (const [k, v] of Object.entries(headers)) parts.push('-H', sq(`${k}: ${v}`));
+      if (body != null) {
+        const b = typeof body === 'string' ? body : JSON.stringify(body);
+        parts.push('--data-raw', sq(b));
+      }
+      return { curl: parts.join(' ') };
+    }
+  });
+
+  // ──────── COOKIE SNAPSHOT + DIFF ────────
+  const COOKIE_SNAP_KEY = 'kyoto_cookie_snapshot';
+
+  T({
+    name: 'cookies_snapshot',
+    group: 'cookies',
+    description: 'Save the current cookie state for a URL or domain as a snapshot. Use before performing an action (login, logout, accept-cookies banner) so cookies_diff can show what changed.',
+    parameters: OBJ({ url: STR, domain: STR, label: STR }),
+    handler: async ({ url, domain, label = 'default' } = {}) => {
+      const query = url ? { url } : domain ? { domain } : {};
+      if (!url && !domain) { const t = await activeTab(); query.url = t.url; }
+      const cookies = await chrome.cookies.getAll(query);
+      const all = (await chrome.storage.local.get(COOKIE_SNAP_KEY))[COOKIE_SNAP_KEY] || {};
+      all[label] = { takenAt: Date.now(), query, cookies };
+      await chrome.storage.local.set({ [COOKIE_SNAP_KEY]: all });
+      return { label, count: cookies.length, takenAt: all[label].takenAt };
+    }
+  });
+
+  T({
+    name: 'cookies_diff',
+    group: 'cookies',
+    description: 'Compare current cookies against a saved snapshot (by label). Returns added / removed / changed cookies. Reveals which cookies an action actually set or modified.',
+    parameters: OBJ({ label: STR, url: STR, domain: STR }),
+    handler: async ({ label = 'default', url, domain } = {}) => {
+      const all = (await chrome.storage.local.get(COOKIE_SNAP_KEY))[COOKIE_SNAP_KEY] || {};
+      const snap = all[label];
+      if (!snap) return { error: `No snapshot named "${label}". Call cookies_snapshot first.` };
+      const query = url ? { url } : domain ? { domain } : snap.query;
+      const now = await chrome.cookies.getAll(query);
+      const key = (c) => `${c.domain}|${c.path}|${c.name}`;
+      const before = new Map(snap.cookies.map(c => [key(c), c]));
+      const after = new Map(now.map(c => [key(c), c]));
+      const added = [], removed = [], changed = [];
+      for (const [k, v] of after) {
+        if (!before.has(k)) added.push(v);
+        else {
+          const b = before.get(k);
+          if (b.value !== v.value || b.expirationDate !== v.expirationDate) {
+            changed.push({ name: v.name, domain: v.domain, before: b.value.slice(0, 40), after: v.value.slice(0, 40) });
+          }
+        }
+      }
+      for (const [k, v] of before) {
+        if (!after.has(k)) removed.push(v);
+      }
+      return {
+        snapshotLabel: label,
+        snapshotAgeSec: Math.floor((Date.now() - snap.takenAt) / 1000),
+        added: added.map(c => ({ name: c.name, domain: c.domain, value: c.value.slice(0, 40), httpOnly: c.httpOnly, secure: c.secure })),
+        removed: removed.map(c => ({ name: c.name, domain: c.domain })),
+        changed
+      };
+    }
+  });
+
+  // ──────── STORAGE WRITES ────────
+  T({
+    name: 'page_local_storage_set',
+    group: 'storage',
+    description: 'Set a localStorage key on the active tab. WRITE operation.',
+    parameters: OBJ({ key: STR, value: STR, tabId: NUM }, ['key', 'value']),
+    handler: async ({ key, value, tabId } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      return scrip(tabId, (k, v) => { localStorage.setItem(k, v); return { set: true, key: k }; }, [key, value]);
+    }
+  });
+  T({
+    name: 'page_local_storage_remove',
+    group: 'storage',
+    description: 'Remove a localStorage key on the active tab. Pass key="*" to clear all. WRITE operation.',
+    parameters: OBJ({ key: STR, tabId: NUM }, ['key']),
+    handler: async ({ key, tabId } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      return scrip(tabId, (k) => {
+        if (k === '*') { localStorage.clear(); return { cleared: true }; }
+        localStorage.removeItem(k); return { removed: true, key: k };
+      }, [key]);
+    }
+  });
+  T({
+    name: 'page_session_storage_set',
+    group: 'storage',
+    description: 'Set a sessionStorage key on the active tab. WRITE operation.',
+    parameters: OBJ({ key: STR, value: STR, tabId: NUM }, ['key', 'value']),
+    handler: async ({ key, value, tabId } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      return scrip(tabId, (k, v) => { sessionStorage.setItem(k, v); return { set: true, key: k }; }, [key, value]);
+    }
+  });
+  T({
+    name: 'page_session_storage_remove',
+    group: 'storage',
+    description: 'Remove a sessionStorage key. Pass key="*" to clear all. WRITE operation.',
+    parameters: OBJ({ key: STR, tabId: NUM }, ['key']),
+    handler: async ({ key, tabId } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      return scrip(tabId, (k) => {
+        if (k === '*') { sessionStorage.clear(); return { cleared: true }; }
+        sessionStorage.removeItem(k); return { removed: true, key: k };
+      }, [key]);
+    }
+  });
+
+  // ──────── INDEXEDDB (read-only) ────────
+  T({
+    name: 'idb_list_databases',
+    group: 'storage',
+    description: 'List all IndexedDB databases visible to the active tab.',
+    parameters: OBJ({ tabId: NUM }),
+    handler: async ({ tabId } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      return scrip(tabId, async () => {
+        if (!indexedDB.databases) return { error: 'indexedDB.databases() unsupported in this browser' };
+        const list = await indexedDB.databases();
+        return list;
+      }, [], 'MAIN');
+    }
+  });
+
+  T({
+    name: 'idb_list_stores',
+    group: 'storage',
+    description: 'List object stores within an IndexedDB database, plus their indexes.',
+    parameters: OBJ({ database: STR, tabId: NUM }, ['database']),
+    handler: async ({ database, tabId }) => {
+      tabId = tabId ?? (await activeTab()).id;
+      return scrip(tabId, async (dbName) => {
+        return await new Promise((resolve) => {
+          const req = indexedDB.open(dbName);
+          req.onerror = () => resolve({ error: req.error?.message || 'open failed' });
+          req.onsuccess = () => {
+            const db = req.result;
+            const stores = [];
+            for (const name of db.objectStoreNames) {
+              const tx = db.transaction(name, 'readonly');
+              const st = tx.objectStore(name);
+              stores.push({
+                name,
+                keyPath: st.keyPath,
+                autoIncrement: st.autoIncrement,
+                indexNames: [...st.indexNames]
+              });
+            }
+            db.close();
+            resolve({ database: dbName, version: db.version, stores });
+          };
+        });
+      }, [database], 'MAIN');
+    }
+  });
+
+  T({
+    name: 'idb_read',
+    group: 'storage',
+    description: 'Read up to `limit` records from an IndexedDB object store. Read-only.',
+    parameters: OBJ({ database: STR, store: STR, limit: NUM, tabId: NUM }, ['database', 'store']),
+    handler: async ({ database, store, limit = 50, tabId }) => {
+      tabId = tabId ?? (await activeTab()).id;
+      return scrip(tabId, async (dbName, storeName, lim) => {
+        return await new Promise((resolve) => {
+          const req = indexedDB.open(dbName);
+          req.onerror = () => resolve({ error: req.error?.message || 'open failed' });
+          req.onsuccess = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(storeName)) {
+              db.close();
+              resolve({ error: `Store "${storeName}" not found` });
+              return;
+            }
+            const tx = db.transaction(storeName, 'readonly');
+            const st = tx.objectStore(storeName);
+            const out = [];
+            const cursorReq = st.openCursor();
+            cursorReq.onerror = () => { db.close(); resolve({ error: cursorReq.error?.message || 'cursor failed' }); };
+            cursorReq.onsuccess = (e) => {
+              const cur = e.target.result;
+              if (cur && out.length < lim) {
+                try { out.push({ key: cur.key, value: JSON.parse(JSON.stringify(cur.value)) }); }
+                catch { out.push({ key: cur.key, value: String(cur.value) }); }
+                cur.continue();
+              } else {
+                db.close();
+                resolve({ database: dbName, store: storeName, count: out.length, records: out });
+              }
+            };
+          };
+        });
+      }, [database, store, limit], 'MAIN');
+    }
+  });
+
+  // ──────── BULK FORM FILL ────────
+  T({
+    name: 'page_fill_form',
+    group: 'page',
+    description: 'Fill multiple form fields in one call. `fields` is an object mapping CSS selector -> value. Submits no form; pair with page_click on the submit button.',
+    parameters: OBJ({
+      fields: { type: 'object', additionalProperties: STR },
+      tabId: NUM
+    }, ['fields']),
+    handler: async ({ fields, tabId } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      return scrip(tabId, (map) => {
+        const results = [];
+        for (const [sel, val] of Object.entries(map)) {
+          const el = document.querySelector(sel);
+          if (!el) { results.push({ selector: sel, ok: false, error: 'no match' }); continue; }
+          el.focus();
+          if (el.isContentEditable) { el.textContent = val; }
+          else {
+            const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+            setter.call(el, val);
+          }
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          results.push({ selector: sel, ok: true });
+        }
+        return { filled: results.filter(r => r.ok).length, total: results.length, results };
+      }, [fields]);
+    }
+  });
+
   // ──────── MEMORY (cross-session) ────────
   // Persistent notes the user (or the agent) can write, search, and recall.
   // Storage:

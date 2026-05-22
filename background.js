@@ -171,6 +171,65 @@ const HANDLERS = {
     if (!rec) return { error: 'not found' };
     return rec;
   },
+  NET_CAPTURE_HAR({ filter, includeSince } = {}) {
+    let events = capture.events;
+    if (includeSince) events = events.filter(r => r.started >= includeSince);
+    if (filter) {
+      const re = new RegExp(filter, 'i');
+      events = events.filter(r => re.test(r.url));
+    }
+    const toHeaderArray = (hs) => (hs || []).map(h => ({ name: h.name, value: h.value }));
+    const entries = events.map((r) => ({
+      startedDateTime: new Date(r.started).toISOString(),
+      time: r.durationMs || 0,
+      request: {
+        method: r.method,
+        url: r.url,
+        httpVersion: 'HTTP/1.1',
+        headers: toHeaderArray(r.requestHeaders),
+        queryString: (() => {
+          try {
+            const u = new URL(r.url);
+            const out = [];
+            u.searchParams.forEach((v, k) => out.push({ name: k, value: v }));
+            return out;
+          } catch { return []; }
+        })(),
+        cookies: [],
+        headersSize: -1,
+        bodySize: -1
+      },
+      response: {
+        status: r.status || 0,
+        statusText: r.statusLine ? r.statusLine.split(' ').slice(2).join(' ') : '',
+        httpVersion: 'HTTP/1.1',
+        headers: toHeaderArray(r.responseHeaders),
+        cookies: [],
+        content: {
+          size: 0,
+          mimeType: (r.responseHeaders || []).find(h => /^content-type$/i.test(h.name))?.value || ''
+        },
+        redirectURL: '',
+        headersSize: -1,
+        bodySize: -1
+      },
+      cache: {},
+      timings: { send: 0, wait: r.durationMs || 0, receive: 0 },
+      _error: r.error,
+      _resourceType: r.type,
+      _fromCache: r.fromCache,
+      _initiator: r.initiator,
+      _serverIPAddress: r.ip
+    }));
+    return {
+      log: {
+        version: '1.2',
+        creator: { name: 'Kyoto', version: '7.0.0' },
+        browser: { name: 'Chrome', version: 'unknown' },
+        entries
+      }
+    };
+  },
 
   // ── server-side fetch (replay with cookies) ──
   async NET_FETCH({ url, method = 'GET', headers = {}, body, includeCookies = true, maxBodyBytes = 65536 }) {
