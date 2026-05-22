@@ -18,10 +18,10 @@
     "downloads",
     "notifications",
     "clipboardWrite",
-    "alarms"
+    "alarms",
+    "debugger"
   ],
   "optional_permissions": [
-    "debugger",
     "clipboardRead",
     "management",
     "topSites"

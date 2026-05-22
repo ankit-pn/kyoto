@@ -161,14 +161,13 @@
       </div>
 
       <div class="field">
-        <label>Optional permissions</label>
+        <label>Browser permissions</label>
         <div class="perm-row">
           <span>Debugger (CDP / response bodies)</span>
           <span id="debuggerStatus" class="permstatus">Unknown</span>
-          <button class="btn-mini" id="requestDebuggerBtn" type="button">Grant debugger</button>
           <button class="btn-mini" id="openExtPageBtn" type="button" title="Open chrome://extensions for this extension">⤴</button>
         </div>
-        <p class="hint">Required for response-body capture, network modification, and full DevTools control. Chrome shows a yellow banner on the tab. If the inline grant button does nothing (Chrome side-panel limitation), click ⤴ to open this extension's page in chrome://extensions and toggle the permission from there.</p>
+        <p class="hint">Granted at install time. Required for response-body capture, network modification, and full DevTools control via <code>debugger_attach</code> / <code>debugger_send</code>. Chrome shows a yellow banner on the tab while attached. If you see "Not granted", reload the extension on <code>chrome://extensions</code> (the ⤴ button takes you there).</p>
       </div>
 
       <h3 class="drawer-section">MCP servers</h3>

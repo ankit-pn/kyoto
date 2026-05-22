@@ -96,7 +96,6 @@
     toolsEnabled: $('toolsEnabled'),
     toolGroups: $('toolGroups'),
     debuggerStatus: $('debuggerStatus'),
-    requestDebuggerBtn: $('requestDebuggerBtn'),
     openExtPageBtn: $('openExtPageBtn'),
     sessionsPopover: $('sessionsPopover'),
     sessionsList: $('sessionsList'),
@@ -885,13 +884,12 @@
 
   async function refreshDebuggerStatus() {
     try {
-      const res = await chrome.runtime.sendMessage({ type: 'CHECK_PERMISSION', args: { permissions: ['debugger'] } });
-      const has = res?.data?.has;
-      els.debuggerStatus.textContent = has ? 'Granted ✓' : 'Not granted';
+      const has = await chrome.permissions.contains({ permissions: ['debugger'] });
+      els.debuggerStatus.textContent = has ? 'Granted ✓' : 'Not granted — reload via ⤴';
       els.debuggerStatus.className = `permstatus ${has ? 'ok' : 'err'}`;
-      els.requestDebuggerBtn.textContent = has ? 'Revoke debugger' : 'Grant debugger';
-    } catch {
-      els.debuggerStatus.textContent = 'Unknown';
+    } catch (e) {
+      els.debuggerStatus.textContent = `Error: ${e.message}`;
+      els.debuggerStatus.className = 'permstatus err';
     }
   }
 
@@ -1045,32 +1043,6 @@
       keyDebounce = setTimeout(() => fetchModels(els.provider.value, key), 400);
     });
     els.modelSearch.addEventListener('input', renderModelOptions);
-
-    // Permission prompts must be initiated synchronously within the user
-    // gesture handler — no awaits before the chrome.permissions API call,
-    // otherwise Chrome (especially in side panels) treats the gesture as
-    // expired and silently rejects.
-    els.requestDebuggerBtn.addEventListener('click', () => {
-      const isGranted = els.debuggerStatus.textContent.startsWith('Granted');
-      els.debuggerStatus.textContent = isGranted ? 'Revoking…' : 'Requesting…';
-      els.debuggerStatus.className = 'permstatus';
-
-      const op = isGranted
-        ? chrome.permissions.remove({ permissions: ['debugger'] })
-        : chrome.permissions.request({ permissions: ['debugger'] });
-
-      op.then((result) => {
-        if (!isGranted && result === false) {
-          els.debuggerStatus.textContent = 'Denied or unavailable — use ⤴';
-          els.debuggerStatus.className = 'permstatus err';
-          return;
-        }
-        refreshDebuggerStatus();
-      }).catch((err) => {
-        els.debuggerStatus.textContent = `Error: ${err.message || err}`;
-        els.debuggerStatus.className = 'permstatus err';
-      });
-    });
 
     els.openExtPageBtn.addEventListener('click', () => {
       chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` });
