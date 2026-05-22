@@ -39,7 +39,7 @@
   <main class="chat" id="chat">
     <div class="empty" id="empty">
       <h2>Your browser, agent-controlled</h2>
-      <p>Ask in natural language. Kyoto can read DOM, inspect network, dump cookies, run JS, click buttons, capture screenshots, search history, and offload non-browser work to opencode.</p>
+      <p>Ask in natural language. Kyoto can read DOM, inspect network, dump cookies, run JS, click buttons, capture screenshots, search history, and call out to MCP servers.</p>
       <div class="chips">
         <button class="chip" data-prompt="Summarize this page in 5 bullet points.">Summarize page</button>
         <button class="chip" data-prompt="List all cookies for this site and tell me which ones look important for the session (likely auth/session tokens).">Analyze cookies</button>
@@ -177,22 +177,6 @@
         <p class="status" id="mcpStatus"></p>
       </div>
       <p class="hint">Each enabled server's tools/list is loaded on Save, registered under group <code>mcp:&lt;name&gt;</code> and offered to the model. JSON-RPC over HTTP (POST).</p>
-
-      <h3 class="drawer-section">Opencode offload</h3>
-
-      <div class="field">
-        <label>Opencode base URL</label>
-        <input type="text" id="opencodeUrl" placeholder="http://localhost:4096" autocomplete="off" />
-      </div>
-      <div class="field">
-        <label>Opencode token (optional)</label>
-        <input type="password" id="opencodeToken" placeholder="Bearer token (sent as Authorization)" autocomplete="off" />
-      </div>
-      <div class="field">
-        <label>Opencode endpoint path</label>
-        <input type="text" id="opencodePath" placeholder="/api/message" autocomplete="off" />
-        <p class="hint">POST target for <code>opencode_send</code>. Customise to match your opencode server's message endpoint.</p>
-      </div>
 
       <button class="btn-primary" id="saveBtn">Save</button>
       <p class="status" id="saveStatus"></p>

@@ -754,50 +754,6 @@
     handler: async (args = {}) => bg('CHECK_PERMISSION', args)
   });
 
-  // ──────── OPENCODE OFFLOAD ────────
-  T({
-    name: 'opencode_send',
-    group: 'opencode',
-    description: 'Offload a non-browser agentic task to the configured opencode server. Configure URL/token in Kyoto Settings. Returns the server response (status + body).',
-    parameters: OBJ({
-      prompt: STR,
-      sessionId: STR,
-      path: STR,
-      method: STR,
-      body: {}
-    }, ['prompt']),
-    handler: async ({ prompt, sessionId, path, method = 'POST', body } = {}) => {
-      const { opencodeUrl, opencodeToken, opencodePath } = await chrome.storage.local.get([
-        'opencodeUrl', 'opencodeToken', 'opencodePath'
-      ]);
-      if (!opencodeUrl) throw new Error('Opencode URL not configured (Settings → Opencode).');
-      const url = new URL(path || opencodePath || '/api/message', opencodeUrl).toString();
-      const headers = { 'Content-Type': 'application/json' };
-      if (opencodeToken) headers['Authorization'] = `Bearer ${opencodeToken}`;
-      const payload = body ?? { prompt, sessionId };
-      const res = await fetch(url, { method, headers, body: JSON.stringify(payload) });
-      const text = await res.text();
-      let parsed;
-      try { parsed = JSON.parse(text); } catch { parsed = text; }
-      return { status: res.status, ok: res.ok, body: parsed };
-    }
-  });
-
-  T({
-    name: 'opencode_ping',
-    group: 'opencode',
-    description: 'Ping the configured opencode server (GET /) to verify connectivity.',
-    parameters: OBJ(),
-    handler: async () => {
-      const { opencodeUrl, opencodeToken } = await chrome.storage.local.get(['opencodeUrl', 'opencodeToken']);
-      if (!opencodeUrl) throw new Error('Opencode URL not configured.');
-      const headers = {};
-      if (opencodeToken) headers['Authorization'] = `Bearer ${opencodeToken}`;
-      const res = await fetch(opencodeUrl, { headers });
-      return { status: res.status, ok: res.ok };
-    }
-  });
-
   // ── Public API ───────────────────────────────────────
   window.KyotoTools = {
     list: () => TOOLS.map(t => ({ name: t.name, group: t.group, description: t.description })),

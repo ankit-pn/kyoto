@@ -95,9 +95,6 @@
     useContext: $('useContext'),
     toolsEnabled: $('toolsEnabled'),
     toolGroups: $('toolGroups'),
-    opencodeUrl: $('opencodeUrl'),
-    opencodeToken: $('opencodeToken'),
-    opencodePath: $('opencodePath'),
     debuggerStatus: $('debuggerStatus'),
     requestDebuggerBtn: $('requestDebuggerBtn'),
     sessionsPopover: $('sessionsPopover'),
@@ -170,10 +167,7 @@
     temperature: 0.7,
     maxTokens: 4096,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'opencode'],
-    opencodeUrl: '',
-    opencodeToken: '',
-    opencodePath: '/api/message',
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc'],
     mcpServers: []
   };
 
@@ -829,7 +823,7 @@
       'You are Kyoto, an AI browser agent embedded in a Chrome side panel. ' +
       'You have tool access to: open/navigate tabs, run JS in pages, read DOM, inspect & modify cookies (including export for session cloning), ' +
       'observe network requests, intercept fetch/XHR bodies, attach the Chrome DevTools Protocol (after the user grants the optional `debugger` permission), ' +
-      'search history/bookmarks/downloads, and offload non-browser work to an opencode server. ' +
+      'search history/bookmarks/downloads, and call out to any configured MCP servers. ' +
       'Each session is bound to a tab; tab switches by the user do not interrupt your work in this session. ' +
       'Prefer reading before writing. When the user asks for "session cloning" or "auth cookies", use `cookies_analyze` + `cookies_export`. ' +
       'When inspecting an API, use `network_capture_start`, perform the action, then `network_capture_list`/`network_capture_detail`. ' +
@@ -859,9 +853,6 @@
     els.temperature.value = state.settings.temperature;
     els.maxTokens.value = state.settings.maxTokens;
     els.toolsEnabled.checked = !!state.settings.toolsEnabled;
-    els.opencodeUrl.value = state.settings.opencodeUrl || '';
-    els.opencodeToken.value = state.settings.opencodeToken || '';
-    els.opencodePath.value = state.settings.opencodePath || '/api/message';
     renderToolGroupCheckboxes();
     renderMcpList();
     refreshDebuggerStatus();
@@ -1097,9 +1088,6 @@
       const toolsEnabled = !!els.toolsEnabled.checked;
       const enabledGroups = Array.from(els.toolGroups.querySelectorAll('input[type=checkbox]'))
         .filter(c => c.checked).map(c => c.dataset.group);
-      const opencodeUrl = els.opencodeUrl.value.trim();
-      const opencodeToken = els.opencodeToken.value.trim();
-      const opencodePath = els.opencodePath.value.trim() || '/api/message';
       const mcpServers = Array.from(els.mcpServersList.querySelectorAll('.mcp-row')).map(row => ({
         name: row.querySelector('.mcp-name').value.trim(),
         url: row.querySelector('.mcp-url').value.trim(),
@@ -1113,7 +1101,7 @@
       const apiKeys = { ...(state.settings.apiKeys || {}), [provider]: apiKey };
       await saveSettings({
         provider, apiKey, model, systemPrompt, temperature, maxTokens,
-        toolsEnabled, enabledGroups, opencodeUrl, opencodeToken, opencodePath,
+        toolsEnabled, enabledGroups,
         apiKeys, mcpServers
       });
 
