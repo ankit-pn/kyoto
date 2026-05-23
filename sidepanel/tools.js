@@ -3456,11 +3456,12 @@
     name: 'skill_save',
     group: 'skill',
     description:
-      'Save a skill (playbook) to the hub so future agents can re-use it. ' +
+      'CREATE a new skill (playbook) in the hub so future agents can re-use it. ' +
       'CALL THIS after you accomplish a non-trivial task that required real exploration — not for trivial Q&A. ' +
+      'To MODIFY an existing skill, use `skill_update` instead (cleaner partial-update semantics). ' +
       'Distill the WORKING APPROACH into a few hundred words: prereqs, the exact steps that succeeded, what *didn\'t* work and why, key gotchas. ' +
       'Pass `domain` (the site or tool this skill applies to, e.g. "youtube.com" or "linear.app"; use "global" for OS-agnostic patterns), a short `name`, a one-line `description`, the `content` as markdown, and 2-6 short `tags`. ' +
-      'Returns `{ skill_id, domain }`. If you pass an existing `skill_id` the skill is updated in place (preserves createdAt + usageCount).',
+      'Returns `{ skill_id, domain }`.',
     parameters: OBJ({
       domain: STR,
       name: STR,
@@ -3484,9 +3485,49 @@
   });
 
   T({
+    name: 'skill_update',
+    group: 'skill',
+    description:
+      'Update an existing skill in place. Use this when an existing skill is mostly right but stale, incomplete, or buggy. ' +
+      'Pass `skill_id` (required) + any subset of `name`, `description`, `content`, `tags`. ' +
+      'Fields you omit are kept from the existing record. `domain`, `createdAt`, and `usageCount` are always preserved. ' +
+      'To MOVE a skill to a different domain, delete + save instead (otherwise you\'d leave a duplicate behind). ' +
+      'Tip: call `skill_get { skill_id }` first to read the current body so you can merge instead of overwrite blindly.',
+    parameters: OBJ({
+      skill_id: STR,
+      name: STR,
+      description: STR,
+      content: STR,
+      tags: { type: 'array', items: STR }
+    }, ['skill_id']),
+    handler: async (args = {}) => {
+      const skill_id = args.skill_id || args.skillId || args.skillID || args.id;
+      if (!skill_id) return { error: 'skill_id is required' };
+      // Fetch the existing record to merge against — partial updates would
+      // otherwise blow away required fields like `content` server-side.
+      const existing = await _skillsApi('GET', `/v1/skills/${encodeURIComponent(skill_id)}`, {});
+      if (existing?.error) return { error: `cannot update — ${existing.error}`, skill_id };
+      const body = {
+        skill_id,
+        // Domain is pinned to the existing partition. A change here would
+        // create a duplicate under the new partition rather than move.
+        domain: existing.domain,
+        name: args.name !== undefined ? args.name : existing.name,
+        description: args.description !== undefined ? args.description : (existing.description || ''),
+        content: args.content !== undefined ? args.content : (existing.content || ''),
+        tags: Array.isArray(args.tags) ? args.tags : (existing.tags || []),
+        createdBy: existing.createdBy || 'agent',
+      };
+      const r = await _skillsApi('POST', '/v1/skills', { body });
+      if (r?.error) return r;
+      return { ...r, updated: true };
+    }
+  });
+
+  T({
     name: 'skill_delete',
     group: 'skill',
-    description: 'Delete a skill from the hub. Use sparingly — usually update instead. Pass `skill_id`; domain is optional (server resolves it via GSI).',
+    description: 'Delete a skill from the hub. Use sparingly — usually prefer `skill_update` instead. Pass `skill_id`; domain is optional (server resolves it via GSI).',
     parameters: OBJ({ skill_id: STR, domain: STR }, ['skill_id']),
     handler: async (args = {}) => {
       const skill_id = args.skill_id || args.skillId || args.skillID || args.id;

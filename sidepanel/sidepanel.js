@@ -634,7 +634,9 @@
     '/export-md':  'Use `chat_export { format: "markdown" }` to download the current chat as Markdown.',
     '/export-all': 'Use `chat_export { format: "json", scope: "all" }` to bundle every session into one JSON file.',
     '/save-skill': '[CMD]:save_skill',
-    '/skills':     '[CMD]:skills_list'
+    '/skills':     '[CMD]:skills_list',
+    '/update-skill': '[CMD]:update_skill',
+    '/delete-skill': '[CMD]:delete_skill'
   };
 
   // ── Goal + loop primitives (inspired by Claude Code) ─────────
@@ -741,7 +743,7 @@
 
   // Distil a session's recent task into a saved Skill via a one-shot LLM
   // call. Triggered automatically on goal_done OR via /save-skill.
-  async function extractAndSaveSkill(session, { trigger, hint, force } = {}) {
+  async function extractAndSaveSkill(session, { trigger, hint, force, targetSkillId } = {}) {
     if (!window.KyotoSkillHub) {
       if (force && isActive(session.id)) addMessage('assistant', '_Skill hub not available (extension not fully loaded)._', { error: true });
       return;
@@ -843,21 +845,24 @@
     const cleanTags = (Array.isArray(parsed.tags) ? parsed.tags : [])
       .filter(t => typeof t === 'string' && t.trim())
       .map(t => t.trim().toLowerCase());
-    const save = await window.KyotoSkillHub.save({
+    const savePayload = {
       domain: (typeof parsed.domain === 'string' && parsed.domain) ? parsed.domain : domainHint,
       name: parsed.name,
       description: (typeof parsed.description === 'string') ? parsed.description : '',
       content: parsed.content,
       tags: cleanTags,
       createdBy: trigger === 'manual' ? 'user' : 'agent',
-    });
+    };
+    if (targetSkillId) savePayload.skill_id = targetSkillId;
+    const save = await window.KyotoSkillHub.save(savePayload);
     if (save?.error) {
       if (isActive(session.id)) addMessage('assistant', `_Skill save failed: ${save.error}_`, { error: true });
       return;
     }
     if (isActive(session.id)) {
       const where = parsed.domain || domainHint;
-      addMessage('assistant', `_💡 Saved skill **${parsed.name}** under \`${where}\` (\`${save.skill_id}\`)._`);
+      const verb = save.updated ? 'Updated' : 'Saved';
+      addMessage('assistant', `_💡 ${verb} skill **${parsed.name}** under \`${where}\` (\`${save.skill_id}\`)._`);
     }
   }
 
@@ -1354,12 +1359,67 @@
     if (action === 'skills_list') {
       if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not loaded._', { error: true }); return; }
       const domain = (args || '').trim() || (state.page?.url ? urlDomain(state.page.url) : 'global');
-      const r = await window.KyotoSkillHub.search(domain, '', 10, true);
+      const r = await window.KyotoSkillHub.list(domain, 50);
       if (r?.error) { addMessage('assistant', `_Skill hub error: ${r.error}_`, { error: true }); return; }
       const items = r?.items || [];
       if (!items.length) { addMessage('assistant', `_No skills saved for \`${domain}\` yet._`); return; }
-      const lines = items.map(i => `- **${i.name}** (\`${i.skill_id}\`, ${i.domain}) — ${i.description || '_no description_'}`);
-      addMessage('assistant', `**Skills available for \`${domain}\`:**\n\n${lines.join('\n')}\n\nThe agent can pull any of these via \`skill_get\` when relevant.`);
+      const lines = items.map(i => {
+        const used = i.usageCount ? `, used ${i.usageCount}×` : '';
+        const len = i.contentLength ? `, ${i.contentLength}b` : '';
+        return `- **${i.name}** (\`${i.skill_id}\`, ${i.domain}${used}${len}) — ${i.description || '_no description_'}`;
+      });
+      addMessage('assistant',
+        `**Skills available for \`${domain}\`:**\n\n${lines.join('\n')}\n\n` +
+        `_The agent can pull any of these via \`skill_get\`. ` +
+        `You can also \`/update-skill <skill_id>\` to refresh from the current session, or \`/delete-skill <skill_id>\` to remove._`
+      );
+      return;
+    }
+    if (action === 'update_skill') {
+      if (!state.activeSession) { addMessage('assistant', '_No active session._', { error: true }); return; }
+      if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not loaded._', { error: true }); return; }
+      const trimmed = (args || '').trim();
+      if (!trimmed) {
+        addMessage('assistant', '_Usage:_ `/update-skill <skill_id> [hint]` — re-extracts the skill from this session and saves it under the existing skill_id (preserves createdAt + usageCount). Find ids via `/skills`.', { error: true });
+        return;
+      }
+      const [skill_id, ...hintParts] = trimmed.split(/\s+/);
+      const hint = hintParts.join(' ').trim();
+      // Verify the skill exists so we fail fast with a clear message.
+      const existing = await window.KyotoSkillHub.get(skill_id);
+      if (existing?.error) {
+        addMessage('assistant', `_No skill with id \`${skill_id}\`: ${existing.error}_`, { error: true });
+        return;
+      }
+      await extractAndSaveSkill(state.activeSession, { trigger: 'manual', force: true, hint, targetSkillId: skill_id });
+      return;
+    }
+    if (action === 'delete_skill') {
+      if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not loaded._', { error: true }); return; }
+      const trimmed = (args || '').trim();
+      if (!trimmed) {
+        addMessage('assistant', '_Usage:_ `/delete-skill <skill_id>` — permanently removes a skill from the hub. Find ids via `/skills`.', { error: true });
+        return;
+      }
+      const skill_id = trimmed.split(/\s+/)[0];
+      // Look up first to show the user what they're about to delete.
+      const existing = await window.KyotoSkillHub.get(skill_id);
+      if (existing?.error) {
+        addMessage('assistant', `_No skill with id \`${skill_id}\`: ${existing.error}_`, { error: true });
+        return;
+      }
+      if (!confirm(`Permanently delete skill "${existing.name}" (${existing.domain})?\n\nThis cannot be undone.`)) {
+        addMessage('assistant', '_Delete cancelled._');
+        return;
+      }
+      const r = await window.KyotoSkillHub.api('DELETE', `/v1/skills/${encodeURIComponent(skill_id)}`);
+      if (r?.error) {
+        addMessage('assistant', `_Delete failed: ${r.error}_`, { error: true });
+        return;
+      }
+      // Bust the per-domain cache so the next system-prompt build reflects the delete.
+      try { if (typeof _skillsDomainCache !== 'undefined') _skillsDomainCache.delete(existing.domain); } catch {}
+      addMessage('assistant', `_🗑️ Deleted skill **${existing.name}** (\`${skill_id}\`) from \`${existing.domain}\`._`);
       return;
     }
 
