@@ -340,3 +340,71 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   })();
   return true;
 });
+
+// ─────────────────────────────────────────────────────────────────
+// Codex SSE proxy
+// ─────────────────────────────────────────────────────────────────
+// Chrome's side panel / extension-page fetch sometimes refuses to
+// stream cross-origin SSE responses (CORS quirks; Cloudflare-fronted
+// endpoints that omit Content-Type / Access-Control-Allow-Origin).
+// The service worker doesn't hit those quirks — fetch + response.body
+// streaming works reliably here. So we proxy the Codex POST: side
+// panel opens a port, posts the request; we fetch and pipe each chunk
+// back as a port message; the side panel rebuilds a ReadableStream
+// from those messages and feeds its existing parser.
+//
+// Port lifecycle:
+//   panel -> connect({ name: 'codex-stream' })
+//   panel -> port.postMessage({ type: 'start', url, headers, body })
+//   bg    -> port.postMessage({ type: 'status', status, headers })  // once
+//   bg    -> port.postMessage({ type: 'chunk', data })              // 0..N times (data: Array<number>)
+//   bg    -> port.postMessage({ type: 'done' })                     // terminal
+//   bg    -> port.postMessage({ type: 'error', message })           // alt terminal
+//   panel -> port.postMessage({ type: 'abort' })                    // user cancel
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'codex-stream') return;
+  const ac = new AbortController();
+  let cleaned = false;
+  const cleanup = () => { if (cleaned) return; cleaned = true; try { ac.abort(); } catch {} try { port.disconnect(); } catch {} };
+  port.onDisconnect.addListener(cleanup);
+  port.onMessage.addListener(async (msg) => {
+    if (msg?.type === 'abort') { cleanup(); return; }
+    if (msg?.type !== 'start') return;
+    const { url, headers, body } = msg;
+    try {
+      const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal });
+      const respHeaders = {};
+      try { res.headers.forEach((v, k) => { respHeaders[k] = v; }); } catch {}
+      port.postMessage({ type: 'status', status: res.status, statusText: res.statusText, headers: respHeaders });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        port.postMessage({ type: 'error', message: `HTTP ${res.status}: ${text.slice(0, 800)}` });
+        cleanup();
+        return;
+      }
+      if (!res.body) {
+        port.postMessage({ type: 'error', message: 'response.body was null (no stream)' });
+        cleanup();
+        return;
+      }
+      const reader = res.body.getReader();
+      while (true) {
+        if (ac.signal.aborted) { cleanup(); return; }
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength) {
+          // Port messages are JSON-serialised, so Uint8Array becomes
+          // {0:n,1:n,…}. Convert to a plain array on send and back to
+          // bytes on receive.
+          port.postMessage({ type: 'chunk', data: Array.from(value) });
+        }
+      }
+      port.postMessage({ type: 'done' });
+      cleanup();
+    } catch (e) {
+      if (e?.name === 'AbortError') { port.postMessage({ type: 'error', message: 'aborted' }); }
+      else { port.postMessage({ type: 'error', message: e?.message || String(e) }); }
+      cleanup();
+    }
+  });
+});

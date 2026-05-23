@@ -793,6 +793,70 @@
     return out;
   }
 
+  // Bridge from the background service worker's `codex-stream` port
+  // back into a Response-like object with a ReadableStream body — the
+  // rest of openaiCodexChatFetch consumes res.body.getReader() the same
+  // way it would for a direct fetch. The SW handles the network call
+  // because Chrome's side-panel fetch can hang on the Codex SSE
+  // response (no Content-Type / no CORS headers from chatgpt.com).
+  function _backgroundFetchPort(port, { url, headers, body, signal }) {
+    return new Promise((resolveOuter, rejectOuter) => {
+      let statusResolved = false;
+      let streamCtl = null;
+      const stream = new ReadableStream({
+        start(c) { streamCtl = c; },
+      });
+      const settleResponse = (status, statusText, hdrs, errorText) => {
+        if (statusResolved) return;
+        statusResolved = true;
+        resolveOuter({
+          status,
+          statusText,
+          ok: status >= 200 && status < 300,
+          headers: hdrs || {},
+          body: stream,
+          errorText: errorText || null,
+        });
+      };
+      port.onMessage.addListener((m) => {
+        if (!m || !m.type) return;
+        if (m.type === 'status') {
+          settleResponse(m.status, m.statusText, m.headers, null);
+          return;
+        }
+        if (m.type === 'chunk') {
+          if (!streamCtl) return;
+          try { streamCtl.enqueue(new Uint8Array(m.data)); } catch {}
+          return;
+        }
+        if (m.type === 'done') {
+          try { streamCtl?.close(); } catch {}
+          try { port.disconnect(); } catch {}
+          return;
+        }
+        if (m.type === 'error') {
+          if (!statusResolved) {
+            // Synthesise a non-OK response so the caller's `if (!ok)`
+            // branch handles it (rather than the stream errorring).
+            settleResponse(0, 'background error', {}, m.message || 'unknown');
+          } else {
+            try { streamCtl?.error(new Error(m.message || 'codex error')); } catch {}
+          }
+          try { port.disconnect(); } catch {}
+        }
+      });
+      port.onDisconnect.addListener(() => {
+        if (!statusResolved) rejectOuter(new Error('background disconnected before response'));
+        else { try { streamCtl?.close(); } catch {} }
+      });
+      try {
+        port.postMessage({ type: 'start', url, headers, body });
+      } catch (e) {
+        rejectOuter(e);
+      }
+    });
+  }
+
   // Wrapper around fetch that hits the Codex Responses endpoint and
   // re-encodes the SSE response as Chat-Completions deltas on the fly.
   async function openaiCodexChatFetch({ model, body, signal }) {
@@ -805,33 +869,33 @@
       throw new Error('Missing ChatGPT account id — sign out and back in.');
     }
     const codexBody = _chatCompletionsToResponses(body, model);
-    // Always log to console — Codex debugging requires visibility into
-    // the exact body + event stream. The debug-flag-gated version was
-    // unhelpful when users hit a hang and didn't know to flip the flag.
-    console.log('[Codex] POST', CODEX_API_URL, {
+    console.log('[Codex] POST (via SW proxy)', CODEX_API_URL, {
       bodyPreview: JSON.stringify(codexBody).slice(0, 500),
       accountId,
       tokenPrefix: token.slice(0, 12) + '…',
     });
-    const upstream = await fetch(CODEX_API_URL, {
-      method: 'POST',
+
+    // Side-panel fetch sometimes refuses to stream the Codex SSE
+    // response (Chrome buffers cross-origin SSE with missing CORS
+    // headers, which Codex doesn't return). The background service
+    // worker doesn't hit that quirk — proxy through it.
+    const port = chrome.runtime.connect({ name: 'codex-stream' });
+    const upstream = await _backgroundFetchPort(port, {
+      url: CODEX_API_URL,
       headers: {
         'Authorization': `Bearer ${token}`,
         'ChatGPT-Account-Id': accountId,
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',
         'originator': 'opencode',
-        // Opencode tags requests with a session id for debugging; we
-        // use the active session id when available.
         'session_id': (state.activeSession?.id || 'kyoto') + '',
       },
       body: JSON.stringify(codexBody),
       signal,
     });
-    console.log('[Codex] HTTP', upstream.status, upstream.statusText, [...upstream.headers.entries()]);
+    console.log('[Codex] HTTP', upstream.status, upstream.statusText, upstream.headers);
     if (!upstream.ok) {
-      const errText = await upstream.text().catch(() => '');
-      throw new Error(`Codex HTTP ${upstream.status}: ${errText.slice(0, 400)}`);
+      throw new Error(`Codex HTTP ${upstream.status}: ${(upstream.errorText || '').slice(0, 400)}`);
     }
 
     // Re-encode the upstream Responses-SSE stream as an OpenAI Chat-
@@ -846,6 +910,13 @@
       rawEvents: [], // capture first 10 raw payloads for forensic logging
     };
     const reader = upstream.body.getReader();
+    // When the user aborts the chat (Stop button), propagate to the
+    // background's fetch via the port.
+    if (signal) {
+      const onAbort = () => { try { port.postMessage({ type: 'abort' }); } catch {} };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     let buffer = '';
