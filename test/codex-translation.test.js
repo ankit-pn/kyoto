@@ -32,10 +32,12 @@ const helperSrc = [
   extractFn('_extractAccountIdFromJwt'),
   extractFn('_extractAccountId'),
   extractFn('isCodexModel'),
+  extractFn('isOauthRoutableModel'),
   extractFn('_chatCompletionsToResponses'),
+  extractFn('_openaiCodexHeaders'),
 ].join('\n');
-const factory = new Function(`${helperSrc}\nreturn { isCodexModel, _chatCompletionsToResponses, _extractAccountId };`);
-const { isCodexModel, _chatCompletionsToResponses, _extractAccountId } = factory();
+const factory = new Function(`${helperSrc}\nreturn { isCodexModel, isOauthRoutableModel, _chatCompletionsToResponses, _extractAccountId, _openaiCodexHeaders };`);
+const { isCodexModel, isOauthRoutableModel, _chatCompletionsToResponses, _extractAccountId, _openaiCodexHeaders } = factory();
 
 let pass = 0, fail = 0;
 function eq(actual, expected, label) {
@@ -218,6 +220,12 @@ eq(isCodexModel('gpt-5-codex'), true, '9a');
 eq(isCodexModel('gpt-5.1-codex-max'), true, '9b');
 eq(isCodexModel('gpt-5'), false, '9c');
 eq(isCodexModel('gpt-5.5'), false, '9d');
+eq(isOauthRoutableModel('gpt-5.5'), true, '9e: gpt-5.5 oauth');
+eq(isOauthRoutableModel('gpt-5.4-mini'), true, '9f: gpt-5.4-mini oauth');
+eq(isOauthRoutableModel('gpt-5.3-codex'), true, '9g: gpt-5.3-codex oauth');
+eq(isOauthRoutableModel('gpt-5-codex'), false, '9h: old gpt-5-codex not oauth');
+eq(isOauthRoutableModel('gpt-5.2-codex'), false, '9i: non-allowlisted 5.2 variant not oauth');
+eq(isOauthRoutableModel('gpt-5.5-pro'), true, '9j: future/minor >5.4 oauth');
 
 // 10) Account id can come from either id_token or access_token. The
 // device-flow access token commonly carries the nested auth claim, and
@@ -231,6 +239,18 @@ eq(isCodexModel('gpt-5.5'), false, '9d');
   const top = makeJwt({ chatgpt_account_id: 'acct_top' });
   eq(_extractAccountId({ access_token: nested }), 'acct_nested', '10a: access token nested claim');
   eq(_extractAccountId({ id_token: top, access_token: nested }), 'acct_top', '10b: id token wins');
+}
+
+// 11) Codex headers mirror opencode's current OAuth plugin shape.
+{
+  const headers = _openaiCodexHeaders('tok', 'acct', 'req_1', 'sess_1');
+  eq(headers.Authorization, 'Bearer tok', '11a: bearer');
+  eq(headers['ChatGPT-Account-Id'], 'acct', '11b: account header casing');
+  eq(headers.originator, 'opencode', '11c: opencode originator');
+  eq(headers.session_id, 'sess_1', '11d: session id');
+  eq(headers['x-client-request-id'], 'req_1', '11e: request id');
+  eq(headers['ChatGPT-Account-ID'], undefined, '11f: no duplicate account header');
+  eq(headers.Originator, undefined, '11g: no duplicate originator header');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

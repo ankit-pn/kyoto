@@ -43,11 +43,10 @@ const ToChatLines = new Function(`${extractFn('_responsesEventToChatLines')}\nre
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${TOKEN}`,
-      'ChatGPT-Account-ID': ACCOUNT,
+      'ChatGPT-Account-Id': ACCOUNT,
       'Content-Type': 'application/json',
       'Accept': 'text/event-stream',
-      'Originator': 'codex_cli_rs',
-      'originator': 'codex_cli_rs',
+      'originator': 'opencode',
       'x-client-request-id': crypto.randomUUID(),
     },
     body: JSON.stringify(body),

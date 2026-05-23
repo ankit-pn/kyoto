@@ -541,16 +541,23 @@
 
   // Which OpenAI models route through the ChatGPT Plus/Pro OAuth path
   // (Codex backend at chatgpt.com/backend-api/codex/responses).
-  // Mirrors opencode's allowlist: any "-codex" variant, plus the GPT-5.x
-  // minor versions ChatGPT subscriptions have early access to (5.2+).
-  // Plain `gpt-5` / `gpt-5-mini` / `gpt-5-nano` are paid-API-only and
-  // require an OpenAI key.
+  // Mirrors opencode's current Codex OAuth model filter: a short
+  // explicit allowlist, plus future GPT-5 minor versions greater than
+  // 5.4. Older codex-looking ids such as gpt-5-codex are not accepted
+  // by this path anymore and can hang/fail without a useful answer.
   function isOauthRoutableModel(model) {
     if (typeof model !== 'string') return false;
-    if (isCodexModel(model)) return true;
-    // gpt-5.2, gpt-5.3, gpt-5.4, gpt-5.5, … — minor versions only.
-    const m = model.match(/^gpt-5\.(\d+)(?:[-.].*)?$/i);
-    if (m) return Number(m[1]) >= 2;
+    const allowed = new Set([
+      'gpt-5.5',
+      'gpt-5.2',
+      'gpt-5.3-codex',
+      'gpt-5.3-codex-spark',
+      'gpt-5.4',
+      'gpt-5.4-mini',
+    ]);
+    if (allowed.has(model)) return true;
+    const m = model.match(/^gpt-(\d+\.\d+)/i);
+    if (m) return parseFloat(m[1]) > 5.4;
     return false;
   }
 
@@ -863,6 +870,18 @@
     });
   }
 
+  function _openaiCodexHeaders(token, accountId, requestId, sessionId) {
+    return {
+      'Authorization': `Bearer ${token}`,
+      'ChatGPT-Account-Id': accountId,
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      'originator': 'opencode',
+      'session_id': (sessionId || 'kyoto') + '',
+      'x-client-request-id': requestId,
+    };
+  }
+
   // Wrapper around fetch that hits the Codex Responses endpoint and
   // re-encodes the SSE response as Chat-Completions deltas on the fly.
   async function openaiCodexChatFetch({ model, body, signal }) {
@@ -875,7 +894,7 @@
       throw new Error('Missing ChatGPT account id — sign out and back in.');
     }
     const codexBody = _chatCompletionsToResponses(body, model);
-    const requestId = (crypto?.randomUUID?.() || `kyoto-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const requestId = (globalThis.crypto?.randomUUID?.() || `kyoto-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     console.log('[Codex] POST (via SW proxy)', CODEX_API_URL, {
       bodyPreview: JSON.stringify(codexBody).slice(0, 500),
       accountId,
@@ -890,17 +909,7 @@
     const port = chrome.runtime.connect({ name: 'codex-stream' });
     const upstream = await _backgroundFetchPort(port, {
       url: CODEX_API_URL,
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'ChatGPT-Account-ID': accountId,
-        'ChatGPT-Account-Id': accountId,
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-        'Originator': 'codex_cli_rs',
-        'originator': 'codex_cli_rs',
-        'session_id': (state.activeSession?.id || 'kyoto') + '',
-        'x-client-request-id': requestId,
-      },
+      headers: _openaiCodexHeaders(token, accountId, requestId, state.activeSession?.id),
       body: JSON.stringify(codexBody),
       signal,
     });
@@ -3174,7 +3183,7 @@
       return;
     }
     // OpenAI with ChatGPT OAuth signed in (but no API key) is "authed
-    // enough" to select gpt-5-codex* models. /v1/models would 401
+    // enough" to select current Codex-backend models. /v1/models would 401
     // without the API key, so skip the fetch and show the fallback list
     // — runtime will fork to the codex backend or fail clearly per model.
     const hasOpenaiOauth = provider === 'openai' && !!state.openaiOauth?.accessToken;
@@ -3190,7 +3199,7 @@
       // OAuth-only: skip the keyed /v1/models call entirely AND hide
       // models the ChatGPT subscription can't reach. The user picked
       // OAuth as their auth — surface only the models that actually
-      // work in that mode (codex + GPT-5.2+). Otherwise picking gpt-5
+      // work in that mode. Otherwise picking gpt-5
       // would dead-end at "No API key" mid-chat.
       const oauthList = cfg.fallbackModels.filter(m => isOauthRoutableModel(m.id));
       state.modelsByProvider.set(provider, oauthList);
@@ -3581,8 +3590,8 @@
 
     const sessCfg = getProviderConfig(session.provider);
     // Custom providers can be keyless (Ollama, LM Studio). OpenAI with
-    // ChatGPT OAuth signed in also counts as authed for OAuth-routable
-    // models (codex, GPT-5.2+).
+    // ChatGPT OAuth signed in also counts as authed for the current
+    // Codex-backend allowlist.
     const hasOpenaiOauth = session.provider === 'openai' && !!state.openaiOauth?.accessToken;
     const needsKey = !sessCfg?.isCustom && !hasOpenaiOauth;
     if (needsKey && !keyFor(session.provider)) {
@@ -3899,7 +3908,7 @@
     const usingCodexOauth = provider === 'openai' && isOauthRoutableModel(model) && !!state.openaiOauth?.accessToken;
     if (!apiKey && !cfg.isCustom && !usingCodexOauth) {
       const hint = (provider === 'openai' && state.openaiOauth?.accessToken)
-        ? ` "${model}" is on the paid-API-only path; pick a Codex or GPT-5.2+ model for the ChatGPT-OAuth path, or paste an OpenAI API key.`
+        ? ` "${model}" is not in the current ChatGPT-OAuth allowlist; pick gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, or gpt-5.2, or paste an OpenAI API key.`
         : ` Open Settings, select "${cfg.label}" as the Provider, and enter your key.`;
       throw new Error(`No API key configured for ${cfg.label}.${hint}`);
     }
@@ -3941,9 +3950,9 @@
       body.tool_choice = 'auto';
     }
 
-    // Codex fork: when the user picks a gpt-5-codex* model under the
-    // OpenAI provider AND has signed in with ChatGPT Plus/Pro, route to
-    // the codex Responses endpoint instead. The wrapper re-encodes the
+    // Codex fork: when the user picks an OAuth-routable OpenAI model
+    // and has signed in with ChatGPT Plus/Pro, route to the Codex
+    // Responses endpoint instead. The wrapper re-encodes the
     // upstream SSE as Chat-Completions deltas so the reader loop below
     // is identical for both code paths.
     let res;
