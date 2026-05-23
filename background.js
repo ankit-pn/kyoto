@@ -420,19 +420,87 @@ chrome.runtime.onConnect.addListener((port) => {
         postTerminal({ type: 'error', message: 'response.body was null (no stream)' });
         return;
       }
+
+      // Snapshot quota headers — Codex returns 200 + opens a stream for
+      // accounts without Codex access (free plan, depleted go/edu plan,
+      // etc.) and then sends nothing. Pre-empt that stall with a clear
+      // error rather than letting the post-stream idle timer fire.
+      const plan = (respHeaders['x-codex-plan-type'] || '').toLowerCase();
+      const hasCredits = respHeaders['x-codex-credits-has-credits'] || '';
+      const unlimited = respHeaders['x-codex-credits-unlimited'] || '';
+      const usedPct = respHeaders['x-codex-primary-used-percent'] || '';
+      const resetSec = respHeaders['x-codex-primary-reset-after-seconds'] || '';
+      const reqId = respHeaders['x-oai-request-id'] || '';
+      const limit = respHeaders['x-codex-active-limit'] || '';
+      const quotaSummary = (
+        `plan=${plan || '?'}, limit=${limit || '?'}, hasCredits=${hasCredits || '?'}` +
+        `, unlimited=${unlimited || '?'}, used=${usedPct || '?'}%` +
+        (resetSec ? `, reset=${Math.round(Number(resetSec) / 3600)}h` : '') +
+        (reqId ? `, request=${reqId}` : '')
+      );
+
+      // Plans known to actually receive Codex output via the OAuth backend.
+      // 'go' is allowlisted only if the user still has primary quota left.
+      const PAID_PLANS = new Set(['plus', 'pro', 'business', 'enterprise', 'team']);
+      const isPaid = PAID_PLANS.has(plan);
+      const isUnlimited = unlimited === 'True' || unlimited === 'true';
+      const goWithBudget = plan === 'go' && Number(usedPct) < 100;
+      const canCallCodex = isPaid || isUnlimited || goWithBudget || hasCredits === 'True';
+      if (!canCallCodex) {
+        postTerminal({
+          type: 'error',
+          message:
+            `Your ChatGPT subscription doesn't include Codex access. ${quotaSummary}. ` +
+            `Upgrade to ChatGPT Plus/Pro for Codex models, OR open Settings → API key to use ` +
+            `regular OpenAI models (GPT-4o, o3, etc.) via your OpenAI API account.`,
+        });
+        return;
+      }
+
       const reader = res.body.getReader();
+      // 45s post-stream-idle timer — if Codex opens the stream but
+      // never flushes any bytes (quota stall behaviour), abort and
+      // surface the quota header snapshot rather than spinning forever.
+      const STREAM_IDLE_MS = 45_000;
+      let sawAnyBytes = false;
+      const streamIdleTimer = setTimeout(() => {
+        if (sawAnyBytes) return;
+        postTerminal({
+          type: 'error',
+          message:
+            `Codex accepted the request but sent no SSE bytes while idle after streaming ` +
+            `started for ${Math.round(STREAM_IDLE_MS / 1000)}s. Codex quota headers: ${quotaSummary}. ` +
+            `This is a backend/quota stall, not an OAuth failure.`,
+        });
+        try { ac.abort(); } catch {}
+      }, STREAM_IDLE_MS);
+
       while (true) {
         if (ac.signal.aborted) { cleanup(); return; }
         const { value, done } = await reader.read();
         if (done) break;
         if (value && value.byteLength) {
+          if (!sawAnyBytes) {
+            sawAnyBytes = true;
+            clearTimeout(streamIdleTimer);
+          }
           // Port messages are JSON-serialised, so Uint8Array becomes
           // {0:n,1:n,…}. Convert to a plain array on send and back to
           // bytes on receive.
           port.postMessage({ type: 'chunk', data: Array.from(value) });
         }
       }
-      postTerminal({ type: 'done' });
+      clearTimeout(streamIdleTimer);
+      if (!sawAnyBytes && !terminalSent) {
+        postTerminal({
+          type: 'error',
+          message:
+            `Codex closed the stream without sending any bytes. ${quotaSummary}. ` +
+            `This usually means your plan doesn't have Codex access right now.`,
+        });
+      } else {
+        postTerminal({ type: 'done' });
+      }
     } catch (e) {
       if (terminalSent) return;
       if (e?.name === 'AbortError') postTerminal({ type: 'error', message: 'aborted' });
