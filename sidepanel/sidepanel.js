@@ -548,13 +548,18 @@
   // The Codex backend at chatgpt.com/backend-api/codex/responses only
   // speaks OpenAI's Responses API, not Chat Completions. We translate
   // at the fetch boundary so the rest of the chat loop is unchanged.
+  // Reference: opencode's packages/llm/src/protocols/openai-responses.ts
+  // — system messages go INSIDE the input array as
+  // `{role: "system", content: <string>}`, NOT in a separate top-level
+  // `instructions` field. Putting them in `instructions` causes Codex
+  // to ignore them and frequently respond with no content at all.
   function _chatCompletionsToResponses(body, model) {
-    const instructions = [];
+    const systemTexts = [];
     const input = [];
     for (const m of (body.messages || [])) {
       if (m.role === 'system') {
         const txt = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-        if (txt) instructions.push(txt);
+        if (txt) systemTexts.push(txt);
         continue;
       }
       if (m.role === 'user') {
@@ -611,23 +616,29 @@
           parameters: t.function.parameters || { type: 'object', properties: {} },
         }))
       : undefined;
+    // Prepend the joined system text as a single {role:"system"} input
+    // item — opencode does it this way and the Codex backend silently
+    // produces empty responses otherwise.
+    const finalInput = systemTexts.length
+      ? [{ role: 'system', content: systemTexts.join('\n\n') }, ...input]
+      : input;
     const out = {
       model,
-      instructions: instructions.join('\n\n') || undefined,
-      input,
+      input: finalInput,
       stream: true,
       // We manage conversation history client-side and send the full
       // history on every turn — `store: false` tells the backend not
-      // to expect a previous_response_id continuation.
+      // to expect a previous_response_id continuation. (opencode's
+      // openAIDefaultOptions sets store:false for all OpenAI requests.)
       store: false,
     };
-    // Reasoning / verbosity defaults — mirror opencode's console
-    // mapper but ONLY include them for codex variants since the
-    // chatgpt.com backend has been observed rejecting them on some
-    // base GPT-5.x models. Easy to relax later via the debug flag.
-    if (isCodexModel(model)) {
+    // Reasoning defaults — opencode's gpt5DefaultOptions sets
+    // { effort: 'medium', summary: 'auto' } for every gpt-5.x model
+    // EXCEPT gpt-5-chat and gpt-5-pro (which return undefined → not
+    // sent). Match that exactly.
+    const idl = String(model || '').toLowerCase();
+    if (idl.includes('gpt-5') && !idl.includes('gpt-5-chat') && !idl.includes('gpt-5-pro')) {
       out.reasoning = { effort: 'medium', summary: 'auto' };
-      out.text = { verbosity: 'medium' };
     }
     if (tools && tools.length) {
       out.tools = tools;
@@ -635,8 +646,9 @@
     }
     // Codex backend rejects `temperature`, `top_p`, `max_output_tokens`,
     // `max_tokens` with HTTP 400 "Unsupported parameter". opencode never
-    // sends any of them — sampling is controlled by reasoning.effort
-    // and text.verbosity instead. Intentionally NOT forwarded.
+    // sends any of them (its codex plugin's chat.params hook sets
+    // maxOutputTokens=undefined; temperature/top_p are only set when
+    // the request explicitly carries them). Intentionally NOT forwarded.
     return out;
   }
 
@@ -664,8 +676,14 @@
       }));
       return out;
     }
-    // Reasoning summary streaming (Codex emits these for o-series).
-    if (t === 'response.reasoning_summary_text.delta' && typeof ev.delta === 'string') {
+    // Reasoning streaming — Codex/o-series emit any of these depending
+    // on model + request shape (per opencode's openai-responses.ts step()).
+    if (
+      (t === 'response.reasoning_summary_text.delta'
+        || t === 'response.reasoning_text.delta'
+        || t === 'response.reasoning_summary.delta')
+      && typeof ev.delta === 'string'
+    ) {
       out.push(JSON.stringify({
         choices: [{ index: 0, delta: { reasoning_content: ev.delta } }],
       }));
@@ -730,14 +748,19 @@
       }
       return out;
     }
-    if (t === 'response.completed') {
+    if (t === 'response.completed' || t === 'response.incomplete') {
       // Terminal chunk: emit finish_reason + usage so runChatLoop's
-      // existing finalisation path runs.
+      // existing finalisation path runs. response.incomplete is also a
+      // clean finish (just truncated) per opencode's TERMINAL_TYPES.
       const hasTools = Object.keys(ctx.toolIndex).length > 0;
       const usage = ev.response?.usage;
+      const reason = ev.response?.incomplete_details?.reason;
+      let finish_reason = hasTools ? 'tool_calls' : 'stop';
+      if (reason === 'max_output_tokens') finish_reason = 'length';
+      else if (reason === 'content_filter') finish_reason = 'content_filter';
       ctx.emittedFinish = true;
       out.push(JSON.stringify({
-        choices: [{ index: 0, delta: {}, finish_reason: hasTools ? 'tool_calls' : 'stop' }],
+        choices: [{ index: 0, delta: {}, finish_reason }],
         usage: usage ? {
           prompt_tokens: usage.input_tokens,
           completion_tokens: usage.output_tokens,
