@@ -18,12 +18,15 @@
     group: 'meta',
     description:
       'Spawn a child browser agent in its OWN tab to do a self-contained sub-task and report back. ' +
-      'Use this when a task naturally splits into independent investigations — e.g. "compare prices across 3 sites", "summarise these 5 PRs", "extract docs from N URLs". ' +
-      'Each subagent has its own conversation history, its own tab, and runs the same toolset you do (minus `agent` itself and `ask_user`). ' +
-      'Launch MULTIPLE subagents concurrently by emitting multiple `agent` tool calls in one turn — they all run in parallel, each in a separate tab. ' +
-      'The child is stateless from your perspective: you give it a prompt, it returns one final message. Make the prompt SELF-CONTAINED and SPECIFIC — say exactly what you want back. ' +
-      'Pass `start_url` to seed the new tab with a URL (default: about:blank). Pass `close_tab: true` to close the spawned tab after the child finishes (otherwise it stays open so the user can inspect what was done). ' +
-      'Returns { ok, result, sessionId, tabId, tabUrl, messageCount } where `result` is the child\'s final assistant text.',
+      'Use this when a task naturally splits into independent investigations — e.g. "compare prices across 3 sites", "summarise these 5 PRs", "extract docs from N URLs", "log into and screenshot 4 dashboards in parallel". ' +
+      'Each subagent has its own conversation history, its own tab, and runs the same browser toolset you do (minus `agent` and `ask_user`).\n\n' +
+      'Usage notes:\n' +
+      '1. Launch MULTIPLE subagents concurrently whenever possible — emit multiple `agent` tool calls in a single message and they all run in parallel, each in its own tab.\n' +
+      '2. When the agent is done, it returns a single message back to you. The result is NOT visible to the user — you should summarise its findings for the user yourself.\n' +
+      '3. Each agent invocation is STATELESS. You cannot send follow-up messages to it, and it cannot communicate with you outside of its final reply. Therefore your `prompt` must contain a HIGHLY DETAILED task description — specify exactly what the agent should do AND exactly what information it should return.\n' +
+      '4. The agent\'s output should generally be trusted.\n' +
+      '5. Use `start_url` to seed the spawned tab with a URL (default: about:blank). Set `close_tab: true` to auto-close the tab when the child finishes; otherwise it stays open so the user can inspect the work.\n' +
+      '6. Returns `{ ok, result, sessionId, tabId, tabUrl, messageCount, costUsd, totalUsage }`. `result` is the child\'s final assistant text.',
     parameters: OBJ({
       prompt: STR,
       start_url: STR,

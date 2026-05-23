@@ -2929,9 +2929,21 @@
       return { ok: false, error: err, sessionId: sub.id, tabId: tab.id };
     }
 
-    // Harvest the last assistant text.
+    // Harvest the last assistant text + total cost across the whole
+    // child loop. Cost rollup pattern mirrors opencode's agent-tool.go:
+    //   parentSession.Cost += updatedSession.Cost
     let resultText = '';
     let usage = null;
+    let childCostUsd = 0;
+    let promptTokens = 0, completionTokens = 0;
+    for (const m of sub.history) {
+      if (m.role !== 'assistant') continue;
+      if (typeof m._cost === 'number') childCostUsd += m._cost;
+      if (m._usage) {
+        promptTokens += m._usage.prompt_tokens || 0;
+        completionTokens += m._usage.completion_tokens || 0;
+      }
+    }
     for (let i = sub.history.length - 1; i >= 0; i--) {
       const m = sub.history[i];
       if (m.role !== 'assistant') continue;
@@ -2941,6 +2953,19 @@
         break;
       }
     }
+    // Roll the child's cost up onto the parent session so the user's
+    // running session-cost includes work delegated to subagents.
+    try {
+      const parent = state.activeSession?.id === sub._subagentParent
+        ? state.activeSession
+        : (await loadFullSession(sub._subagentParent));
+      if (parent) {
+        parent._subagentCostUsd = (parent._subagentCostUsd || 0) + childCostUsd;
+        parent._subagentRuns = (parent._subagentRuns || 0) + 1;
+        await persistSession(parent);
+      }
+    } catch {}
+
     if (closeTab) { try { await chrome.tabs.remove(tab.id); } catch {} }
     return {
       ok: true,
@@ -2949,7 +2974,9 @@
       tabUrl: (await chrome.tabs.get(tab.id).catch(() => null))?.url || tab.url,
       result: resultText || '(subagent produced no final message)',
       messageCount: sub.history.length,
-      usage
+      usage,
+      totalUsage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+      costUsd: childCostUsd
     };
   }
 
@@ -4233,17 +4260,44 @@
 
   function buildMessages(session) {
     const systemParts = [];
-    systemParts.push(
-      'You are Kyoto, an AI browser agent embedded in a Chrome side panel. ' +
-      'You have tool access to: open/navigate tabs, run JS in pages, read DOM, inspect & modify cookies (including export for session cloning), ' +
-      'observe network requests, intercept fetch/XHR bodies, attach the Chrome DevTools Protocol (after the user grants the optional `debugger` permission), ' +
-      'search history/bookmarks/downloads, and call out to any configured MCP servers. ' +
-      'Each session is bound to a tab; tab switches by the user do not interrupt your work in this session. ' +
-      'Prefer reading before writing. When the user asks for "session cloning" or "auth cookies", use `cookies_analyze` + `cookies_export`. ' +
-      'When inspecting an API, use `network_capture_start`, perform the action, then `network_capture_list`/`network_capture_detail`. ' +
-      'Render responses in Markdown.'
-    );
-    if (state.settings.systemPrompt) systemParts.push(state.settings.systemPrompt);
+    if (session._subagent) {
+      // Subagent prompt — adapted from opencode's TaskPrompt
+      // (internal/llm/prompt/task.go). The parent's system prompt is
+      // intentionally NOT inherited: it often contains user-specific
+      // context that doesn't apply to a narrow sub-task, and a focused
+      // prompt produces much sharper one-shot results.
+      systemParts.push(
+        'You are a browser sub-agent spawned by a parent agent for a specific, self-contained task. ' +
+        'You have access to the same browser tools as the parent (DOM, navigation, network, cookies, etc.) but cannot recursively spawn more agents and cannot ask the user questions. ' +
+        'Your conversation is invisible to the user — only your FINAL assistant message is returned to the parent. ' +
+        'Notes:\n' +
+        '1. IMPORTANT: Be concise and direct. The parent will summarise for the user; don\'t pad your final reply with framing ("Here is what I found…", "In summary…", etc.). Lead with the answer.\n' +
+        '2. Return what the parent asked for. If asked for a URL, return the URL. If asked for a list, return the list. If something blocked you, say what.\n' +
+        '3. You can\'t talk back to the parent mid-task — make full use of the tools instead of asking for clarification.\n' +
+        '4. Each call to you is stateless from the parent\'s perspective; finish what you can, then return.'
+      );
+      // Environment info (browser equivalent of opencode's cwd/OS info).
+      try {
+        const tabInfo = [
+          `Tab id: ${session.tabId}`,
+          session.url ? `Tab URL: ${session.url}` : null
+        ].filter(Boolean).join(' · ');
+        if (tabInfo) systemParts.push(`Bound tab: ${tabInfo}`);
+      } catch {}
+    } else {
+      systemParts.push(
+        'You are Kyoto, an AI browser agent embedded in a Chrome side panel. ' +
+        'You have tool access to: open/navigate tabs, run JS in pages, read DOM, inspect & modify cookies (including export for session cloning), ' +
+        'observe network requests, intercept fetch/XHR bodies, attach the Chrome DevTools Protocol (after the user grants the optional `debugger` permission), ' +
+        'search history/bookmarks/downloads, and call out to any configured MCP servers. ' +
+        'Each session is bound to a tab; tab switches by the user do not interrupt your work in this session. ' +
+        'Prefer reading before writing. When the user asks for "session cloning" or "auth cookies", use `cookies_analyze` + `cookies_export`. ' +
+        'When inspecting an API, use `network_capture_start`, perform the action, then `network_capture_list`/`network_capture_detail`. ' +
+        'For tasks that naturally fan out across multiple independent investigations (compare 3 sites, summarise 5 PRs, scrape N URLs), call the `agent` tool multiple times in one turn — each spawns its own tab + isolated conversation in parallel. ' +
+        'Render responses in Markdown.'
+      );
+      if (state.settings.systemPrompt) systemParts.push(state.settings.systemPrompt);
+    }
 
     // Pinned-message awareness — purely advisory; pinned messages are
     // already present in history, but flagging them helps the model
