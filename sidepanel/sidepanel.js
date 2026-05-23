@@ -616,15 +616,19 @@
       instructions: instructions.join('\n\n') || undefined,
       input,
       stream: true,
-      // Codex requires `store: false` for stateless conversation re-play;
-      // we manage history client-side. Without this the server complains
-      // about missing previous_response_id on the second turn.
+      // We manage conversation history client-side and send the full
+      // history on every turn — `store: false` tells the backend not
+      // to expect a previous_response_id continuation.
       store: false,
-      // Reasoning defaults mirror opencode's console mapper. Without
-      // these gpt-5-codex sometimes returns terse outputs.
-      reasoning: { effort: 'medium', summary: 'auto' },
-      text: { verbosity: isCodexModel(model) ? 'medium' : 'low' },
     };
+    // Reasoning / verbosity defaults — mirror opencode's console
+    // mapper but ONLY include them for codex variants since the
+    // chatgpt.com backend has been observed rejecting them on some
+    // base GPT-5.x models. Easy to relax later via the debug flag.
+    if (isCodexModel(model)) {
+      out.reasoning = { effort: 'medium', summary: 'auto' };
+      out.text = { verbosity: 'medium' };
+    }
     if (tools && tools.length) {
       out.tools = tools;
       out.tool_choice = body.tool_choice || 'auto';
@@ -643,21 +647,36 @@
     const out = [];
     const t = ev?.type;
     if (!t) return out;
+    // Text delta — primary path for assistant output.
     if (t === 'response.output_text.delta' && typeof ev.delta === 'string') {
+      ctx.emittedDeltas++;
       out.push(JSON.stringify({
         choices: [{ index: 0, delta: { content: ev.delta } }],
       }));
       return out;
     }
+    // Some servers emit the full text in `.done` without ever emitting
+    // `.delta` events. Fall back to that.
+    if (t === 'response.output_text.done' && typeof ev.text === 'string' && ctx.emittedDeltas === 0) {
+      ctx.emittedDeltas++;
+      out.push(JSON.stringify({
+        choices: [{ index: 0, delta: { content: ev.text } }],
+      }));
+      return out;
+    }
+    // Reasoning summary streaming (Codex emits these for o-series).
     if (t === 'response.reasoning_summary_text.delta' && typeof ev.delta === 'string') {
       out.push(JSON.stringify({
         choices: [{ index: 0, delta: { reasoning_content: ev.delta } }],
       }));
       return out;
     }
+    // Function call announced via output_item.added — record the index
+    // so subsequent argument-delta events can target it.
     if (t === 'response.output_item.added' && ev.item?.type === 'function_call') {
       const item = ev.item;
       const idx = ctx.toolIndex[item.id] ?? (ctx.toolIndex[item.id] = ctx.nextToolIdx++);
+      ctx.emittedDeltas++;
       out.push(JSON.stringify({
         choices: [{
           index: 0,
@@ -666,7 +685,7 @@
               index: idx,
               id: item.call_id || item.id,
               type: 'function',
-              function: { name: item.name || '', arguments: item.arguments || '' },
+              function: { name: item.name || '', arguments: '' },
             }],
           },
         }],
@@ -676,6 +695,7 @@
     if (t === 'response.function_call_arguments.delta' && typeof ev.delta === 'string') {
       const idx = ctx.toolIndex[ev.item_id];
       if (idx === undefined) return out; // arrived before .added — skip
+      ctx.emittedDeltas++;
       out.push(JSON.stringify({
         choices: [{
           index: 0,
@@ -686,11 +706,36 @@
       }));
       return out;
     }
+    // output_item.done for function_call carries final arguments in one
+    // shot when streaming wasn't used.
+    if (t === 'response.output_item.done' && ev.item?.type === 'function_call') {
+      const item = ev.item;
+      const known = ctx.toolIndex[item.id];
+      if (known === undefined) {
+        const idx = (ctx.toolIndex[item.id] = ctx.nextToolIdx++);
+        ctx.emittedDeltas++;
+        out.push(JSON.stringify({
+          choices: [{
+            index: 0,
+            delta: {
+              tool_calls: [{
+                index: idx,
+                id: item.call_id || item.id,
+                type: 'function',
+                function: { name: item.name || '', arguments: item.arguments || '' },
+              }],
+            },
+          }],
+        }));
+      }
+      return out;
+    }
     if (t === 'response.completed') {
       // Terminal chunk: emit finish_reason + usage so runChatLoop's
       // existing finalisation path runs.
       const hasTools = Object.keys(ctx.toolIndex).length > 0;
       const usage = ev.response?.usage;
+      ctx.emittedFinish = true;
       out.push(JSON.stringify({
         choices: [{ index: 0, delta: {}, finish_reason: hasTools ? 'tool_calls' : 'stop' }],
         usage: usage ? {
@@ -704,8 +749,8 @@
     }
     if (t === 'response.failed' || t === 'error') {
       const msg = ev.response?.error?.message || ev.error?.message || ev.message || 'codex error';
-      // Surface as a synthesised error stream that the caller will throw.
       ctx.errorMessage = msg;
+      ctx.emittedFinish = true;
       out.push('[DONE]');
       return out;
     }
@@ -724,6 +769,9 @@
       throw new Error('Missing ChatGPT account id — sign out and back in.');
     }
     const codexBody = _chatCompletionsToResponses(body, model);
+    if (window.KYOTO_DEBUG_CODEX) {
+      console.log('[Codex] →', CODEX_API_URL, codexBody);
+    }
     const upstream = await fetch(CODEX_API_URL, {
       method: 'POST',
       headers: {
@@ -746,7 +794,14 @@
 
     // Re-encode the upstream Responses-SSE stream as an OpenAI Chat-
     // Completions SSE stream so the existing reader code can parse it.
-    const ctx = { toolIndex: {}, nextToolIdx: 0, errorMessage: null };
+    const ctx = {
+      toolIndex: {}, nextToolIdx: 0, errorMessage: null,
+      // Diagnostics: count emitted chat-deltas so we can surface a
+      // helpful error when the backend returned 200 but the stream
+      // produced nothing usable (event names we don't recognise, etc.).
+      emittedDeltas: 0, emittedFinish: false,
+      seenEventTypes: new Set(),
+    };
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
@@ -757,27 +812,59 @@
           while (true) {
             const { value, done } = await reader.read();
             if (done) {
-              if (ctx.errorMessage) controller.error(new Error(ctx.errorMessage));
-              else controller.close();
+              if (ctx.errorMessage) {
+                controller.error(new Error(ctx.errorMessage));
+                return;
+              }
+              if (!ctx.emittedDeltas && !ctx.emittedFinish) {
+                const seen = [...ctx.seenEventTypes].slice(0, 8).join(', ') || '(none)';
+                controller.error(new Error(
+                  `Codex stream produced no recognisable text/tool events. Event types seen: ${seen}. ` +
+                  `Set window.KYOTO_DEBUG_CODEX = true in the console + retry to dump raw events.`
+                ));
+                return;
+              }
+              controller.close();
               return;
             }
             buffer += decoder.decode(value, { stream: true });
-            const events = buffer.split('\n\n');
+            // SSE events end with a blank line — \n\n on Unix, \r\n\r\n
+            // on some proxies. Normalise both.
+            const norm = buffer.replace(/\r\n/g, '\n');
+            const events = norm.split('\n\n');
             buffer = events.pop() || '';
             for (const raw of events) {
-              // Each SSE event may have multiple `data:` lines; collect them.
-              const dataLines = raw.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trim());
+              if (!raw.trim()) continue;
+              // Standard SSE: lines like `event: TYPE`, `data: PAYLOAD`
+              // (multi-line data allowed). OpenAI's Responses API ALSO
+              // embeds `type` inside the data JSON, so try both.
+              let evType = null;
+              const dataLines = [];
+              for (const ln of raw.split('\n')) {
+                if (ln.startsWith('event:')) evType = ln.slice(6).trim();
+                else if (ln.startsWith('data:')) dataLines.push(ln.slice(5).trim());
+              }
               if (!dataLines.length) continue;
               const payload = dataLines.join('\n');
+              if (window.KYOTO_DEBUG_CODEX) {
+                console.log('[Codex SSE]', evType || '(no-event)', payload.slice(0, 240));
+              }
               if (payload === '[DONE]') {
                 controller.enqueue(encoder.encode('data: [DONE]\n\n'));
                 continue;
               }
               let parsed;
               try { parsed = JSON.parse(payload); } catch { continue; }
+              // Prefer SSE event header type, fall back to JSON .type field.
+              if (!parsed.type && evType) parsed.type = evType;
+              if (parsed.type) ctx.seenEventTypes.add(parsed.type);
               const lines = _responsesEventToChatLines(parsed, ctx);
               for (const ln of lines) {
-                controller.enqueue(encoder.encode(`data: ${ln}\n\n`));
+                if (ln === '[DONE]') {
+                  controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                } else {
+                  controller.enqueue(encoder.encode(`data: ${ln}\n\n`));
+                }
               }
               if (ctx.errorMessage) {
                 controller.error(new Error(ctx.errorMessage));
