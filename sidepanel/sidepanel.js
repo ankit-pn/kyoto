@@ -417,6 +417,12 @@
         throw new Error(`token exchange failed: HTTP ${tokenExchange.status} ${text.slice(0, 200)}`);
       }
       const tokens = await tokenExchange.json();
+      // The user may have signed out (or started a new flow) WHILE the
+      // token exchange was in flight. `state.openaiDeviceFlow` is set
+      // to null by both paths, so check identity against the captured
+      // `flow` ref before persisting — otherwise _persistOauth would
+      // unconditionally re-sign-in the user.
+      if (state.openaiDeviceFlow !== flow) throw new Error('cancelled');
       const saved = await _persistOauth(tokens, null);
       state.openaiDeviceFlow = null;
       return saved;
@@ -430,25 +436,37 @@
     state.openaiDeviceFlow = null;
   }
 
+  // Single-flight cache for refresh — OpenAI rotates `refresh_token` on
+  // every use. Two concurrent tool calls that both pass the expiry
+  // check would otherwise double-spend the same refresh token; the
+  // second request gets `invalid_grant` and silently signs the user
+  // out. Stash the in-flight promise so every concurrent caller awaits
+  // the same network round-trip.
+  let _openaiRefreshInflight = null;
   async function openaiOauthRefresh() {
-    const cur = state.openaiOauth;
-    if (!cur?.refreshToken) throw new Error('not signed in');
-    const r = await fetch(`${OPENAI_OAUTH_ISSUER}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: cur.refreshToken,
-        client_id: OPENAI_OAUTH_CLIENT_ID,
-        scope: OPENAI_OAUTH_SCOPE,
-      }).toString(),
-    });
-    if (!r.ok) {
-      const text = await r.text().catch(() => '');
-      throw new Error(`refresh failed: HTTP ${r.status} ${text.slice(0, 200)}`);
-    }
-    const j = await r.json();
-    return _persistOauth(j, cur);
+    if (_openaiRefreshInflight) return _openaiRefreshInflight;
+    _openaiRefreshInflight = (async () => {
+      const cur = state.openaiOauth;
+      if (!cur?.refreshToken) throw new Error('not signed in');
+      const r = await fetch(`${OPENAI_OAUTH_ISSUER}/oauth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: cur.refreshToken,
+          client_id: OPENAI_OAUTH_CLIENT_ID,
+          scope: OPENAI_OAUTH_SCOPE,
+        }).toString(),
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => '');
+        throw new Error(`refresh failed: HTTP ${r.status} ${text.slice(0, 200)}`);
+      }
+      const j = await r.json();
+      return _persistOauth(j, cur);
+    })();
+    try { return await _openaiRefreshInflight; }
+    finally { _openaiRefreshInflight = null; }
   }
 
   async function openaiOauthAccessToken() {
@@ -468,6 +486,17 @@
     openaiDeviceFlowCancel();
     await chrome.storage.local.remove('openaiOauth');
     state.openaiOauth = null;
+    // Drop cached models so the picker stops offering Codex entries the
+    // user can no longer call. Re-fetch what's left under the API key.
+    try {
+      state.modelsByProvider.delete('openai');
+      const apiKey = (state.settings?.apiKeys || {})['openai'] || '';
+      if (apiKey) await fetchModels('openai', apiKey);
+      else if (typeof renderModelOptions === 'function') renderModelOptions();
+      if (els.modelPopover && !els.modelPopover.classList.contains('hidden')) {
+        try { renderPopoverList(); } catch {}
+      }
+    } catch {}
   }
 
   function isCodexModel(model) {
@@ -520,6 +549,10 @@
         continue;
       }
       if (m.role === 'tool') {
+        // Codex 400s on function_call_output items missing call_id. Skip
+        // orphans (rare history-corruption / pruning edge case) rather
+        // than poison the whole request.
+        if (!m.tool_call_id) continue;
         const out = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
         input.push({
           type: 'function_call_output',
@@ -1097,15 +1130,22 @@
     const cfg = getProviderConfig(provider);
     if (!cfg) { els.testConnStatus.textContent = 'Unknown provider'; els.testConnStatus.className = 'status err'; return; }
     if (!model) { els.testConnStatus.textContent = 'Pick a model first'; els.testConnStatus.className = 'status err'; return; }
-    if (!apiKey && !cfg.isCustom) { els.testConnStatus.textContent = 'API key required'; els.testConnStatus.className = 'status err'; return; }
+    const codexOauth = provider === 'openai' && isCodexModel(model) && !!state.openaiOauth?.accessToken;
+    const oauthFallback = provider === 'openai' && !!state.openaiOauth?.accessToken;
+    if (!apiKey && !cfg.isCustom && !oauthFallback) { els.testConnStatus.textContent = 'API key required (or sign in with ChatGPT for Codex)'; els.testConnStatus.className = 'status err'; return; }
     els.testConnStatus.textContent = 'Testing…'; els.testConnStatus.className = 'status';
     const t0 = Date.now();
     try {
-      const res = await fetch(cfg.chatUrl, {
-        method: 'POST',
-        headers: cfg.headers(apiKey),
-        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false })
-      });
+      // Codex path: route through the OAuth Responses endpoint via our
+      // wrapper. A 1-token ping body sufficient for both code paths.
+      const pingBody = { model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: codexOauth ? true : false };
+      const res = codexOauth
+        ? await openaiCodexChatFetch({ model, body: pingBody, signal: undefined })
+        : await fetch(cfg.chatUrl, {
+            method: 'POST',
+            headers: cfg.headers(apiKey),
+            body: JSON.stringify(pingBody)
+          });
       const elapsed = Date.now() - t0;
       if (!res.ok) {
         const txt = await res.text();
@@ -1113,8 +1153,16 @@
         els.testConnStatus.className = 'status err';
         return;
       }
-      const data = await res.json().catch(() => ({}));
-      els.testConnStatus.textContent = `✓ ${elapsed}ms · ${cfg.label}`;
+      // For Codex (SSE), don't try to .json() — just confirm auth went
+      // through (the wrapper throws on non-2xx upstream so reaching here
+      // means the bearer + account-id were accepted).
+      if (codexOauth) {
+        try { res.body?.cancel?.(); } catch {}
+        els.testConnStatus.textContent = `✓ ${elapsed}ms · ${cfg.label} (Codex/OAuth)`;
+      } else {
+        await res.json().catch(() => ({}));
+        els.testConnStatus.textContent = `✓ ${elapsed}ms · ${cfg.label}`;
+      }
       els.testConnStatus.className = 'status ok';
     } catch (e) {
       els.testConnStatus.textContent = `Network error: ${e.message}`;

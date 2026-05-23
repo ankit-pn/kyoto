@@ -125,6 +125,9 @@
     // don't expose duplicate tools by mistake. The rule: any model
     // from a provider where the current line is multimodal-by-default.
     const id = String(modelId).toLowerCase();
+    // Codex models DON'T accept images even though their gpt-5 prefix
+    // would otherwise match — exclude before the prefix tests.
+    if (/codex/i.test(id)) return false;
     if (provider === 'openai') {
       // Every chat model OpenAI currently ships accepts images. The
       // deprecated text-only ones (gpt-3.5-turbo, text-davinci, etc.)

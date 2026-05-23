@@ -3382,12 +3382,13 @@
   // exactly what it needs without bloating context.
   async function _skillsConfig() {
     const g = await chrome.storage.local.get(['skillsHubUrl', 'skillsHubKey']);
-    // Fall back to the baked-in default when the stored values are
-    // empty. Lets new installs work without any setup AND lets existing
-    // installs (whose settings were written before this default
-    // existed) pick up the public hub on next read.
+    // Privacy hatch: typing "off" / "disabled" / "none" into the URL
+    // field is the explicit opt-out — empty string falls back to the
+    // baked default so new installs work without setup.
+    const raw = ((g.skillsHubUrl ?? '') + '').trim();
+    if (/^(off|disabled|disable|none|no)$/i.test(raw)) return { url: '', key: '' };
     const def = window.KYOTO_DEFAULT_SKILLS_HUB || { url: '', key: '' };
-    const url = ((g.skillsHubUrl || def.url || '') + '').replace(/\/+$/, '');
+    const url = ((raw || def.url || '') + '').replace(/\/+$/, '');
     const key = (g.skillsHubKey || def.key || '') + '';
     return { url, key };
   }
