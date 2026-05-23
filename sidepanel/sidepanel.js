@@ -318,12 +318,18 @@
       return JSON.parse(_b64urlDecode(parts[1]));
     } catch { return null; }
   }
-  function _extractAccountId(idToken) {
-    const c = _decodeJwt(idToken);
+  function _extractAccountIdFromJwt(jwt) {
+    const c = _decodeJwt(jwt);
     if (!c) return null;
     return c.chatgpt_account_id
       || c['https://api.openai.com/auth']?.chatgpt_account_id
       || c.organizations?.[0]?.id
+      || null;
+  }
+  function _extractAccountId(tokens) {
+    if (!tokens) return null;
+    return _extractAccountIdFromJwt(tokens.id_token)
+      || _extractAccountIdFromJwt(tokens.access_token)
       || null;
   }
 
@@ -345,7 +351,7 @@
       // responses that omit it (some IdPs do that).
       refreshToken: tokens.refresh_token || prev?.refreshToken || null,
       expiresAt,
-      accountId: _extractAccountId(tokens.id_token) || prev?.accountId || null,
+      accountId: _extractAccountId(tokens) || prev?.accountId || null,
       email: claims.email || prev?.email || null,
     };
     await chrome.storage.local.set({ openaiOauth: next });
@@ -869,10 +875,12 @@
       throw new Error('Missing ChatGPT account id — sign out and back in.');
     }
     const codexBody = _chatCompletionsToResponses(body, model);
+    const requestId = (crypto?.randomUUID?.() || `kyoto-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     console.log('[Codex] POST (via SW proxy)', CODEX_API_URL, {
       bodyPreview: JSON.stringify(codexBody).slice(0, 500),
       accountId,
       tokenPrefix: token.slice(0, 12) + '…',
+      requestId,
     });
 
     // Side-panel fetch sometimes refuses to stream the Codex SSE
@@ -884,11 +892,14 @@
       url: CODEX_API_URL,
       headers: {
         'Authorization': `Bearer ${token}`,
+        'ChatGPT-Account-ID': accountId,
         'ChatGPT-Account-Id': accountId,
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',
-        'originator': 'opencode',
+        'Originator': 'codex_cli_rs',
+        'originator': 'codex_cli_rs',
         'session_id': (state.activeSession?.id || 'kyoto') + '',
+        'x-client-request-id': requestId,
       },
       body: JSON.stringify(codexBody),
       signal,

@@ -26,9 +26,16 @@ function extractFn(name) {
   return src.slice(start, i);
 }
 
-const helperSrc = [extractFn('isCodexModel'), extractFn('_chatCompletionsToResponses')].join('\n');
-const factory = new Function(`${helperSrc}\nreturn { isCodexModel, _chatCompletionsToResponses };`);
-const { isCodexModel, _chatCompletionsToResponses } = factory();
+const helperSrc = [
+  extractFn('_b64urlDecode'),
+  extractFn('_decodeJwt'),
+  extractFn('_extractAccountIdFromJwt'),
+  extractFn('_extractAccountId'),
+  extractFn('isCodexModel'),
+  extractFn('_chatCompletionsToResponses'),
+].join('\n');
+const factory = new Function(`${helperSrc}\nreturn { isCodexModel, _chatCompletionsToResponses, _extractAccountId };`);
+const { isCodexModel, _chatCompletionsToResponses, _extractAccountId } = factory();
 
 let pass = 0, fail = 0;
 function eq(actual, expected, label) {
@@ -211,6 +218,20 @@ eq(isCodexModel('gpt-5-codex'), true, '9a');
 eq(isCodexModel('gpt-5.1-codex-max'), true, '9b');
 eq(isCodexModel('gpt-5'), false, '9c');
 eq(isCodexModel('gpt-5.5'), false, '9d');
+
+// 10) Account id can come from either id_token or access_token. The
+// device-flow access token commonly carries the nested auth claim, and
+// refresh responses may omit id_token entirely.
+{
+  const makeJwt = (payload) => {
+    const b64url = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+    return `${b64url({ alg: 'none' })}.${b64url(payload)}.sig`;
+  };
+  const nested = makeJwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_nested' } });
+  const top = makeJwt({ chatgpt_account_id: 'acct_top' });
+  eq(_extractAccountId({ access_token: nested }), 'acct_nested', '10a: access token nested claim');
+  eq(_extractAccountId({ id_token: top, access_token: nested }), 'acct_top', '10b: id token wins');
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

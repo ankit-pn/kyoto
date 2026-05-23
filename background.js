@@ -364,15 +364,36 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'codex-stream') return;
   const ac = new AbortController();
+  let timeoutId = null;
+  let sawResponse = false;
+  const clearRequestTimeout = () => {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+  };
   let cleaned = false;
-  const cleanup = () => { if (cleaned) return; cleaned = true; try { ac.abort(); } catch {} try { port.disconnect(); } catch {} };
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    clearRequestTimeout();
+    try { ac.abort(); } catch {}
+    try { port.disconnect(); } catch {}
+  };
   port.onDisconnect.addListener(cleanup);
   port.onMessage.addListener(async (msg) => {
     if (msg?.type === 'abort') { cleanup(); return; }
     if (msg?.type !== 'start') return;
     const { url, headers, body } = msg;
     try {
+      timeoutId = setTimeout(() => {
+        if (sawResponse) return;
+        try { ac.abort(); } catch {}
+        try { port.postMessage({ type: 'error', message: 'Codex request timed out before response headers' }); } catch {}
+      }, 90_000);
       const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal });
+      sawResponse = true;
+      clearRequestTimeout();
       const respHeaders = {};
       try { res.headers.forEach((v, k) => { respHeaders[k] = v; }); } catch {}
       port.postMessage({ type: 'status', status: res.status, statusText: res.statusText, headers: respHeaders });
