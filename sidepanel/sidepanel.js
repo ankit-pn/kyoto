@@ -545,14 +545,17 @@
   }
 
   // ─── Codex Responses-API translation ─────────────────────────────
-  // The Codex backend at chatgpt.com/backend-api/codex/responses only
-  // speaks OpenAI's Responses API, not Chat Completions. We translate
-  // at the fetch boundary so the rest of the chat loop is unchanged.
-  // Reference: opencode's packages/llm/src/protocols/openai-responses.ts
-  // — system messages go INSIDE the input array as
-  // `{role: "system", content: <string>}`, NOT in a separate top-level
-  // `instructions` field. Putting them in `instructions` causes Codex
-  // to ignore them and frequently respond with no content at all.
+  // The Codex backend at chatgpt.com/backend-api/codex/responses speaks
+  // OpenAI's Responses API but has its own quirks vs api.openai.com:
+  // it REQUIRES a non-empty top-level `instructions` field (400s with
+  // "Instructions are required" otherwise) and does NOT want system
+  // messages duplicated as input items.
+  //
+  // Reference: opencode's packages/opencode/src/session/llm/request.ts:90
+  //   `if (isOpenaiOauth) options.instructions = system.join("\n")`
+  //   plus the surrounding code excludes system from the input messages
+  //   for the OAuth path. The api.openai.com path inlines system into
+  //   the input array; the OAuth path moves it into instructions.
   function _chatCompletionsToResponses(body, model) {
     const systemTexts = [];
     const input = [];
@@ -616,15 +619,15 @@
           parameters: t.function.parameters || { type: 'object', properties: {} },
         }))
       : undefined;
-    // Prepend the joined system text as a single {role:"system"} input
-    // item — opencode does it this way and the Codex backend silently
-    // produces empty responses otherwise.
-    const finalInput = systemTexts.length
-      ? [{ role: 'system', content: systemTexts.join('\n\n') }, ...input]
-      : input;
     const out = {
       model,
-      input: finalInput,
+      // Codex backend requires a non-empty `instructions` field (400s
+      // otherwise). Opencode joins system messages with a single \n;
+      // fall back to a single space if the caller sent NO system
+      // messages at all so the field is still present and non-empty.
+      instructions: systemTexts.length ? systemTexts.join('\n') : ' ',
+      // No system items in input — opencode's OAuth path strips them.
+      input,
       stream: true,
       // We manage conversation history client-side and send the full
       // history on every turn — `store: false` tells the backend not

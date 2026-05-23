@@ -49,9 +49,11 @@ function deepIncludes(actual, expected, label) {
   pass++;
 }
 
-// 1) System message goes INTO the input array as {role:"system"} item,
-//    NOT into a top-level `instructions` field. This is the bug that
-//    was silencing responses.
+// 1) System message goes into top-level `instructions` field (codex
+//    backend requires this — 400s with "Instructions are required"
+//    otherwise) and is NOT duplicated into the input array.
+//    Reference: opencode session/llm/request.ts:90
+//      `if (isOpenaiOauth) options.instructions = system.join("\n")`
 {
   const body = {
     messages: [
@@ -62,9 +64,8 @@ function deepIncludes(actual, expected, label) {
     max_tokens: 8192,
   };
   const out = _chatCompletionsToResponses(body, 'gpt-5.5');
-  eq(out.instructions, undefined, '1: no top-level instructions');
-  eq(out.input[0], { role: 'system', content: 'You are helpful.' }, '1: system as input[0]');
-  eq(out.input[1], { role: 'user', content: [{ type: 'input_text', text: 'hi' }] }, '1: user as input[1]');
+  eq(out.instructions, 'You are helpful.', '1: instructions at top level');
+  eq(out.input[0], { role: 'user', content: [{ type: 'input_text', text: 'hi' }] }, '1: input[0] is user (no system item)');
   eq(out.temperature, undefined, '1: temperature stripped');
   eq(out.top_p, undefined, '1: top_p stripped');
   eq(out.max_tokens, undefined, '1: max_tokens stripped');
@@ -74,8 +75,8 @@ function deepIncludes(actual, expected, label) {
   eq(out.model, 'gpt-5.5', '1: model passed through');
 }
 
-// 2) Multiple system messages get joined with \n\n into a single
-//    {role:"system"} item (matches opencode's ProviderShared.joinText).
+// 2) Multiple system messages get joined with \n (opencode's
+//    `system.join("\n")` — single newline, not double).
 {
   const body = {
     messages: [
@@ -85,7 +86,15 @@ function deepIncludes(actual, expected, label) {
     ],
   };
   const out = _chatCompletionsToResponses(body, 'gpt-5.5');
-  eq(out.input[0], { role: 'system', content: 'Part A\n\nPart B' }, '2: joined system');
+  eq(out.instructions, 'Part A\nPart B', '2: joined with \\n');
+}
+
+// 2b) No system messages at all → instructions is non-empty fallback
+//     (codex backend rejects empty instructions; we send a single space).
+{
+  const body = { messages: [{ role: 'user', content: 'hi' }] };
+  const out = _chatCompletionsToResponses(body, 'gpt-5.5');
+  eq(out.instructions, ' ', '2b: fallback when no system messages');
 }
 
 // 3) Reasoning defaults: gpt-5.x gets {effort,summary}; gpt-5-chat
@@ -123,6 +132,7 @@ function deepIncludes(actual, expected, label) {
     ],
   };
   const out = _chatCompletionsToResponses(body, 'gpt-5-codex');
+  // No system messages in this fixture; input starts with the user turn.
   eq(out.input[0], { role: 'user', content: [{ type: 'input_text', text: 'open the file' }] }, '5: user');
   eq(out.input[1], { role: 'assistant', content: [{ type: 'output_text', text: 'Reading…' }] }, '5: asst text');
   eq(out.input[2], { type: 'function_call', call_id: 'call_abc', name: 'fs_read', arguments: '{"path":"a"}' }, '5: fn call');
