@@ -2276,9 +2276,12 @@
     s3KeyPrefix: '',
     s3Endpoint: '',
     // Skills hub — domain-scoped playbook store backed by a remote API.
-    // Leave blank to disable everything (skill_* tools no-op cleanly).
-    skillsHubUrl: '',
-    skillsHubKey: '',
+    // Defaults to the public hub (skills.kryvik.com) shipped with the
+    // extension. tools.js exposes KYOTO_DEFAULT_SKILLS_HUB; we read it
+    // here so user overrides in the settings drawer still work but the
+    // out-of-box experience needs no configuration.
+    skillsHubUrl: window.KYOTO_DEFAULT_SKILLS_HUB?.url || '',
+    skillsHubKey: window.KYOTO_DEFAULT_SKILLS_HUB?.key || '',
     skillsAutoSave: true,
     theme: 'system',           // 'system' | 'light' | 'dark'
     density: 'comfortable',    // 'comfortable' | 'compact'

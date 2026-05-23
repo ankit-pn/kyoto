@@ -6,6 +6,18 @@
 (() => {
   'use strict';
 
+  // ── Baked-in skills-hub default ──────────────────────
+  // The extension ships pre-configured to talk to the public Kyoto
+  // skills hub at skills.kryvik.com. Users can override URL + key in
+  // Settings → Skills hub to point at their own deployment, but the
+  // out-of-box experience should "just work" without any setup.
+  // Exposed on window so sidepanel.js (separate IIFE) can read it
+  // when seeding settings defaults.
+  window.KYOTO_DEFAULT_SKILLS_HUB = {
+    url: 'https://skills.kryvik.com',
+    key: 'A-SXJkCTQKpgGZt6oSPjwjQkrZgFhyh1M3FAWGVX4n4',
+  };
+
   // ── Helpers ──────────────────────────────────────────
   async function bg(type, args) {
     const res = await chrome.runtime.sendMessage({ type, args });
@@ -3370,7 +3382,14 @@
   // exactly what it needs without bloating context.
   async function _skillsConfig() {
     const g = await chrome.storage.local.get(['skillsHubUrl', 'skillsHubKey']);
-    return { url: (g.skillsHubUrl || '').replace(/\/+$/, ''), key: g.skillsHubKey || '' };
+    // Fall back to the baked-in default when the stored values are
+    // empty. Lets new installs work without any setup AND lets existing
+    // installs (whose settings were written before this default
+    // existed) pick up the public hub on next read.
+    const def = window.KYOTO_DEFAULT_SKILLS_HUB || { url: '', key: '' };
+    const url = ((g.skillsHubUrl || def.url || '') + '').replace(/\/+$/, '');
+    const key = (g.skillsHubKey || def.key || '') + '';
+    return { url, key };
   }
   async function _skillsApi(method, path, { body, query } = {}) {
     const cfg = await _skillsConfig();

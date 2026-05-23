@@ -311,7 +311,7 @@
       </div>
 
       <h3 class="drawer-section">Skills hub</h3>
-      <p class="hint">Domain-scoped playbook store backed by your own AWS (DynamoDB + Lambda + API Gateway). The agent searches it before tackling tasks and saves new skills once a <code>/goal</code> completes. Deploy your own hub from <code>skills-hub/deploy.py</code> — the script prints the URL and key to paste here.</p>
+      <p class="hint">Domain-scoped playbook store the agent searches before tackling tasks and writes to once a <code>/goal</code> completes. <strong>Pre-configured</strong> to the public hub at <code>skills.kryvik.com</code> — works out of the box. Leave these fields untouched, or paste your own AWS-deployed hub URL + key (from <code>skills-hub/deploy.py</code>) to point at a private hub instead.</p>
       <div class="field">
         <label>Hub URL</label>
         <input type="text" id="skillsHubUrl" placeholder="https://skills.kryvik.com" autocomplete="off" />
