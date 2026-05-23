@@ -188,6 +188,32 @@ def _save(event):
     now = int(time.time() * 1000)
     # Preserve createdAt + usageCount on update.
     existing = _table.get_item(Key={'domain': domain, 'skill_id': skill_id}).get('Item')
+
+    # Defense in depth — if a caller passes an existing skill_id with the
+    # *wrong* domain, GetItem on (NEW_DOMAIN, skill_id) returns nothing
+    # and the code below would silently create a duplicate row under the
+    # new partition (leaving the original orphaned in the old partition).
+    # Catch that case via the GSI and reject — clients should delete +
+    # save to move a skill rather than rely on accidental re-partitioning.
+    if not existing and body.get('skill_id'):
+        try:
+            r = _table.query(
+                IndexName='skill_id_index',
+                KeyConditionExpression=Key('skill_id').eq(skill_id),
+                Limit=1,
+            )
+            other = (r.get('Items') or [None])[0]
+        except Exception:
+            other = None
+        if other and other.get('domain') != domain:
+            return _resp(409, {
+                'error': 'skill_id exists under a different domain',
+                'skill_id': skill_id,
+                'existing_domain': other.get('domain'),
+                'attempted_domain': domain,
+                'hint': 'To move a skill, DELETE the old one and POST a new one. To update in place, use the existing domain.',
+            })
+
     created_at = existing.get('createdAt') if existing else now
     usage_count = existing.get('usageCount', 0) if existing else 0
 

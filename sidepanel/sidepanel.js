@@ -751,7 +751,7 @@
 
   // Distil a session's recent task into a saved Skill via a one-shot LLM
   // call. Triggered automatically on goal_done OR via /save-skill.
-  async function extractAndSaveSkill(session, { trigger, hint, force, targetSkillId } = {}) {
+  async function extractAndSaveSkill(session, { trigger, hint, force, targetSkillId, targetDomain } = {}) {
     if (!window.KyotoSkillHub) {
       if (force && isActive(session.id)) addMessage('assistant', '_Skill hub not available (extension not fully loaded)._', { error: true });
       return;
@@ -854,7 +854,14 @@
       .filter(t => typeof t === 'string' && t.trim())
       .map(t => t.trim().toLowerCase());
     const savePayload = {
-      domain: (typeof parsed.domain === 'string' && parsed.domain) ? parsed.domain : domainHint,
+      // When updating an existing skill, the caller pins the domain to
+      // the existing record's partition. Otherwise the extractor's
+      // domain guess could differ from where the skill actually lives
+      // and the lambda's GetItem-on-(domain, skill_id) would miss the
+      // existing row — writing a duplicate under the new partition
+      // instead of updating in place.
+      domain: targetDomain
+        || ((typeof parsed.domain === 'string' && parsed.domain) ? parsed.domain : domainHint),
       name: parsed.name,
       description: (typeof parsed.description === 'string') ? parsed.description : '',
       content: parsed.content,
@@ -1376,8 +1383,14 @@
         const len = i.contentLength ? `, ${i.contentLength}b` : '';
         return `- **${i.name}** (\`${i.skill_id}\`, ${i.domain}${used}${len}) — ${i.description || '_no description_'}`;
       });
+      // The lambda list endpoint folds in the global partition by default
+      // for non-global domains, so call that out explicitly to avoid the
+      // "why is this global skill showing under x.com?" surprise.
+      const heading = domain === 'global'
+        ? `**Skills available for \`global\`:**`
+        : `**Skills available for \`${domain}\` (+ global):**`;
       addMessage('assistant',
-        `**Skills available for \`${domain}\`:**\n\n${lines.join('\n')}\n\n` +
+        `${heading}\n\n${lines.join('\n')}\n\n` +
         `_The agent can pull any of these via \`skill_get\`. ` +
         `You can also \`/update-skill <skill_id>\` to refresh from the current session, or \`/delete-skill <skill_id>\` to remove._`
       );
@@ -1399,7 +1412,16 @@
         addMessage('assistant', `_No skill with id \`${skill_id}\`: ${existing.error}_`, { error: true });
         return;
       }
-      await extractAndSaveSkill(state.activeSession, { trigger: 'manual', force: true, hint, targetSkillId: skill_id });
+      await extractAndSaveSkill(state.activeSession, {
+        trigger: 'manual',
+        force: true,
+        hint,
+        targetSkillId: skill_id,
+        // Pin to the existing skill's domain. Without this, an update
+        // run from a different page would create a duplicate row under
+        // the current page's domain instead of updating in place.
+        targetDomain: existing.domain,
+      });
       return;
     }
     if (action === 'delete_skill') {
@@ -3158,7 +3180,21 @@
   // In-memory mirror of the most recent fetch. We re-render from this on
   // every filter keystroke; refetch only via the Refresh button or after
   // a save/delete (where we re-fetch to keep usageCount + updatedAt fresh).
-  const _skillsManager = { items: [], filter: '', loading: false, expanded: null /* skill_id whose detail is open */, editing: null /* skill_id in edit mode */ };
+  // `editForm` stashes the in-progress edit so re-renders (filter, refresh)
+  // don't blow away unsaved changes by rebuilding the form from server state.
+  //   - `dirty` flips true the moment the user types anything (drives the
+  //     confirm-before-discard prompts).
+  //   - `contentLoaded` flips true once we've fetched the full body from
+  //     the hub (so subsequent re-renders skip the fetch).
+  // The two used to be one flag, which meant typing in `name` before the
+  // content fetch resolved would block hydration and leave the textarea
+  // permanently empty.
+  const _skillsManager = {
+    items: [], filter: '', loading: false,
+    expanded: null,   // skill_id whose detail panel is open
+    editing: null,    // skill_id in edit mode
+    editForm: null,   // { skill_id, name, description, tags, content, dirty, contentLoaded }
+  };
 
   async function openSkillsManager() {
     if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not loaded._', { error: true }); return; }
@@ -3175,13 +3211,22 @@
   }
 
   function closeSkillsManager() {
+    if (_skillsManager.editing && _skillsManager.editForm?.dirty) {
+      if (!confirm('You have unsaved edits — discard?')) return;
+    }
     els.skillsDrawer.classList.add('hidden');
     els.skillsOverlay.classList.add('hidden');
     _skillsManager.expanded = null;
     _skillsManager.editing = null;
+    _skillsManager.editForm = null;
   }
 
   async function refreshSkillsManager() {
+    if (_skillsManager.editing && _skillsManager.editForm?.dirty) {
+      if (!confirm('Refreshing will discard your unsaved edits — continue?')) return;
+      _skillsManager.editing = null;
+      _skillsManager.editForm = null;
+    }
     _skillsManager.loading = true;
     els.skillsList.innerHTML = '<p class="hint">Loading…</p>';
     els.skillsSummary.textContent = '';
@@ -3348,28 +3393,73 @@
   }
 
   async function _toggleEditSkill(s) {
-    if (_skillsManager.editing === s.skill_id) { _skillsManager.editing = null; renderSkillsManager(); return; }
+    if (_skillsManager.editing === s.skill_id) {
+      if (_skillsManager.editForm?.dirty && !confirm('Discard unsaved edits?')) return;
+      _skillsManager.editing = null;
+      _skillsManager.editForm = null;
+      renderSkillsManager();
+      return;
+    }
+    if (_skillsManager.editing && _skillsManager.editForm?.dirty) {
+      if (!confirm('You have unsaved edits in another skill — discard?')) return;
+    }
     _skillsManager.editing = s.skill_id;
     _skillsManager.expanded = null;
+    _skillsManager.editForm = {
+      skill_id: s.skill_id,
+      name: s.name || '',
+      description: s.description || '',
+      tags: (s.tags || []).join(', '),
+      content: '',
+      dirty: false,
+      contentLoaded: false,
+    };
     renderSkillsManager();
   }
 
   function _renderSkillEditForm(s) {
     const form = document.createElement('div');
     form.className = 'skill-edit';
-    // Inputs
+    // The edit form is the only place in the manager that maintains
+    // *user* state across re-renders (the list re-renders on filter
+    // keystrokes, refresh, etc.). All edits flow through
+    // `_skillsManager.editForm` so a re-render restores the form to
+    // exactly what the user had typed, rather than blowing it away with
+    // the server's last-known values.
+    let stash = _skillsManager.editForm;
+    if (!stash || stash.skill_id !== s.skill_id) {
+      stash = _skillsManager.editForm = {
+        skill_id: s.skill_id,
+        name: s.name || '',
+        description: s.description || '',
+        tags: (s.tags || []).join(', '),
+        content: '',
+        dirty: false,
+        contentLoaded: false,
+      };
+    }
+
     const nameInput = document.createElement('input');
     nameInput.type = 'text'; nameInput.placeholder = 'Name';
-    nameInput.value = s.name || '';
+    nameInput.value = stash.name;
+    nameInput.addEventListener('input', () => { stash.name = nameInput.value; stash.dirty = true; });
     const descInput = document.createElement('input');
     descInput.type = 'text'; descInput.placeholder = 'Description (one line)';
-    descInput.value = s.description || '';
+    descInput.value = stash.description;
+    descInput.addEventListener('input', () => { stash.description = descInput.value; stash.dirty = true; });
     const tagsInput = document.createElement('input');
     tagsInput.type = 'text'; tagsInput.placeholder = 'Tags (comma-separated)';
-    tagsInput.value = (s.tags || []).join(', ');
+    tagsInput.value = stash.tags;
+    tagsInput.addEventListener('input', () => { stash.tags = tagsInput.value; stash.dirty = true; });
     const contentArea = document.createElement('textarea');
-    contentArea.placeholder = 'Markdown body — loading current content…';
-    contentArea.disabled = true;
+    if (stash.contentLoaded) {
+      contentArea.value = stash.content;
+      contentArea.disabled = false;
+    } else {
+      contentArea.placeholder = 'Markdown body — loading current content…';
+      contentArea.disabled = true;
+    }
+    contentArea.addEventListener('input', () => { stash.content = contentArea.value; stash.dirty = true; });
     form.appendChild(nameInput);
     form.appendChild(descInput);
     form.appendChild(tagsInput);
@@ -3382,33 +3472,54 @@
     const saveBtn = document.createElement('button');
     saveBtn.className = 'btn-mini btn-save';
     saveBtn.textContent = 'Save';
-    saveBtn.disabled = true;
+    // Disabled until body has loaded (or user is editing a fresh skill
+    // that has no body to fetch). Otherwise Save would write an empty
+    // content field over a non-empty server record.
+    saveBtn.disabled = !stash.contentLoaded;
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'btn-mini';
     cancelBtn.textContent = 'Cancel';
-    cancelBtn.addEventListener('click', () => { _skillsManager.editing = null; renderSkillsManager(); });
+    cancelBtn.addEventListener('click', () => {
+      if (stash.dirty && !confirm('Discard unsaved edits?')) return;
+      _skillsManager.editing = null;
+      _skillsManager.editForm = null;
+      renderSkillsManager();
+    });
     actionsRow.appendChild(status);
     actionsRow.appendChild(saveBtn);
     actionsRow.appendChild(cancelBtn);
     form.appendChild(actionsRow);
 
-    // Hydrate content async — list response has no body, only contentPreview.
-    (async () => {
-      try {
-        const r = await window.KyotoSkillHub.get(s.skill_id);
-        if (r?.error) {
-          status.textContent = `Could not load body: ${r.error}`;
+    // Hydrate content once per edit session. Even if the user is
+    // already typing in other fields (dirty=true), we still want to
+    // fetch the body so they can edit it — that was the whole point
+    // of clicking Edit. The fetch only writes into the textarea if
+    // the user hasn't already typed there.
+    if (!stash.contentLoaded) {
+      (async () => {
+        try {
+          const r = await window.KyotoSkillHub.get(s.skill_id);
+          if (r?.error) {
+            status.textContent = `Could not load body: ${r.error}`;
+            status.className = 'skill-edit-status err';
+            return;
+          }
+          if (_skillsManager.editing !== s.skill_id) return;
+          // Don't clobber the textarea if the user already typed in
+          // it (very unlikely race, but possible if fetch is slow).
+          if (!stash.content) {
+            stash.content = r.content || '';
+            contentArea.value = stash.content;
+          }
+          stash.contentLoaded = true;
+          contentArea.disabled = false;
+          saveBtn.disabled = false;
+        } catch (e) {
+          status.textContent = `Could not load body: ${e.message}`;
           status.className = 'skill-edit-status err';
-          return;
         }
-        contentArea.value = r.content || '';
-        contentArea.disabled = false;
-        saveBtn.disabled = false;
-      } catch (e) {
-        status.textContent = `Could not load body: ${e.message}`;
-        status.className = 'skill-edit-status err';
-      }
-    })();
+      })();
+    }
 
     saveBtn.addEventListener('click', async () => {
       const name = nameInput.value.trim();
@@ -3433,6 +3544,7 @@
       }
       status.textContent = 'Saved.'; status.className = 'skill-edit-status ok';
       _skillsManager.editing = null;
+      _skillsManager.editForm = null;
       await refreshSkillsManager();
     });
     return form;
@@ -3443,7 +3555,10 @@
     const r = await window.KyotoSkillHub.api('DELETE', `/v1/skills/${encodeURIComponent(s.skill_id)}`);
     if (r?.error) { alert(`Delete failed: ${r.error}`); return; }
     if (_skillsManager.expanded === s.skill_id) _skillsManager.expanded = null;
-    if (_skillsManager.editing === s.skill_id) _skillsManager.editing = null;
+    if (_skillsManager.editing === s.skill_id) {
+      _skillsManager.editing = null;
+      _skillsManager.editForm = null;
+    }
     await refreshSkillsManager();
   }
 
