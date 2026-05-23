@@ -665,6 +665,9 @@
   // Translate Responses SSE events into Chat-Completions-style lines so
   // the existing stream-reader in runChatLoop can consume them as-is.
   // Returns an array of `data: ...\n` lines to write into the buffer.
+  // Recognised Responses-API event prefixes. Used by the SSE wrapper to
+  // distinguish "we got events but they're all lifecycle noise (no
+  // content was generated)" from "we got nothing the model produced".
   function _responsesEventToChatLines(ev, ctx) {
     const out = [];
     const t = ev?.type;
@@ -802,9 +805,14 @@
       throw new Error('Missing ChatGPT account id — sign out and back in.');
     }
     const codexBody = _chatCompletionsToResponses(body, model);
-    if (window.KYOTO_DEBUG_CODEX) {
-      console.log('[Codex] →', CODEX_API_URL, codexBody);
-    }
+    // Always log to console — Codex debugging requires visibility into
+    // the exact body + event stream. The debug-flag-gated version was
+    // unhelpful when users hit a hang and didn't know to flip the flag.
+    console.log('[Codex] POST', CODEX_API_URL, {
+      bodyPreview: JSON.stringify(codexBody).slice(0, 500),
+      accountId,
+      tokenPrefix: token.slice(0, 12) + '…',
+    });
     const upstream = await fetch(CODEX_API_URL, {
       method: 'POST',
       headers: {
@@ -820,6 +828,7 @@
       body: JSON.stringify(codexBody),
       signal,
     });
+    console.log('[Codex] HTTP', upstream.status, upstream.statusText, [...upstream.headers.entries()]);
     if (!upstream.ok) {
       const errText = await upstream.text().catch(() => '');
       throw new Error(`Codex HTTP ${upstream.status}: ${errText.slice(0, 400)}`);
@@ -834,11 +843,36 @@
       // produced nothing usable (event names we don't recognise, etc.).
       emittedDeltas: 0, emittedFinish: false,
       seenEventTypes: new Set(),
+      rawEvents: [], // capture first 10 raw payloads for forensic logging
     };
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     let buffer = '';
+    // Idle timeout — if Codex returns 200 + a connection but never
+    // sends any SSE events (or stops sending mid-stream), the chat UI
+    // would hang at "still streaming" forever. Abort after 60s of no
+    // bytes from the wire.
+    const IDLE_TIMEOUT_MS = 60_000;
+    let lastByteAt = Date.now();
+    let idleTimer = null;
+    const armIdleTimer = (cancel, controller) => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        const elapsed = Date.now() - lastByteAt;
+        if (elapsed >= IDLE_TIMEOUT_MS) {
+          console.warn('[Codex] idle timeout — no events in', elapsed, 'ms');
+          cancel('idle-timeout');
+          try {
+            controller.error(new Error(
+              `Codex stream went idle for ${Math.round(elapsed / 1000)}s without producing any events. ` +
+              `Aborted. Check console for request/response details.`
+            ));
+          } catch {}
+        }
+      }, IDLE_TIMEOUT_MS);
+    };
+
     const stream = new ReadableStream({
       // ReadableStream's pull() contract: process ONE upstream chunk per
       // call; the consumer triggers the next call when its internal
@@ -846,17 +880,31 @@
       // the single-pump semantics.)
       async pull(controller) {
         try {
+          armIdleTimer((reason) => { try { reader.cancel(reason); } catch {} }, controller);
           const { value, done } = await reader.read();
+          if (value) lastByteAt = Date.now();
           if (done) {
+            if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+            const seen = [...ctx.seenEventTypes].join(', ') || '(none)';
+            console.log('[Codex] stream closed', {
+              emittedDeltas: ctx.emittedDeltas,
+              emittedFinish: ctx.emittedFinish,
+              seenEventTypes: seen,
+              firstRawEvents: ctx.rawEvents,
+              errorMessage: ctx.errorMessage,
+            });
             if (ctx.errorMessage) {
               controller.error(new Error(ctx.errorMessage));
               return;
             }
-            if (!ctx.emittedDeltas && !ctx.emittedFinish) {
-              const seen = [...ctx.seenEventTypes].slice(0, 8).join(', ') || '(none)';
+            // Even when the stream closes with `response.completed`,
+            // zero text deltas means the user sees an empty bubble.
+            // Surface that loudly instead of silently rendering nothing.
+            if (!ctx.emittedDeltas) {
+              const rawDump = ctx.rawEvents.map((r, i) => `  [${i}] ${r}`).join('\n');
               controller.error(new Error(
-                `Codex stream produced no recognisable text/tool events. Event types seen: ${seen}. ` +
-                `Set window.KYOTO_DEBUG_CODEX = true in the console + retry to dump raw events.`
+                `Codex returned no text content. Event types: ${seen}.\n` +
+                `First raw events:\n${rawDump || '(none)'}`
               ));
               return;
             }
@@ -882,6 +930,9 @@
             }
             if (!dataLines.length) continue;
             const payload = dataLines.join('\n');
+            if (ctx.rawEvents.length < 10) {
+              ctx.rawEvents.push(`${evType || '(no-event)'} :: ${payload.slice(0, 200)}`);
+            }
             if (window.KYOTO_DEBUG_CODEX) {
               console.log('[Codex SSE]', evType || '(no-event)', payload.slice(0, 240));
             }
