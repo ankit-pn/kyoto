@@ -353,13 +353,15 @@ def _search(event):
         scored = [(s, i) for s, i in scored if s > 0]
     top = [_strip_internal(i) for _s, i in scored[:limit]]
     # Trim heavy `content` from search results — caller can GET the
-    # full skill by id. Saves tokens.
+    # full skill by id. Saves tokens. `contentLength` lets the UI show
+    # body sizes without a follow-up fetch.
     summary = []
     for it in top:
         c = it.get('content') or ''
         summary.append({
             **{k: v for k, v in it.items() if k != 'content'},
             'contentPreview': c[:240] + ('…' if len(c) > 240 else ''),
+            'contentLength': len(c),
         })
     return _resp(200, {
         'query': query,

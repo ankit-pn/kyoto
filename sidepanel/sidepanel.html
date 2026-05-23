@@ -307,6 +307,7 @@
       </div>
       <div class="mcp-actions">
         <button class="btn-mini" id="skillsHubTestBtn" type="button">Test connection</button>
+        <button class="btn-mini" id="skillsManageBtn" type="button">Manage skills…</button>
         <p class="status" id="skillsHubStatus"></p>
       </div>
 
@@ -386,6 +387,27 @@
 
       <button class="btn-primary" id="saveBtn">Save</button>
       <p class="status" id="saveStatus"></p>
+    </div>
+  </aside>
+
+  <!-- Skills manager (opens over the Settings drawer; own overlay) -->
+  <div class="overlay hidden" id="skillsOverlay"></div>
+  <aside class="drawer skills-drawer hidden" id="skillsDrawer">
+    <header class="drawer-hdr">
+      <h2>Skills hub</h2>
+      <div class="skills-hdr-actions">
+        <button class="btn-mini" id="skillsRefreshBtn" type="button" title="Refresh from hub">Refresh</button>
+        <button class="ibtn" id="closeSkillsDrawerBtn" title="Close">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </header>
+    <div class="skills-toolbar">
+      <input type="text" id="skillsFilterInput" placeholder="Filter by name, description, tag, domain…" autocomplete="off" />
+      <span class="skills-summary" id="skillsSummary"></span>
+    </div>
+    <div class="drawer-body skills-body" id="skillsList">
+      <p class="hint">Loading…</p>
     </div>
   </aside>
 

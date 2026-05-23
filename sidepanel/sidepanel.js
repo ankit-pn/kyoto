@@ -160,6 +160,14 @@
     skillsAutoSave: $('skillsAutoSave'),
     skillsHubTestBtn: $('skillsHubTestBtn'),
     skillsHubStatus: $('skillsHubStatus'),
+    skillsManageBtn: $('skillsManageBtn'),
+    skillsOverlay: $('skillsOverlay'),
+    skillsDrawer: $('skillsDrawer'),
+    closeSkillsDrawerBtn: $('closeSkillsDrawerBtn'),
+    skillsRefreshBtn: $('skillsRefreshBtn'),
+    skillsFilterInput: $('skillsFilterInput'),
+    skillsSummary: $('skillsSummary'),
+    skillsList: $('skillsList'),
     downloadAuditBtn: $('downloadAuditBtn'),
     clearAuditBtn: $('clearAuditBtn'),
     auditStatus: $('auditStatus'),
@@ -3146,6 +3154,299 @@
     els.overlay.classList.add('hidden');
   }
 
+  // ── Skills manager ───────────────────────────────────
+  // In-memory mirror of the most recent fetch. We re-render from this on
+  // every filter keystroke; refetch only via the Refresh button or after
+  // a save/delete (where we re-fetch to keep usageCount + updatedAt fresh).
+  const _skillsManager = { items: [], filter: '', loading: false, expanded: null /* skill_id whose detail is open */, editing: null /* skill_id in edit mode */ };
+
+  async function openSkillsManager() {
+    if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not loaded._', { error: true }); return; }
+    const cfg = await window.KyotoSkillHub.config();
+    if (!cfg.url || !cfg.key) {
+      addMessage('assistant', '_Skills hub not configured. Open Settings → Skills hub to paste your URL + API key._', { error: true });
+      return;
+    }
+    els.skillsDrawer.classList.remove('hidden');
+    els.skillsOverlay.classList.remove('hidden');
+    els.skillsFilterInput.value = '';
+    _skillsManager.filter = '';
+    await refreshSkillsManager();
+  }
+
+  function closeSkillsManager() {
+    els.skillsDrawer.classList.add('hidden');
+    els.skillsOverlay.classList.add('hidden');
+    _skillsManager.expanded = null;
+    _skillsManager.editing = null;
+  }
+
+  async function refreshSkillsManager() {
+    _skillsManager.loading = true;
+    els.skillsList.innerHTML = '<p class="hint">Loading…</p>';
+    els.skillsSummary.textContent = '';
+    try {
+      // Empty-domain + empty-query scans every domain (capped at 500 server-side).
+      const r = await window.KyotoSkillHub.api('POST', '/v1/skills/search', { body: { query: '', limit: 500 } });
+      if (r?.error) {
+        els.skillsList.innerHTML = `<p class="status err">Error: ${esc(r.error)}</p>`;
+        return;
+      }
+      _skillsManager.items = r.items || [];
+      // Bust the per-domain enrichment cache so the next system-prompt
+      // build reflects any edits/deletes done here.
+      _skillsDomainCache.clear();
+      renderSkillsManager();
+    } catch (e) {
+      els.skillsList.innerHTML = `<p class="status err">Error: ${esc(e.message)}</p>`;
+    } finally {
+      _skillsManager.loading = false;
+    }
+  }
+
+  function _matchesFilter(s, q) {
+    if (!q) return true;
+    const hay = `${s.name || ''}\n${s.description || ''}\n${(s.tags || []).join(' ')}\n${s.domain || ''}`.toLowerCase();
+    return hay.includes(q);
+  }
+
+  function renderSkillsManager() {
+    const q = (_skillsManager.filter || '').trim().toLowerCase();
+    const all = _skillsManager.items.slice();
+    const filtered = q ? all.filter(s => _matchesFilter(s, q)) : all;
+    els.skillsSummary.textContent = filtered.length === all.length
+      ? `${all.length} skill${all.length === 1 ? '' : 's'}`
+      : `${filtered.length} / ${all.length}`;
+    if (!filtered.length) {
+      els.skillsList.innerHTML = q
+        ? `<p class="hint">No skills match \`${esc(q)}\`.</p>`
+        : `<p class="hint">No skills saved yet. Use <code>/save-skill</code> after the agent completes a non-trivial task.</p>`;
+      return;
+    }
+    // Group by domain. Sort domains alphabetically with 'global' first.
+    const byDomain = new Map();
+    for (const s of filtered) {
+      const d = s.domain || 'global';
+      if (!byDomain.has(d)) byDomain.set(d, []);
+      byDomain.get(d).push(s);
+    }
+    const domains = [...byDomain.keys()].sort((a, b) => {
+      if (a === 'global') return -1;
+      if (b === 'global') return 1;
+      return a.localeCompare(b);
+    });
+    els.skillsList.innerHTML = '';
+    for (const d of domains) {
+      const group = document.createElement('div');
+      group.className = 'skill-domain';
+      const hdr = document.createElement('div');
+      hdr.className = 'skill-domain-hdr';
+      hdr.textContent = `${d} · ${byDomain.get(d).length}`;
+      group.appendChild(hdr);
+      const sorted = byDomain.get(d).sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0) || (a.name || '').localeCompare(b.name || ''));
+      for (const s of sorted) group.appendChild(_renderSkillRow(s));
+      els.skillsList.appendChild(group);
+    }
+  }
+
+  function _fmtAge(ms) {
+    if (!ms) return '';
+    const dt = Date.now() - ms;
+    if (dt < 60_000) return 'now';
+    if (dt < 3_600_000) return `${Math.round(dt / 60_000)}m`;
+    if (dt < 86_400_000) return `${Math.round(dt / 3_600_000)}h`;
+    return `${Math.round(dt / 86_400_000)}d`;
+  }
+
+  function _renderSkillRow(s) {
+    const row = document.createElement('div');
+    row.className = 'skill-row';
+    row.dataset.skillId = s.skill_id;
+    const top = document.createElement('div');
+    top.className = 'skill-row-top';
+    const name = document.createElement('span');
+    name.className = 'skill-name';
+    name.textContent = s.name || '(untitled)';
+    name.title = s.skill_id;
+    const meta = document.createElement('span');
+    meta.className = 'skill-meta';
+    const parts = [];
+    if (s.usageCount) parts.push(`used ${s.usageCount}×`);
+    if (typeof s.contentLength === 'number') parts.push(`${s.contentLength}b`);
+    if (s.updatedAt) parts.push(`updated ${_fmtAge(s.updatedAt)} ago`);
+    meta.textContent = parts.join(' · ');
+    top.appendChild(name);
+    top.appendChild(meta);
+    row.appendChild(top);
+
+    if (s.description) {
+      const desc = document.createElement('div');
+      desc.className = 'skill-desc';
+      desc.textContent = s.description;
+      row.appendChild(desc);
+    }
+    if (s.tags?.length) {
+      const tags = document.createElement('div');
+      tags.className = 'skill-tags';
+      for (const t of s.tags) {
+        const tag = document.createElement('span');
+        tag.className = 'skill-tag';
+        tag.textContent = t;
+        tags.appendChild(tag);
+      }
+      row.appendChild(tags);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'skill-actions';
+    const viewBtn = document.createElement('button');
+    viewBtn.className = 'btn-mini';
+    viewBtn.textContent = _skillsManager.expanded === s.skill_id ? 'Hide' : 'View';
+    viewBtn.addEventListener('click', () => _toggleViewSkill(s.skill_id));
+    const editBtn = document.createElement('button');
+    editBtn.className = 'btn-mini';
+    editBtn.textContent = _skillsManager.editing === s.skill_id ? 'Cancel' : 'Edit';
+    editBtn.addEventListener('click', () => _toggleEditSkill(s));
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn-mini btn-danger';
+    delBtn.textContent = 'Delete';
+    delBtn.addEventListener('click', () => _deleteSkillFromManager(s));
+    actions.appendChild(viewBtn);
+    actions.appendChild(editBtn);
+    actions.appendChild(delBtn);
+    row.appendChild(actions);
+
+    if (_skillsManager.editing === s.skill_id) {
+      row.appendChild(_renderSkillEditForm(s));
+    } else if (_skillsManager.expanded === s.skill_id) {
+      const detail = document.createElement('div');
+      detail.className = 'skill-detail';
+      detail.innerHTML = '<p class="hint">Loading…</p>';
+      row.appendChild(detail);
+      _hydrateSkillDetail(s.skill_id, detail);
+    }
+    return row;
+  }
+
+  async function _toggleViewSkill(skill_id) {
+    if (_skillsManager.expanded === skill_id) { _skillsManager.expanded = null; }
+    else { _skillsManager.expanded = skill_id; _skillsManager.editing = null; }
+    renderSkillsManager();
+  }
+
+  async function _hydrateSkillDetail(skill_id, detailEl) {
+    try {
+      const r = await window.KyotoSkillHub.get(skill_id);
+      if (r?.error) {
+        detailEl.innerHTML = `<p class="status err">Error: ${esc(r.error)}</p>`;
+        return;
+      }
+      detailEl.innerHTML = renderMarkdown(r.content || '_(empty)_');
+    } catch (e) {
+      detailEl.innerHTML = `<p class="status err">Error: ${esc(e.message)}</p>`;
+    }
+  }
+
+  async function _toggleEditSkill(s) {
+    if (_skillsManager.editing === s.skill_id) { _skillsManager.editing = null; renderSkillsManager(); return; }
+    _skillsManager.editing = s.skill_id;
+    _skillsManager.expanded = null;
+    renderSkillsManager();
+  }
+
+  function _renderSkillEditForm(s) {
+    const form = document.createElement('div');
+    form.className = 'skill-edit';
+    // Inputs
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text'; nameInput.placeholder = 'Name';
+    nameInput.value = s.name || '';
+    const descInput = document.createElement('input');
+    descInput.type = 'text'; descInput.placeholder = 'Description (one line)';
+    descInput.value = s.description || '';
+    const tagsInput = document.createElement('input');
+    tagsInput.type = 'text'; tagsInput.placeholder = 'Tags (comma-separated)';
+    tagsInput.value = (s.tags || []).join(', ');
+    const contentArea = document.createElement('textarea');
+    contentArea.placeholder = 'Markdown body — loading current content…';
+    contentArea.disabled = true;
+    form.appendChild(nameInput);
+    form.appendChild(descInput);
+    form.appendChild(tagsInput);
+    form.appendChild(contentArea);
+
+    const actionsRow = document.createElement('div');
+    actionsRow.className = 'skill-edit-row';
+    const status = document.createElement('span');
+    status.className = 'skill-edit-status';
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'btn-mini btn-save';
+    saveBtn.textContent = 'Save';
+    saveBtn.disabled = true;
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-mini';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => { _skillsManager.editing = null; renderSkillsManager(); });
+    actionsRow.appendChild(status);
+    actionsRow.appendChild(saveBtn);
+    actionsRow.appendChild(cancelBtn);
+    form.appendChild(actionsRow);
+
+    // Hydrate content async — list response has no body, only contentPreview.
+    (async () => {
+      try {
+        const r = await window.KyotoSkillHub.get(s.skill_id);
+        if (r?.error) {
+          status.textContent = `Could not load body: ${r.error}`;
+          status.className = 'skill-edit-status err';
+          return;
+        }
+        contentArea.value = r.content || '';
+        contentArea.disabled = false;
+        saveBtn.disabled = false;
+      } catch (e) {
+        status.textContent = `Could not load body: ${e.message}`;
+        status.className = 'skill-edit-status err';
+      }
+    })();
+
+    saveBtn.addEventListener('click', async () => {
+      const name = nameInput.value.trim();
+      if (!name) { status.textContent = 'Name is required.'; status.className = 'skill-edit-status err'; return; }
+      const tags = tagsInput.value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+      saveBtn.disabled = true; cancelBtn.disabled = true;
+      status.textContent = 'Saving…'; status.className = 'skill-edit-status';
+      const body = {
+        skill_id: s.skill_id,
+        domain: s.domain,           // pinned — manager doesn't support moving
+        name,
+        description: descInput.value.trim(),
+        content: contentArea.value,
+        tags,
+        createdBy: 'user',
+      };
+      const r = await window.KyotoSkillHub.save(body);
+      if (r?.error) {
+        status.textContent = `Save failed: ${r.error}`; status.className = 'skill-edit-status err';
+        saveBtn.disabled = false; cancelBtn.disabled = false;
+        return;
+      }
+      status.textContent = 'Saved.'; status.className = 'skill-edit-status ok';
+      _skillsManager.editing = null;
+      await refreshSkillsManager();
+    });
+    return form;
+  }
+
+  async function _deleteSkillFromManager(s) {
+    if (!confirm(`Permanently delete skill "${s.name}" (${s.domain})?\n\nThis cannot be undone.`)) return;
+    const r = await window.KyotoSkillHub.api('DELETE', `/v1/skills/${encodeURIComponent(s.skill_id)}`);
+    if (r?.error) { alert(`Delete failed: ${r.error}`); return; }
+    if (_skillsManager.expanded === s.skill_id) _skillsManager.expanded = null;
+    if (_skillsManager.editing === s.skill_id) _skillsManager.editing = null;
+    await refreshSkillsManager();
+  }
+
   function renderToolGroupCheckboxes() {
     const groups = window.KyotoTools.groups();
     els.toolGroups.innerHTML = '';
@@ -3496,6 +3797,19 @@
         els.skillsHubStatus.className = 'status err';
       }
     });
+
+    if (els.skillsManageBtn) els.skillsManageBtn.addEventListener('click', openSkillsManager);
+    if (els.closeSkillsDrawerBtn) els.closeSkillsDrawerBtn.addEventListener('click', closeSkillsManager);
+    if (els.skillsOverlay) els.skillsOverlay.addEventListener('click', closeSkillsManager);
+    if (els.skillsRefreshBtn) els.skillsRefreshBtn.addEventListener('click', refreshSkillsManager);
+    if (els.skillsFilterInput) {
+      let _filterTimer = null;
+      els.skillsFilterInput.addEventListener('input', () => {
+        _skillsManager.filter = els.skillsFilterInput.value || '';
+        if (_filterTimer) clearTimeout(_filterTimer);
+        _filterTimer = setTimeout(() => { _filterTimer = null; renderSkillsManager(); }, 120);
+      });
+    }
 
     if (els.s3TestBtn) els.s3TestBtn.addEventListener('click', async () => {
       // Use the in-form values so the user can test BEFORE saving.
