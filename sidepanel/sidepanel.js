@@ -940,28 +940,49 @@
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     let buffer = '';
-    // Idle timeout — if Codex returns 200 + a connection but never
-    // sends any SSE events (or stops sending mid-stream), the chat UI
-    // would hang at "still streaming" forever. Abort after 60s of no
-    // bytes from the wire.
-    const IDLE_TIMEOUT_MS = 60_000;
+    // Codex can return HTTP 200 immediately and then sit queued before
+    // sending the first SSE byte, especially near subscription limits.
+    // Do not kill that path after 60s; only abort if startup is truly
+    // stuck, while keeping a shorter guard once streaming has begun.
+    const FIRST_EVENT_TIMEOUT_MS = 10 * 60_000;
+    const STREAM_IDLE_TIMEOUT_MS = 3 * 60_000;
     let lastByteAt = Date.now();
+    let sawBytes = false;
     let idleTimer = null;
+    const header = (name) => {
+      const key = String(name || '').toLowerCase();
+      return upstream.headers?.[key] ?? upstream.headers?.[name] ?? '';
+    };
+    const codexLimitHint = () => {
+      const plan = header('x-codex-plan-type');
+      const active = header('x-codex-active-limit');
+      const used = header('x-codex-primary-used-percent');
+      const reset = Number(header('x-codex-primary-reset-after-seconds') || 0);
+      const parts = [];
+      if (plan) parts.push(`plan=${plan}`);
+      if (active) parts.push(`limit=${active}`);
+      if (used) parts.push(`used=${used}%`);
+      if (reset > 0) parts.push(`reset=${Math.ceil(reset / 3600)}h`);
+      return parts.length ? ` Codex quota headers: ${parts.join(', ')}.` : '';
+    };
     const armIdleTimer = (cancel, controller) => {
       if (idleTimer) clearTimeout(idleTimer);
+      const timeoutMs = sawBytes ? STREAM_IDLE_TIMEOUT_MS : FIRST_EVENT_TIMEOUT_MS;
       idleTimer = setTimeout(() => {
         const elapsed = Date.now() - lastByteAt;
-        if (elapsed >= IDLE_TIMEOUT_MS) {
-          console.warn('[Codex] idle timeout — no events in', elapsed, 'ms');
+        if (elapsed >= timeoutMs) {
+          const phase = sawBytes ? 'idle after streaming started' : 'waiting for first event';
+          console.warn('[Codex] idle timeout —', phase, 'for', elapsed, 'ms');
           cancel('idle-timeout');
           try {
             controller.error(new Error(
-              `Codex stream went idle for ${Math.round(elapsed / 1000)}s without producing any events. ` +
-              `Aborted. Check console for request/response details.`
+              `Codex accepted the request but was ${phase} for ${Math.round(elapsed / 1000)}s.` +
+              codexLimitHint() +
+              ` Aborted to avoid hanging forever.`
             ));
           } catch {}
         }
-      }, IDLE_TIMEOUT_MS);
+      }, timeoutMs);
     };
 
     const stream = new ReadableStream({
@@ -973,7 +994,10 @@
         try {
           armIdleTimer((reason) => { try { reader.cancel(reason); } catch {} }, controller);
           const { value, done } = await reader.read();
-          if (value) lastByteAt = Date.now();
+          if (value && value.byteLength) {
+            sawBytes = true;
+            lastByteAt = Date.now();
+          }
           if (done) {
             if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
             const seen = [...ctx.seenEventTypes].join(', ') || '(none)';

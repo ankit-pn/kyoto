@@ -366,6 +366,7 @@ chrome.runtime.onConnect.addListener((port) => {
   const ac = new AbortController();
   let timeoutId = null;
   let sawResponse = false;
+  let terminalSent = false;
   const clearRequestTimeout = () => {
     if (timeoutId) {
       clearTimeout(timeoutId);
@@ -380,6 +381,20 @@ chrome.runtime.onConnect.addListener((port) => {
     try { ac.abort(); } catch {}
     try { port.disconnect(); } catch {}
   };
+  const finishAfterFlush = () => {
+    clearRequestTimeout();
+    // Port messages are delivered asynchronously. Disconnecting in the
+    // same tick as the terminal message can drop the final chunk/error,
+    // which looks like a silent "no response" in the side panel.
+    setTimeout(cleanup, 250);
+  };
+  const postTerminal = (message) => {
+    if (terminalSent) return false;
+    terminalSent = true;
+    try { port.postMessage(message); } catch {}
+    finishAfterFlush();
+    return true;
+  };
   port.onDisconnect.addListener(cleanup);
   port.onMessage.addListener(async (msg) => {
     if (msg?.type === 'abort') { cleanup(); return; }
@@ -388,8 +403,7 @@ chrome.runtime.onConnect.addListener((port) => {
     try {
       timeoutId = setTimeout(() => {
         if (sawResponse) return;
-        try { ac.abort(); } catch {}
-        try { port.postMessage({ type: 'error', message: 'Codex request timed out before response headers' }); } catch {}
+        postTerminal({ type: 'error', message: 'Codex request timed out before response headers' });
       }, 90_000);
       const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal });
       sawResponse = true;
@@ -399,13 +413,11 @@ chrome.runtime.onConnect.addListener((port) => {
       port.postMessage({ type: 'status', status: res.status, statusText: res.statusText, headers: respHeaders });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        port.postMessage({ type: 'error', message: `HTTP ${res.status}: ${text.slice(0, 800)}` });
-        cleanup();
+        postTerminal({ type: 'error', message: `HTTP ${res.status}: ${text.slice(0, 800)}` });
         return;
       }
       if (!res.body) {
-        port.postMessage({ type: 'error', message: 'response.body was null (no stream)' });
-        cleanup();
+        postTerminal({ type: 'error', message: 'response.body was null (no stream)' });
         return;
       }
       const reader = res.body.getReader();
@@ -420,12 +432,11 @@ chrome.runtime.onConnect.addListener((port) => {
           port.postMessage({ type: 'chunk', data: Array.from(value) });
         }
       }
-      port.postMessage({ type: 'done' });
-      cleanup();
+      postTerminal({ type: 'done' });
     } catch (e) {
-      if (e?.name === 'AbortError') { port.postMessage({ type: 'error', message: 'aborted' }); }
-      else { port.postMessage({ type: 'error', message: e?.message || String(e) }); }
-      cleanup();
+      if (terminalSent) return;
+      if (e?.name === 'AbortError') postTerminal({ type: 'error', message: 'aborted' });
+      else postTerminal({ type: 'error', message: e?.message || String(e) });
     }
   });
 });
