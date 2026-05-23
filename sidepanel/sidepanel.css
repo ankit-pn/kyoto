@@ -1105,6 +1105,34 @@ body {
 .status.ok { color: var(--ok); }
 .status.err { color: var(--danger); }
 
+/* ── OpenAI ChatGPT OAuth ────────────────── */
+.oauth-status-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.oauth-flow {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.oauth-flow.hidden { display: none; }
+.oauth-code-box {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+.oauth-code-box code {
+  flex: 1;
+  font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 18px; letter-spacing: 0.1em; font-weight: 600;
+  color: var(--accent);
+  user-select: all;
+}
+
 /* ── Skills manager drawer ───────────────── */
 .skills-drawer { max-width: 480px; z-index: 13; }
 #skillsOverlay { z-index: 12; }

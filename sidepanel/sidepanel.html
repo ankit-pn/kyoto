@@ -117,6 +117,7 @@
         <label>Provider</label>
         <select id="provider">
           <option value="openrouter">OpenRouter</option>
+          <option value="openai">OpenAI</option>
           <option value="deepseek">DeepSeek</option>
           <option value="minimax">MiniMax</option>
         </select>
@@ -165,6 +166,26 @@
         <button class="btn-mini" id="testConnBtn" type="button">Test connection</button>
         <span class="status" id="testConnStatus"></span>
         <p class="hint">Sends a 1-token "ping" through the configured provider/model/key.</p>
+      </div>
+
+      <h3 class="drawer-section">ChatGPT Plus / Pro (for OpenAI Codex models)</h3>
+      <p class="hint">Sign in with your ChatGPT subscription to use <code>gpt-5-codex</code> models through OpenAI's Codex backend — no API spend. Other OpenAI models still go through your API key.</p>
+      <div class="oauth-status-row" id="openaiAuthRow">
+        <span class="status" id="openaiAuthStatus">Not signed in</span>
+        <button class="btn-mini" id="openaiSignInBtn" type="button">Sign in with ChatGPT</button>
+        <button class="btn-mini" id="openaiSignOutBtn" type="button" style="display:none">Sign out</button>
+      </div>
+      <div class="oauth-flow hidden" id="openaiOauthFlow">
+        <p class="hint">
+          1. We opened <a href="#" id="openaiVerifyUrl" target="_blank" rel="noopener">the ChatGPT device page</a> in a new tab.<br>
+          2. Sign in (if needed), then paste the code below when prompted.
+        </p>
+        <div class="oauth-code-box">
+          <code id="openaiUserCode">—</code>
+          <button class="btn-mini" id="openaiCopyCodeBtn" type="button">Copy</button>
+        </div>
+        <p class="status" id="openaiFlowStatus">Waiting for sign-in…</p>
+        <button class="btn-mini" id="openaiCancelFlowBtn" type="button">Cancel</button>
       </div>
 
       <h3 class="drawer-section">Appearance</h3>

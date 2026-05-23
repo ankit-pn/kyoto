@@ -52,6 +52,53 @@
         { id: 'deepseek-reasoner', name: 'deepseek-reasoner',     group: 'deepseek' }
       ]
     },
+    openai: {
+      label: 'OpenAI',
+      chatUrl: 'https://api.openai.com/v1/chat/completions',
+      modelsUrl: 'https://api.openai.com/v1/models',
+      keysUrl: 'https://platform.openai.com/api-keys',
+      placeholder: 'sk-…',
+      // The OAuth (ChatGPT Plus/Pro) path uses a different base URL +
+      // request shape entirely — see `_openaiOauthFetch` and
+      // `_translateChatCompletionsToResponses`. The values here are the
+      // API-key path that opencode also exposes.
+      headers: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }),
+      parseModels: (data) => (data.data || []).map(m => {
+        const id = m.id;
+        // Surface logical groups so the cross-provider model picker
+        // can render headers. OpenAI doesn't ship group info — derive
+        // by id prefix.
+        let group = 'openai';
+        if (id.startsWith('gpt-5-codex')) group = 'openai-codex';
+        else if (id.startsWith('gpt-5')) group = 'openai-gpt5';
+        else if (id.startsWith('gpt-4')) group = 'openai-gpt4';
+        else if (id.startsWith('o3') || id.startsWith('o4') || id.startsWith('o1')) group = 'openai-reasoning';
+        else if (id.startsWith('text-embedding') || id.startsWith('whisper') || id.startsWith('tts') || id.startsWith('dall-e')) return null;
+        return { id, name: id, group, supportsTools: true };
+      }).filter(Boolean),
+      defaultModel: 'gpt-5-mini',
+      fallbackModels: [
+        // Frontier — costs OAuth or paid tier.
+        { id: 'gpt-5',                name: 'GPT-5',                group: 'openai-gpt5' },
+        { id: 'gpt-5-mini',           name: 'GPT-5 mini',           group: 'openai-gpt5' },
+        { id: 'gpt-5-nano',           name: 'GPT-5 nano',           group: 'openai-gpt5' },
+        // Codex — reachable via the ChatGPT Plus/Pro OAuth path only.
+        // Listed so the picker shows them; runChatLoop short-circuits
+        // with a "sign in with ChatGPT" hint if the user picks one
+        // without OAuth.
+        { id: 'gpt-5-codex',          name: 'GPT-5 Codex (OAuth)',  group: 'openai-codex' },
+        { id: 'gpt-5-codex-mini',     name: 'GPT-5 Codex mini (OAuth)', group: 'openai-codex' },
+        // 4-series.
+        { id: 'gpt-4.1',              name: 'GPT-4.1',              group: 'openai-gpt4' },
+        { id: 'gpt-4.1-mini',         name: 'GPT-4.1 mini',         group: 'openai-gpt4' },
+        { id: 'gpt-4o',               name: 'GPT-4o',               group: 'openai-gpt4' },
+        { id: 'gpt-4o-mini',          name: 'GPT-4o mini',          group: 'openai-gpt4' },
+        // Reasoning.
+        { id: 'o3',                   name: 'o3',                   group: 'openai-reasoning' },
+        { id: 'o3-mini',              name: 'o3-mini',              group: 'openai-reasoning' },
+        { id: 'o4-mini',              name: 'o4-mini',              group: 'openai-reasoning' }
+      ]
+    },
     minimax: {
       label: 'MiniMax',
       chatUrl: 'https://api.minimax.io/v1/chat/completions',
@@ -186,7 +233,17 @@
     customSlashAddBtn: $('customSlashAddBtn'),
     customToolsList: $('customToolsList'),
     customToolAddBtn: $('customToolAddBtn'),
-    customToolStatus: $('customToolStatus')
+    customToolStatus: $('customToolStatus'),
+    openaiAuthRow: $('openaiAuthRow'),
+    openaiAuthStatus: $('openaiAuthStatus'),
+    openaiSignInBtn: $('openaiSignInBtn'),
+    openaiSignOutBtn: $('openaiSignOutBtn'),
+    openaiOauthFlow: $('openaiOauthFlow'),
+    openaiVerifyUrl: $('openaiVerifyUrl'),
+    openaiUserCode: $('openaiUserCode'),
+    openaiCopyCodeBtn: $('openaiCopyCodeBtn'),
+    openaiFlowStatus: $('openaiFlowStatus'),
+    openaiCancelFlowBtn: $('openaiCancelFlowBtn')
   };
 
   // ── State ────────────────────────────────────────────
@@ -203,8 +260,543 @@
     mcpTools: [],                // dynamically-added tool defs
     visionPending: false,        // one-shot: attach screenshot to next message
     pendingAgentTabBind: null,   // when set, the next newly-created tab will inherit this session
-    activeLoops: new Map()       // loopId -> { sessionId, intervalMs, prompt, count, intervalId }
+    activeLoops: new Map(),      // loopId -> { sessionId, intervalMs, prompt, count, intervalId }
+    openaiOauth: null,           // { accessToken, refreshToken, expiresAt, accountId, email } | null
+    openaiDeviceFlow: null       // in-flight { device_code, user_code, verification_uri_complete, expires_in, abortController }
   };
+
+  // ─────────────────────────────────────────────────────────────────
+  // OpenAI / ChatGPT Plus OAuth + Codex Responses-API support
+  // ─────────────────────────────────────────────────────────────────
+  // Mirrors opencode's plugin/codex.ts: the same CLIENT_ID is registered
+  // by OpenAI for the Codex CLI flow, so the same id works here. We use
+  // the *device* flow (not the loopback PKCE flow opencode runs on the
+  // CLI) because a Chrome MV3 extension can't bind a local HTTP server,
+  // and `chrome.identity.launchWebAuthFlow` would need
+  // `https://<ext-id>.chromiumapp.org/...` registered as a redirect URI
+  // with OpenAI — it isn't. The device flow needs no redirect.
+  const OPENAI_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+  const OPENAI_OAUTH_ISSUER = 'https://auth.openai.com';
+  const OPENAI_OAUTH_SCOPE = 'openid profile email offline_access';
+  const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
+
+  function _b64urlDecode(s) {
+    const pad = '='.repeat((4 - (s.length % 4)) % 4);
+    const b64 = (s + pad).replace(/-/g, '+').replace(/_/g, '/');
+    return atob(b64);
+  }
+  function _decodeJwt(jwt) {
+    try {
+      const parts = String(jwt || '').split('.');
+      if (parts.length < 2) return null;
+      return JSON.parse(_b64urlDecode(parts[1]));
+    } catch { return null; }
+  }
+  function _extractAccountId(idToken) {
+    const c = _decodeJwt(idToken);
+    if (!c) return null;
+    return c.chatgpt_account_id
+      || c['https://api.openai.com/auth']?.chatgpt_account_id
+      || c.organizations?.[0]?.id
+      || null;
+  }
+
+  async function openaiOauthLoad() {
+    const { openaiOauth } = await chrome.storage.local.get('openaiOauth');
+    state.openaiOauth = openaiOauth || null;
+  }
+
+  async function _persistOauth(tokens, prev) {
+    const claims = _decodeJwt(tokens.id_token) || {};
+    const expiresAt = Date.now() + ((tokens.expires_in || 3600) - 60) * 1000;
+    const next = {
+      accessToken: tokens.access_token,
+      // OpenAI rotates refresh tokens; fall back to previous on refresh
+      // responses that omit it (some IdPs do that).
+      refreshToken: tokens.refresh_token || prev?.refreshToken || null,
+      expiresAt,
+      accountId: _extractAccountId(tokens.id_token) || prev?.accountId || null,
+      email: claims.email || prev?.email || null,
+    };
+    await chrome.storage.local.set({ openaiOauth: next });
+    state.openaiOauth = next;
+    return next;
+  }
+
+  async function openaiDeviceFlowStart() {
+    if (state.openaiDeviceFlow) {
+      // A flow is already in flight — cancel it so a re-click starts fresh.
+      try { state.openaiDeviceFlow.abortController?.abort(); } catch {}
+      state.openaiDeviceFlow = null;
+    }
+    // The OpenAI Codex device-auth endpoint is JSON-only (form-encoded
+    // gets a 400 with "Input should be a valid dictionary"). The first
+    // call needs `client_id`; the poll call doesn't.
+    const r = await fetch(`${OPENAI_OAUTH_ISSUER}/api/accounts/deviceauth/usercode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: OPENAI_OAUTH_CLIENT_ID }),
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      throw new Error(`device-auth start failed: HTTP ${r.status} ${text.slice(0, 200)}`);
+    }
+    const j = await r.json();
+    // Shape: { device_auth_id, user_code, interval (string secs),
+    //         expires_at (ISO) }. No verification_uri is returned —
+    //         opencode constructs `${ISSUER}/codex/device` and tells
+    //         the user to paste the user_code there.
+    const verifyUrl = `${OPENAI_OAUTH_ISSUER}/codex/device`;
+    const expiresAtMs = j.expires_at ? Date.parse(j.expires_at) : (Date.now() + 15 * 60_000);
+    state.openaiDeviceFlow = {
+      device_auth_id: j.device_auth_id,
+      user_code: j.user_code,
+      interval: Math.max(1, Number(j.interval) || 5),
+      verification_uri: verifyUrl,
+      verification_uri_complete: verifyUrl,
+      startedAt: Date.now(),
+      expiresAt: expiresAtMs,
+      abortController: new AbortController(),
+    };
+    return state.openaiDeviceFlow;
+  }
+
+  async function openaiDeviceFlowPoll(onPending) {
+    const flow = state.openaiDeviceFlow;
+    if (!flow) throw new Error('no device flow in flight');
+    const tokenUrl = `${OPENAI_OAUTH_ISSUER}/api/accounts/deviceauth/token`;
+    let interval = flow.interval;
+    while (Date.now() < flow.expiresAt) {
+      if (flow.abortController.signal.aborted) throw new Error('cancelled');
+      await new Promise((res) => setTimeout(res, interval * 1000));
+      if (flow.abortController.signal.aborted) throw new Error('cancelled');
+      let resp;
+      try {
+        resp = await fetch(tokenUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            device_auth_id: flow.device_auth_id,
+            user_code: flow.user_code,
+          }),
+          signal: flow.abortController.signal,
+        });
+      } catch (e) {
+        if (e.name === 'AbortError') throw new Error('cancelled');
+        if (typeof onPending === 'function') onPending(`network error: ${e.message}`);
+        continue;
+      }
+      // OpenAI returns 403 with code `deviceauth_authorization_pending`
+      // (or 404 transiently) while waiting. Any other non-ok ends the flow.
+      if (resp.status === 403 || resp.status === 404) {
+        if (typeof onPending === 'function') onPending('waiting for sign-in…');
+        continue;
+      }
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        state.openaiDeviceFlow = null;
+        throw new Error(`oauth: HTTP ${resp.status} ${text.slice(0, 200)}`);
+      }
+      // Success: poll returns `{ authorization_code, code_verifier }` —
+      // NOT tokens. Exchange via /oauth/token to get the real bearer.
+      const codeResp = await resp.json();
+      const tokenExchange = await fetch(`${OPENAI_OAUTH_ISSUER}/oauth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: codeResp.authorization_code,
+          redirect_uri: `${OPENAI_OAUTH_ISSUER}/deviceauth/callback`,
+          client_id: OPENAI_OAUTH_CLIENT_ID,
+          code_verifier: codeResp.code_verifier,
+        }).toString(),
+      });
+      if (!tokenExchange.ok) {
+        const text = await tokenExchange.text().catch(() => '');
+        state.openaiDeviceFlow = null;
+        throw new Error(`token exchange failed: HTTP ${tokenExchange.status} ${text.slice(0, 200)}`);
+      }
+      const tokens = await tokenExchange.json();
+      const saved = await _persistOauth(tokens, null);
+      state.openaiDeviceFlow = null;
+      return saved;
+    }
+    state.openaiDeviceFlow = null;
+    throw new Error('device flow expired — please retry');
+  }
+
+  function openaiDeviceFlowCancel() {
+    try { state.openaiDeviceFlow?.abortController?.abort(); } catch {}
+    state.openaiDeviceFlow = null;
+  }
+
+  async function openaiOauthRefresh() {
+    const cur = state.openaiOauth;
+    if (!cur?.refreshToken) throw new Error('not signed in');
+    const r = await fetch(`${OPENAI_OAUTH_ISSUER}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: cur.refreshToken,
+        client_id: OPENAI_OAUTH_CLIENT_ID,
+        scope: OPENAI_OAUTH_SCOPE,
+      }).toString(),
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      throw new Error(`refresh failed: HTTP ${r.status} ${text.slice(0, 200)}`);
+    }
+    const j = await r.json();
+    return _persistOauth(j, cur);
+  }
+
+  async function openaiOauthAccessToken() {
+    if (!state.openaiOauth?.accessToken) return null;
+    // Refresh 60s before expiry to absorb clock skew + slow networks.
+    if (state.openaiOauth.expiresAt && state.openaiOauth.expiresAt < Date.now()) {
+      try { await openaiOauthRefresh(); }
+      catch (e) {
+        console.warn('[openai-oauth] refresh failed:', e);
+        return null;
+      }
+    }
+    return state.openaiOauth.accessToken;
+  }
+
+  async function openaiOauthSignOut() {
+    openaiDeviceFlowCancel();
+    await chrome.storage.local.remove('openaiOauth');
+    state.openaiOauth = null;
+  }
+
+  function isCodexModel(model) {
+    return typeof model === 'string' && /^gpt-5(\.\d+)?-codex/i.test(model);
+  }
+
+  // ─── Codex Responses-API translation ─────────────────────────────
+  // The Codex backend at chatgpt.com/backend-api/codex/responses only
+  // speaks OpenAI's Responses API, not Chat Completions. We translate
+  // at the fetch boundary so the rest of the chat loop is unchanged.
+  function _chatCompletionsToResponses(body, model) {
+    const instructions = [];
+    const input = [];
+    for (const m of (body.messages || [])) {
+      if (m.role === 'system') {
+        const txt = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+        if (txt) instructions.push(txt);
+        continue;
+      }
+      if (m.role === 'user') {
+        const items = [];
+        if (typeof m.content === 'string') {
+          items.push({ type: 'input_text', text: m.content });
+        } else if (Array.isArray(m.content)) {
+          for (const p of m.content) {
+            if (p.type === 'text' && typeof p.text === 'string') {
+              items.push({ type: 'input_text', text: p.text });
+            } else if (p.type === 'image_url' && p.image_url?.url) {
+              items.push({ type: 'input_image', image_url: p.image_url.url });
+            }
+          }
+        }
+        if (items.length) input.push({ role: 'user', content: items });
+        continue;
+      }
+      if (m.role === 'assistant') {
+        if (typeof m.content === 'string' && m.content) {
+          input.push({ role: 'assistant', content: [{ type: 'output_text', text: m.content }] });
+        }
+        if (Array.isArray(m.tool_calls)) {
+          for (const tc of m.tool_calls) {
+            input.push({
+              type: 'function_call',
+              call_id: tc.id,
+              name: tc.function?.name || '',
+              arguments: tc.function?.arguments || '',
+            });
+          }
+        }
+        continue;
+      }
+      if (m.role === 'tool') {
+        const out = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+        input.push({
+          type: 'function_call_output',
+          call_id: m.tool_call_id,
+          output: out,
+        });
+        continue;
+      }
+    }
+    const tools = Array.isArray(body.tools)
+      ? body.tools.filter(t => t.type === 'function' && t.function).map(t => ({
+          type: 'function',
+          name: t.function.name,
+          description: t.function.description || '',
+          parameters: t.function.parameters || { type: 'object', properties: {} },
+        }))
+      : undefined;
+    const out = {
+      model,
+      instructions: instructions.join('\n\n') || undefined,
+      input,
+      stream: true,
+      // Codex requires `store: false` for stateless conversation re-play;
+      // we manage history client-side. Without this the server complains
+      // about missing previous_response_id on the second turn.
+      store: false,
+      // Reasoning defaults mirror opencode's console mapper. Without
+      // these gpt-5-codex sometimes returns terse outputs.
+      reasoning: { effort: 'medium', summary: 'auto' },
+      text: { verbosity: isCodexModel(model) ? 'medium' : 'low' },
+    };
+    if (tools && tools.length) {
+      out.tools = tools;
+      out.tool_choice = body.tool_choice || 'auto';
+    }
+    if (typeof body.temperature === 'number') out.temperature = body.temperature;
+    if (typeof body.top_p === 'number') out.top_p = body.top_p;
+    // Codex rejects max_output_tokens / max_tokens — drop both.
+    return out;
+  }
+
+  // Translate Responses SSE events into Chat-Completions-style lines so
+  // the existing stream-reader in runChatLoop can consume them as-is.
+  // Returns an array of `data: ...\n` lines to write into the buffer.
+  function _responsesEventToChatLines(ev, ctx) {
+    const out = [];
+    const t = ev?.type;
+    if (!t) return out;
+    if (t === 'response.output_text.delta' && typeof ev.delta === 'string') {
+      out.push(JSON.stringify({
+        choices: [{ index: 0, delta: { content: ev.delta } }],
+      }));
+      return out;
+    }
+    if (t === 'response.reasoning_summary_text.delta' && typeof ev.delta === 'string') {
+      out.push(JSON.stringify({
+        choices: [{ index: 0, delta: { reasoning_content: ev.delta } }],
+      }));
+      return out;
+    }
+    if (t === 'response.output_item.added' && ev.item?.type === 'function_call') {
+      const item = ev.item;
+      const idx = ctx.toolIndex[item.id] ?? (ctx.toolIndex[item.id] = ctx.nextToolIdx++);
+      out.push(JSON.stringify({
+        choices: [{
+          index: 0,
+          delta: {
+            tool_calls: [{
+              index: idx,
+              id: item.call_id || item.id,
+              type: 'function',
+              function: { name: item.name || '', arguments: item.arguments || '' },
+            }],
+          },
+        }],
+      }));
+      return out;
+    }
+    if (t === 'response.function_call_arguments.delta' && typeof ev.delta === 'string') {
+      const idx = ctx.toolIndex[ev.item_id];
+      if (idx === undefined) return out; // arrived before .added — skip
+      out.push(JSON.stringify({
+        choices: [{
+          index: 0,
+          delta: {
+            tool_calls: [{ index: idx, function: { arguments: ev.delta } }],
+          },
+        }],
+      }));
+      return out;
+    }
+    if (t === 'response.completed') {
+      // Terminal chunk: emit finish_reason + usage so runChatLoop's
+      // existing finalisation path runs.
+      const hasTools = Object.keys(ctx.toolIndex).length > 0;
+      const usage = ev.response?.usage;
+      out.push(JSON.stringify({
+        choices: [{ index: 0, delta: {}, finish_reason: hasTools ? 'tool_calls' : 'stop' }],
+        usage: usage ? {
+          prompt_tokens: usage.input_tokens,
+          completion_tokens: usage.output_tokens,
+          total_tokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
+        } : undefined,
+      }));
+      out.push('[DONE]');
+      return out;
+    }
+    if (t === 'response.failed' || t === 'error') {
+      const msg = ev.response?.error?.message || ev.error?.message || ev.message || 'codex error';
+      // Surface as a synthesised error stream that the caller will throw.
+      ctx.errorMessage = msg;
+      out.push('[DONE]');
+      return out;
+    }
+    return out;
+  }
+
+  // Wrapper around fetch that hits the Codex Responses endpoint and
+  // re-encodes the SSE response as Chat-Completions deltas on the fly.
+  async function openaiCodexChatFetch({ model, body, signal }) {
+    const token = await openaiOauthAccessToken();
+    if (!token) {
+      throw new Error('ChatGPT sign-in required to use Codex models. Open Settings → OpenAI to sign in.');
+    }
+    const accountId = state.openaiOauth?.accountId;
+    if (!accountId) {
+      throw new Error('Missing ChatGPT account id — sign out and back in.');
+    }
+    const codexBody = _chatCompletionsToResponses(body, model);
+    const upstream = await fetch(CODEX_API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'ChatGPT-Account-Id': accountId,
+        'Content-Type': 'application/json',
+        'Accept': 'text/event-stream',
+        'originator': 'opencode',
+        // Opencode tags requests with a session id for debugging; we
+        // use the active session id when available.
+        'session_id': (state.activeSession?.id || 'kyoto') + '',
+      },
+      body: JSON.stringify(codexBody),
+      signal,
+    });
+    if (!upstream.ok) {
+      const errText = await upstream.text().catch(() => '');
+      throw new Error(`Codex HTTP ${upstream.status}: ${errText.slice(0, 400)}`);
+    }
+
+    // Re-encode the upstream Responses-SSE stream as an OpenAI Chat-
+    // Completions SSE stream so the existing reader code can parse it.
+    const ctx = { toolIndex: {}, nextToolIdx: 0, errorMessage: null };
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    let buffer = '';
+    const stream = new ReadableStream({
+      async pull(controller) {
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+              if (ctx.errorMessage) controller.error(new Error(ctx.errorMessage));
+              else controller.close();
+              return;
+            }
+            buffer += decoder.decode(value, { stream: true });
+            const events = buffer.split('\n\n');
+            buffer = events.pop() || '';
+            for (const raw of events) {
+              // Each SSE event may have multiple `data:` lines; collect them.
+              const dataLines = raw.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trim());
+              if (!dataLines.length) continue;
+              const payload = dataLines.join('\n');
+              if (payload === '[DONE]') {
+                controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                continue;
+              }
+              let parsed;
+              try { parsed = JSON.parse(payload); } catch { continue; }
+              const lines = _responsesEventToChatLines(parsed, ctx);
+              for (const ln of lines) {
+                controller.enqueue(encoder.encode(`data: ${ln}\n\n`));
+              }
+              if (ctx.errorMessage) {
+                controller.error(new Error(ctx.errorMessage));
+                return;
+              }
+            }
+            return;
+          }
+        } catch (e) {
+          controller.error(e);
+        }
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }
+
+  // Exposed for tools.js + UI to call.
+  window.KyotoOpenAI = {
+    getAuth: () => state.openaiOauth,
+    isSignedIn: () => !!state.openaiOauth?.accessToken,
+    deviceFlowStart: openaiDeviceFlowStart,
+    deviceFlowPoll: openaiDeviceFlowPoll,
+    deviceFlowCancel: openaiDeviceFlowCancel,
+    refresh: openaiOauthRefresh,
+    signOut: openaiOauthSignOut,
+    isCodexModel,
+  };
+
+  function renderOpenAIAuth() {
+    if (!els.openaiAuthStatus) return;
+    const auth = state.openaiOauth;
+    const flowInFlight = !!state.openaiDeviceFlow;
+    if (auth?.accessToken) {
+      const label = auth.email ? `Signed in as ${auth.email}` : 'Signed in';
+      els.openaiAuthStatus.textContent = label;
+      els.openaiAuthStatus.className = 'status ok';
+      if (els.openaiSignInBtn) els.openaiSignInBtn.style.display = 'none';
+      if (els.openaiSignOutBtn) els.openaiSignOutBtn.style.display = '';
+    } else {
+      els.openaiAuthStatus.textContent = flowInFlight ? 'Sign-in pending…' : 'Not signed in';
+      els.openaiAuthStatus.className = 'status';
+      if (els.openaiSignInBtn) {
+        els.openaiSignInBtn.style.display = '';
+        els.openaiSignInBtn.disabled = flowInFlight;
+      }
+      if (els.openaiSignOutBtn) els.openaiSignOutBtn.style.display = 'none';
+    }
+    if (els.openaiOauthFlow) {
+      els.openaiOauthFlow.classList.toggle('hidden', !flowInFlight);
+      if (flowInFlight) {
+        const f = state.openaiDeviceFlow;
+        if (els.openaiUserCode) els.openaiUserCode.textContent = f.user_code || '—';
+        if (els.openaiVerifyUrl) {
+          const href = f.verification_uri_complete || f.verification_uri || '#';
+          els.openaiVerifyUrl.href = href;
+          els.openaiVerifyUrl.textContent = href;
+        }
+      }
+    }
+  }
+
+  async function startOpenAISignInFlow() {
+    if (els.openaiAuthStatus) {
+      els.openaiAuthStatus.textContent = 'Starting…';
+      els.openaiAuthStatus.className = 'status';
+    }
+    try {
+      const flow = await openaiDeviceFlowStart();
+      renderOpenAIAuth();
+      // Pop the verification URL into a new tab so the user only has to
+      // confirm the code (the URL already has the code embedded).
+      const url = flow.verification_uri_complete || flow.verification_uri;
+      if (url) { try { window.open(url, '_blank', 'noopener'); } catch {} }
+      const setFlowStatus = (msg) => {
+        if (els.openaiFlowStatus) els.openaiFlowStatus.textContent = msg;
+      };
+      setFlowStatus('Waiting for you to confirm in the browser…');
+      const saved = await openaiDeviceFlowPoll(setFlowStatus);
+      if (els.openaiFlowStatus) els.openaiFlowStatus.textContent = `Signed in${saved.email ? ' as ' + saved.email : ''}!`;
+      renderOpenAIAuth();
+      // Also refresh the provider/model picker if the user is on the
+      // OpenAI provider so the Codex group becomes selectable.
+      try { if (typeof renderModelOptions === 'function') renderModelOptions(); } catch {}
+    } catch (e) {
+      if (els.openaiFlowStatus) {
+        els.openaiFlowStatus.textContent = `Error: ${e.message}`;
+        els.openaiFlowStatus.className = 'status err';
+      }
+      renderOpenAIAuth();
+    }
+  }
 
   // Tools.js calls this just before chrome.tabs.create so the new tab
   // adopts the active session's history instead of starting a fresh
@@ -2869,7 +3461,11 @@
     const cfg = getProviderConfig(provider);
     if (!cfg) throw new Error(`Unknown provider: ${provider}`);
     const apiKey = keyFor(provider);
-    if (!apiKey && !cfg.isCustom) {
+    // Codex models route through the ChatGPT OAuth path — no API key
+    // needed (and indeed an API key won't work, codex IDs aren't on
+    // the public REST surface).
+    const usingCodexOauth = provider === 'openai' && isCodexModel(model) && !!state.openaiOauth?.accessToken;
+    if (!apiKey && !cfg.isCustom && !usingCodexOauth) {
       throw new Error(
         `No API key configured for ${cfg.label}. ` +
         `Open Settings, select "${cfg.label}" as the Provider, and enter your key.`
@@ -2902,15 +3498,28 @@
       body.tool_choice = 'auto';
     }
 
-    const res = await fetch(cfg.chatUrl, {
-      method: 'POST',
-      headers: cfg.headers(apiKey),
-      body: JSON.stringify(body),
-      signal
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error?.message || `HTTP ${res.status} ${res.statusText}`);
+    // Codex fork: when the user picks a gpt-5-codex* model under the
+    // OpenAI provider AND has signed in with ChatGPT Plus/Pro, route to
+    // the codex Responses endpoint instead. The wrapper re-encodes the
+    // upstream SSE as Chat-Completions deltas so the reader loop below
+    // is identical for both code paths.
+    let res;
+    if (provider === 'openai' && isCodexModel(model)) {
+      if (!state.openaiOauth?.accessToken) {
+        throw new Error('GPT-5 Codex models require ChatGPT sign-in. Open Settings → OpenAI to sign in with your ChatGPT Plus/Pro account.');
+      }
+      res = await openaiCodexChatFetch({ model, body, signal });
+    } else {
+      res = await fetch(cfg.chatUrl, {
+        method: 'POST',
+        headers: cfg.headers(apiKey),
+        body: JSON.stringify(body),
+        signal
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error?.message || `HTTP ${res.status} ${res.statusText}`);
+      }
     }
 
     let textAcc = '';
@@ -3115,6 +3724,7 @@
     if (els.s3Bucket) els.s3Bucket.value = state.settings.s3Bucket || '';
     if (els.s3KeyPrefix) els.s3KeyPrefix.value = state.settings.s3KeyPrefix || '';
     if (els.s3Endpoint) els.s3Endpoint.value = state.settings.s3Endpoint || '';
+    renderOpenAIAuth();
     if (els.s3Status) els.s3Status.textContent = '';
     if (els.skillsHubUrl) els.skillsHubUrl.value = state.settings.skillsHubUrl || '';
     if (els.skillsHubKey) els.skillsHubKey.value = state.settings.skillsHubKey || '';
@@ -3926,6 +4536,25 @@
       });
     }
 
+    // ── OpenAI ChatGPT OAuth event handlers ──────────────
+    if (els.openaiSignInBtn) els.openaiSignInBtn.addEventListener('click', startOpenAISignInFlow);
+    if (els.openaiSignOutBtn) els.openaiSignOutBtn.addEventListener('click', async () => {
+      if (!confirm('Sign out of ChatGPT? Codex models will become unavailable.')) return;
+      try { await openaiOauthSignOut(); }
+      catch (e) { alert(`Sign out failed: ${e.message}`); return; }
+      renderOpenAIAuth();
+    });
+    if (els.openaiCancelFlowBtn) els.openaiCancelFlowBtn.addEventListener('click', () => {
+      openaiDeviceFlowCancel();
+      renderOpenAIAuth();
+    });
+    if (els.openaiCopyCodeBtn) els.openaiCopyCodeBtn.addEventListener('click', async () => {
+      const code = els.openaiUserCode?.textContent || '';
+      try { await navigator.clipboard.writeText(code); els.openaiCopyCodeBtn.textContent = 'Copied'; }
+      catch { els.openaiCopyCodeBtn.textContent = 'Copy failed'; }
+      setTimeout(() => { if (els.openaiCopyCodeBtn) els.openaiCopyCodeBtn.textContent = 'Copy'; }, 1500);
+    });
+
     if (els.s3TestBtn) els.s3TestBtn.addEventListener('click', async () => {
       // Use the in-form values so the user can test BEFORE saving.
       if (els.s3Status) { els.s3Status.textContent = 'Uploading…'; els.s3Status.className = 'status'; }
@@ -4479,6 +5108,7 @@
   // ── Boot ─────────────────────────────────────────────
   (async () => {
     await loadSettings();
+    await openaiOauthLoad();
     applyAppearance();
     compileCustomTools();
     // Kick off models.dev registry load (cached, non-blocking after first run)
