@@ -3477,7 +3477,18 @@
 
     const messages = buildMessages(session);
     const baseTools = toolsEnabled ? window.KyotoTools.schemas(new Set(enabledGroups)) : [];
-    const tools = [...baseTools, ...state.mcpTools, ...(state.customToolSchemas || [])];
+    let tools = [...baseTools, ...state.mcpTools, ...(state.customToolSchemas || [])];
+    // Hide redundant external VLM tools when the active model is
+    // natively multimodal — otherwise the model wastes a turn (and
+    // tokens) calling minimax_describe_tab to OCR a screenshot it
+    // could just read directly. The /see slash command still works
+    // and attaches the screenshot as a multimodal user message.
+    if (window.KyotoModels?.supportsVision?.(provider, model)) {
+      tools = tools.filter(t => {
+        const n = t?.function?.name;
+        return n !== 'minimax_describe_tab' && n !== 'minimax_understand_image';
+      });
+    }
 
     // Clamp max_tokens to whatever models.dev (or our fallback table)
     // says this model actually supports, so we don't ask for 32K from a

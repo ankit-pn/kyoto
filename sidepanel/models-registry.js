@@ -101,6 +101,7 @@
           output: m.limit?.output,
           cost: m.cost ? { input: m.cost.input, output: m.cost.output } : null,
           name: m.name || modelId,
+          modalities: m.modalities || null,
           source: 'models.dev'
         };
       }
@@ -108,6 +109,37 @@
     const s = STATIC[provider]?.[modelId] || STATIC[provider]?._default;
     if (s) return { ...s, name: modelId, source: 'static' };
     return null;
+  }
+
+  // Does this model accept image inputs in its prompt? Falls back to
+  // provider-aware heuristics when models.dev hasn't loaded or doesn't
+  // list modalities. The caller uses this to hide redundant external
+  // VLM tools (minimax_describe_tab, minimax_understand_image) when
+  // the chosen model can see images natively.
+  function supportsVision(provider, modelId) {
+    if (!modelId) return false;
+    const info = get(provider, modelId);
+    const mods = info?.modalities?.input;
+    if (Array.isArray(mods)) return mods.includes('image');
+    // Heuristic fallback — biased to recall (true) over precision so we
+    // don't expose duplicate tools by mistake. The rule: any model
+    // from a provider where the current line is multimodal-by-default.
+    const id = String(modelId).toLowerCase();
+    if (provider === 'openai') {
+      // Every chat model OpenAI currently ships accepts images. The
+      // deprecated text-only ones (gpt-3.5-turbo, text-davinci, etc.)
+      // are out of the picker entirely.
+      return /^(gpt-[45]|gpt-5|o[134])/.test(id);
+    }
+    if (provider === 'openrouter') {
+      // OpenRouter passes through; inspect the slug.
+      return /openai\/gpt-(4o|4\.1|5)|anthropic\/claude-(3\.5|3\.7|4)|google\/gemini|mistralai\/pixtral|meta-llama\/llama-3\.2(?!-1b|-3b)/.test(id);
+    }
+    if (provider === 'minimax') {
+      return /vl|vision/.test(id);
+    }
+    // DeepSeek + most others: text-only by default.
+    return false;
   }
 
   function maxOutput(provider, modelId, fallback = 8192) {
@@ -151,6 +183,7 @@
     maxOutput,
     contextLength,
     costFor,
+    supportsVision,
     formatN,
     formatUsd,
     getRegistry: () => registry,
