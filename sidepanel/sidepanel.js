@@ -1920,7 +1920,46 @@
     const cfg = getProviderConfig(provider);
     if (!cfg) throw new Error(`unknown provider: ${provider}`);
     const apiKey = keyFor(provider);
-    if (!apiKey && !cfg.isCustom) throw new Error(`no API key for ${cfg.label}`);
+    const usingCodexOauth = provider === 'openai' && isOauthRoutableModel(model) && !!state.openaiOauth?.accessToken;
+    if (!apiKey && !cfg.isCustom && !usingCodexOauth) throw new Error(`no API key for ${cfg.label}`);
+
+    // Codex backend is stream-only and uses the Responses-API body
+    // shape. Pipe the same wrapper streamOnce uses, then accumulate
+    // text-content deltas off the wire.
+    if (usingCodexOauth) {
+      const codexBody = {
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        temperature,
+        max_tokens: maxTokens,
+        stream: true,
+      };
+      const res = await openaiCodexChatFetch({ model, body: codexBody, signal: undefined });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let acc = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const raw of lines) {
+          const ln = raw.trim();
+          if (!ln.startsWith('data:')) continue;
+          const data = ln.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(data);
+            const delta = parsed.choices?.[0]?.delta?.content;
+            if (typeof delta === 'string') acc += delta;
+          } catch {}
+        }
+      }
+      return acc;
+    }
+
     // Delegate header construction to the provider config so non-Bearer
     // schemes (Anthropic's `x-api-key`, custom providers with bespoke
     // headers) keep working. Use a Headers object (and .set, not append)
@@ -3286,7 +3325,11 @@
     session.model = state.settings.model;
 
     const sessCfg = getProviderConfig(session.provider);
-    const needsKey = !sessCfg?.isCustom; // custom providers can be keyless (Ollama, LM Studio)
+    // Custom providers can be keyless (Ollama, LM Studio). OpenAI with
+    // ChatGPT OAuth signed in also counts as authed for OAuth-routable
+    // models (codex, GPT-5.2+).
+    const hasOpenaiOauth = session.provider === 'openai' && !!state.openaiOauth?.accessToken;
+    const needsKey = !sessCfg?.isCustom && !hasOpenaiOauth;
     if (needsKey && !keyFor(session.provider)) {
       addMessage(
         'assistant',
