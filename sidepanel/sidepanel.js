@@ -334,7 +334,11 @@
 
   async function _persistOauth(tokens, prev) {
     const claims = _decodeJwt(tokens.id_token) || {};
-    const expiresAt = Date.now() + ((tokens.expires_in || 3600) - 60) * 1000;
+    // Refresh 5 minutes before real expiry. Long tool-loop chats can
+    // span minutes, and once the stream is open we can't swap the
+    // bearer mid-flight — so we pre-rotate aggressively to keep the
+    // next request safely inside the validity window.
+    const expiresAt = Date.now() + ((tokens.expires_in || 3600) - 300) * 1000;
     const next = {
       accessToken: tokens.access_token,
       // OpenAI rotates refresh tokens; fall back to previous on refresh
@@ -645,7 +649,10 @@
     }
     if (tools && tools.length) {
       out.tools = tools;
-      out.tool_choice = body.tool_choice || 'auto';
+      // Only forward an explicit tool_choice — opencode's lowering
+      // omits the field when the caller didn't set it, and Codex
+      // defaults to auto on its own.
+      if (body.tool_choice) out.tool_choice = body.tool_choice;
     }
     // Codex backend rejects `temperature`, `top_p`, `max_output_tokens`,
     // `max_tokens` with HTTP 400 "Unsupported parameter". opencode never
@@ -833,71 +840,72 @@
     const encoder = new TextEncoder();
     let buffer = '';
     const stream = new ReadableStream({
+      // ReadableStream's pull() contract: process ONE upstream chunk per
+      // call; the consumer triggers the next call when its internal
+      // queue is empty. (No outer loop — that was dead code that hid
+      // the single-pump semantics.)
       async pull(controller) {
         try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) {
-              if (ctx.errorMessage) {
-                controller.error(new Error(ctx.errorMessage));
-                return;
-              }
-              if (!ctx.emittedDeltas && !ctx.emittedFinish) {
-                const seen = [...ctx.seenEventTypes].slice(0, 8).join(', ') || '(none)';
-                controller.error(new Error(
-                  `Codex stream produced no recognisable text/tool events. Event types seen: ${seen}. ` +
-                  `Set window.KYOTO_DEBUG_CODEX = true in the console + retry to dump raw events.`
-                ));
-                return;
-              }
-              controller.close();
+          const { value, done } = await reader.read();
+          if (done) {
+            if (ctx.errorMessage) {
+              controller.error(new Error(ctx.errorMessage));
               return;
             }
-            buffer += decoder.decode(value, { stream: true });
-            // SSE events end with a blank line — \n\n on Unix, \r\n\r\n
-            // on some proxies. Normalise both.
-            const norm = buffer.replace(/\r\n/g, '\n');
-            const events = norm.split('\n\n');
-            buffer = events.pop() || '';
-            for (const raw of events) {
-              if (!raw.trim()) continue;
-              // Standard SSE: lines like `event: TYPE`, `data: PAYLOAD`
-              // (multi-line data allowed). OpenAI's Responses API ALSO
-              // embeds `type` inside the data JSON, so try both.
-              let evType = null;
-              const dataLines = [];
-              for (const ln of raw.split('\n')) {
-                if (ln.startsWith('event:')) evType = ln.slice(6).trim();
-                else if (ln.startsWith('data:')) dataLines.push(ln.slice(5).trim());
-              }
-              if (!dataLines.length) continue;
-              const payload = dataLines.join('\n');
-              if (window.KYOTO_DEBUG_CODEX) {
-                console.log('[Codex SSE]', evType || '(no-event)', payload.slice(0, 240));
-              }
-              if (payload === '[DONE]') {
+            if (!ctx.emittedDeltas && !ctx.emittedFinish) {
+              const seen = [...ctx.seenEventTypes].slice(0, 8).join(', ') || '(none)';
+              controller.error(new Error(
+                `Codex stream produced no recognisable text/tool events. Event types seen: ${seen}. ` +
+                `Set window.KYOTO_DEBUG_CODEX = true in the console + retry to dump raw events.`
+              ));
+              return;
+            }
+            controller.close();
+            return;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          // SSE events end with a blank line — \n\n on Unix, \r\n\r\n
+          // on some proxies. Normalise both.
+          const norm = buffer.replace(/\r\n/g, '\n');
+          const events = norm.split('\n\n');
+          buffer = events.pop() || '';
+          for (const raw of events) {
+            if (!raw.trim()) continue;
+            // Standard SSE: lines like `event: TYPE`, `data: PAYLOAD`
+            // (multi-line data allowed). OpenAI's Responses API ALSO
+            // embeds `type` inside the data JSON, so try both.
+            let evType = null;
+            const dataLines = [];
+            for (const ln of raw.split('\n')) {
+              if (ln.startsWith('event:')) evType = ln.slice(6).trim();
+              else if (ln.startsWith('data:')) dataLines.push(ln.slice(5).trim());
+            }
+            if (!dataLines.length) continue;
+            const payload = dataLines.join('\n');
+            if (window.KYOTO_DEBUG_CODEX) {
+              console.log('[Codex SSE]', evType || '(no-event)', payload.slice(0, 240));
+            }
+            if (payload === '[DONE]') {
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              continue;
+            }
+            let parsed;
+            try { parsed = JSON.parse(payload); } catch { continue; }
+            // Prefer SSE event header type, fall back to JSON .type field.
+            if (!parsed.type && evType) parsed.type = evType;
+            if (parsed.type) ctx.seenEventTypes.add(parsed.type);
+            const lines = _responsesEventToChatLines(parsed, ctx);
+            for (const ln of lines) {
+              if (ln === '[DONE]') {
                 controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-                continue;
-              }
-              let parsed;
-              try { parsed = JSON.parse(payload); } catch { continue; }
-              // Prefer SSE event header type, fall back to JSON .type field.
-              if (!parsed.type && evType) parsed.type = evType;
-              if (parsed.type) ctx.seenEventTypes.add(parsed.type);
-              const lines = _responsesEventToChatLines(parsed, ctx);
-              for (const ln of lines) {
-                if (ln === '[DONE]') {
-                  controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-                } else {
-                  controller.enqueue(encoder.encode(`data: ${ln}\n\n`));
-                }
-              }
-              if (ctx.errorMessage) {
-                controller.error(new Error(ctx.errorMessage));
-                return;
+              } else {
+                controller.enqueue(encoder.encode(`data: ${ln}\n\n`));
               }
             }
-            return;
+            if (ctx.errorMessage) {
+              controller.error(new Error(ctx.errorMessage));
+              return;
+            }
           }
         } catch (e) {
           controller.error(e);

@@ -192,7 +192,18 @@ function deepIncludes(actual, expected, label) {
     description: 'Read a file',
     parameters: { type: 'object', properties: { path: { type: 'string' } } },
   }, '8: tool shape');
-  eq(out.tool_choice, 'auto', '8: default tool_choice');
+  eq(out.tool_choice, undefined, '8: tool_choice omitted when caller did not set it');
+}
+
+// 8b) Explicit tool_choice is forwarded.
+{
+  const body = {
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [{ type: 'function', function: { name: 'noop', parameters: {} } }],
+    tool_choice: 'required',
+  };
+  const out = _chatCompletionsToResponses(body, 'gpt-5-codex');
+  eq(out.tool_choice, 'required', '8b: explicit tool_choice forwarded');
 }
 
 // 9) isCodexModel sanity.
