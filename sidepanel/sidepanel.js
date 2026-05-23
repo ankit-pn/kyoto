@@ -2887,7 +2887,7 @@
   // child session get their `tabId` injected by callToolOrMCP so the
   // child's actions always target ITS tab — not whatever tab the user
   // has clicked into in the foreground.
-  async function spawnSubagent({ prompt, startUrl, tabId, closeTab = false, makeActive = false, parentSessionId, model, restrictGroups }) {
+  async function spawnSubagent({ prompt, startUrl, tabId, closeTab = false, makeActive = false, parentSessionId, model }) {
     if (!prompt || !String(prompt).trim()) throw new Error('prompt required');
     let tab;
     if (tabId != null) {
@@ -2910,23 +2910,39 @@
     // exclude the agent's own subagent spawn (we don't currently allow
     // grandchild agents to prevent exponential cost).
     sub._subagentRestrictedTools = new Set(['ask_user', 'agent']);
-    if (Array.isArray(restrictGroups)) sub._subagentEnabledGroups = new Set(restrictGroups);
-    await persistSession(sub);
+    await persistSession(sub); // also adds to state.sessionsIndex + writes
     if (sub.tabId != null) state.tabToSession[sub.tabId] = sub.id;
-    // Make the new session visible in the sessions list. UI doesn't
-    // auto-switch — user can click it open to watch the subagent work.
-    state.sessionsIndex.unshift({ id: sub.id, title: sub.title, createdAt: sub.createdAt, lastActive: sub.lastActive });
-    try { await chrome.storage.local.set({ kyoto_sessions_index: state.sessionsIndex }); } catch {}
     updateSessionsButton();
 
     // Run the same chat loop a regular session uses. Awaits until the
-    // child stops (no tool calls, max-steps cap, or error).
+    // child stops (no tool calls, max-steps cap, or error). Wire the
+    // parent's abort signal so that user-pressed Stop propagates to
+    // every active child: when parent.runtime.abort fires, abort the
+    // sub's runtime as well. The sub's runtime is created inside
+    // runChatLoop, so we listen on the parent abort and then look up
+    // the sub's runtime at fire-time.
+    const parentRT = parentSessionId ? state.runtimes[parentSessionId]
+                                     : (state.activeSession ? state.runtimes[state.activeSession.id] : null);
+    let abortFwd = null;
+    if (parentRT?.abort) {
+      abortFwd = () => { try { state.runtimes[sub.id]?.abort?.abort(); } catch {} };
+      parentRT.abort.signal.addEventListener('abort', abortFwd);
+      // Also track on the parent runtime so debugging / future stop
+      // logic can see the live child list.
+      parentRT._children = [...(parentRT._children || []), sub.id];
+    }
     try {
       await runChatLoop(sub);
     } catch (e) {
       const err = e?.message || String(e);
       if (closeTab) { try { await chrome.tabs.remove(tab.id); } catch {} }
+      if (abortFwd && parentRT?.abort) {
+        try { parentRT.abort.signal.removeEventListener('abort', abortFwd); } catch {}
+      }
       return { ok: false, error: err, sessionId: sub.id, tabId: tab.id };
+    }
+    if (abortFwd && parentRT?.abort) {
+      try { parentRT.abort.signal.removeEventListener('abort', abortFwd); } catch {}
     }
 
     // Harvest the last assistant text + total cost across the whole
@@ -2955,14 +2971,17 @@
     }
     // Roll the child's cost up onto the parent session so the user's
     // running session-cost includes work delegated to subagents.
+    // Important: only mutate the parent's IN-MEMORY object — the
+    // parent's own runChatLoop is awaiting this spawnSubagent call and
+    // will persistSession on its next iteration. Writing here would
+    // race with that loop and clobber state.
     try {
       const parent = state.activeSession?.id === sub._subagentParent
         ? state.activeSession
-        : (await loadFullSession(sub._subagentParent));
+        : null;
       if (parent) {
         parent._subagentCostUsd = (parent._subagentCostUsd || 0) + childCostUsd;
         parent._subagentRuns = (parent._subagentRuns || 0) + 1;
-        await persistSession(parent);
       }
     } catch {}
 
@@ -3942,7 +3961,9 @@
       // gate on goal_done (not 'done') because user-set goals are an
       // explicit "this is a task, not idle chitchat" signal. Fire-and-
       // forget so the UI isn't blocked.
-      if (stoppedReason === 'goal_done' && state.settings.skillsAutoSave !== false) {
+      // Subagents shouldn't auto-extract skills — they're stateless
+      // sub-tasks, not the kind of user-driven workflow worth saving.
+      if (stoppedReason === 'goal_done' && state.settings.skillsAutoSave !== false && !session._subagent) {
         extractAndSaveSkill(session, { trigger: 'goal_done' })
           .catch((e) => console.warn('skill auto-extract failed:', e?.message || e));
       }
@@ -4322,7 +4343,11 @@
     // Skills hub — surface skills already saved for this domain so the
     // model knows to call skill_get instead of rediscovering the workflow.
     // skillsForCurrentDomain is refreshed by refreshPageContext().
-    if (state.skillsForCurrentDomain?.length) {
+    // Subagents are skipped: state.skillsForCurrentDomain tracks the
+    // user's foreground tab, not the subagent's bound tab, so injecting
+    // it would just add irrelevant noise. The subagent can call
+    // skill_list explicitly if it wants domain-specific playbooks.
+    if (!session._subagent && state.skillsForCurrentDomain?.length) {
       const lines = state.skillsForCurrentDomain.slice(0, 8).map(s =>
         `- ${s.name} (id: ${s.skill_id}, domain: ${s.domain}) — ${s.description || '(no description)'}`
       );
@@ -4334,7 +4359,7 @@
         `Use \`skill_search\` only when listing returns too many results or you need substring matching.\n` +
         lines.join('\n')
       );
-    } else if (state.skillsForCurrentDomainKey) {
+    } else if (!session._subagent && state.skillsForCurrentDomainKey) {
       // No skills loaded for this domain — still nudge the model to check.
       systemParts.push(
         `🪄 No skills cached yet for \`${state.skillsForCurrentDomainKey}\`. ` +

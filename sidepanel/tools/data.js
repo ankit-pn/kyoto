@@ -245,17 +245,28 @@
   T({
     name: 'minimax_describe_tab',
     group: 'minimax',
-    description: 'Capture a screenshot of the active tab and analyze it via MiniMax VLM in one tool call. Use for "what is on this page", OCR, layout analysis, accessibility checks. Returns only the model\'s text — the screenshot data URL never enters the conversation, so this is the cheap way to do tab-level vision.',
+    description: 'Capture a screenshot of a tab (default: active tab in this window; pass `tabId` to target a specific tab) and analyze it via MiniMax VLM in one tool call. Use for "what is on this page", OCR, layout analysis, accessibility checks. Returns only the model\'s text — the screenshot data URL never enters the conversation, so this is the cheap way to do tab-level vision.',
     parameters: OBJ({
       prompt: STR,
       format: { type: 'string', enum: ['jpeg', 'png'] },
-      quality: NUM
+      quality: NUM,
+      tabId: { type: 'number' }
     }, ['prompt']),
-    handler: async ({ prompt, format = 'jpeg', quality = 80 }) => {
+    handler: async ({ prompt, format = 'jpeg', quality = 80, tabId }) => {
       if (!prompt) throw new Error('prompt required');
-      const dataUrl = await chrome.tabs.captureVisibleTab({ format, quality });
+      const { activeTab } = window.KyotoTR;
+      tabId = tabId ?? (await activeTab()).id;
+      let windowId;
+      try { windowId = (await chrome.tabs.get(tabId))?.windowId; } catch {}
+      try {
+        const t = await chrome.tabs.get(tabId);
+        if (t && !t.active) await chrome.tabs.update(tabId, { active: true });
+      } catch {}
+      const dataUrl = windowId != null
+        ? await chrome.tabs.captureVisibleTab(windowId, { format, quality })
+        : await chrome.tabs.captureVisibleTab({ format, quality });
       const data = await minimaxFetch('/v1/coding_plan/vlm', { prompt, image_url: dataUrl });
-      return { content: data.content || '', screenshotBytes: dataUrl.length };
+      return { content: data.content || '', screenshotBytes: dataUrl.length, tabId };
     }
   });
 })();

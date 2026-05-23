@@ -80,11 +80,25 @@
   T({
     name: 'tab_screenshot',
     group: 'browser',
-    description: 'Capture a screenshot of the visible area of the current window. Returns the full data URL (use `format: "jpeg"` and a lower `quality` to reduce size). Note: the data URL is large; if you only need to *analyze* the screenshot with a vision model, prefer `minimax_describe_tab` which captures + analyzes in one step without round-tripping the base64 through the conversation.',
-    parameters: OBJ({ format: { type: 'string', enum: ['png', 'jpeg'] }, quality: NUM }),
-    handler: async ({ format = 'png', quality = 90 } = {}) => {
-      const dataUrl = await chrome.tabs.captureVisibleTab({ format, quality });
-      return { dataUrl, bytes: dataUrl.length, mimeType: `image/${format}` };
+    description: 'Capture a screenshot of a tab. Defaults to the currently-active tab in this window; pass `tabId` to target a specific tab (the API still requires the tab to be active in its window — chrome.tabs.captureVisibleTab is window-scoped). Returns the full data URL (use `format: "jpeg"` and a lower `quality` to reduce size). If you only need to *analyze* the screenshot with a vision model, prefer `minimax_describe_tab`.',
+    parameters: OBJ({ format: { type: 'string', enum: ['png', 'jpeg'] }, quality: NUM, tabId: NUM }),
+    handler: async ({ format = 'png', quality = 90, tabId } = {}) => {
+      tabId = tabId ?? (await activeTab()).id;
+      // captureVisibleTab is window-scoped. Resolve the tab's window so
+      // a subagent capturing its own tab doesn't accidentally screenshot
+      // the user's foreground window.
+      let windowId;
+      try { windowId = (await chrome.tabs.get(tabId))?.windowId; } catch {}
+      // captureVisibleTab requires the target tab to be active. Activate
+      // briefly if needed (no-op if it already is).
+      try {
+        const t = await chrome.tabs.get(tabId);
+        if (t && !t.active) await chrome.tabs.update(tabId, { active: true });
+      } catch {}
+      const dataUrl = windowId != null
+        ? await chrome.tabs.captureVisibleTab(windowId, { format, quality })
+        : await chrome.tabs.captureVisibleTab({ format, quality });
+      return { dataUrl, bytes: dataUrl.length, mimeType: `image/${format}`, tabId };
     }
   });
 
