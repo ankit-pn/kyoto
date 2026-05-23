@@ -117,15 +117,39 @@ def _healthz(_event):
 
 
 def _list(event):
+    """Metadata-only listing for a domain. Drops `content` so an agent can
+    cheaply scan all skills for a domain (name + description + tags) and
+    then pull just the one it wants via GET /skills/{id}. A `contentLength`
+    field lets the caller estimate cost of a follow-up read."""
     qs = event.get('queryStringParameters') or {}
     domain = _norm_domain(qs.get('domain'))
     limit = _parse_int(qs.get('limit'), 100, max_value=500)
-    r = _table.query(
-        KeyConditionExpression=Key('domain').eq(domain),
-        Limit=limit,
-    )
-    items = [_strip_internal(x) for x in r.get('Items', [])]
-    return _resp(200, {'domain': domain, 'count': len(items), 'items': items})
+    include_global = (qs.get('includeGlobal') or 'true').strip().lower() not in ('0', 'false', 'no')
+    domains_to_query = [domain]
+    if include_global and domain != 'global':
+        domains_to_query.append('global')
+    items = []
+    for d in domains_to_query:
+        r = _table.query(
+            KeyConditionExpression=Key('domain').eq(d),
+            Limit=limit,
+        )
+        items.extend(r.get('Items', []))
+    summary = []
+    for it in items:
+        clean = _strip_internal(it)
+        content = clean.pop('content', '') or ''
+        clean['contentLength'] = len(content)
+        summary.append(clean)
+    # Sort by usageCount desc so the most-used skills bubble to the top.
+    def _uc(x):
+        try:
+            return int(x.get('usageCount') or 0)
+        except (TypeError, ValueError):
+            return 0
+    summary.sort(key=_uc, reverse=True)
+    summary = summary[:limit]
+    return _resp(200, {'domain': domain, 'count': len(summary), 'items': summary})
 
 
 def _strip_internal(item):

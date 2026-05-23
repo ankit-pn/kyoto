@@ -3404,12 +3404,10 @@
     name: 'skill_search',
     group: 'skill',
     description:
-      'Search the skill hub for relevant playbooks before tackling a task. ' +
-      'CALL THIS EARLY whenever a task is non-trivial or domain-specific (anything involving a website, API, install, multi-step workflow). ' +
-      'Skills are short markdown playbooks distilled from past successful runs — using them saves iterations + tokens. ' +
+      'Free-text search across the skill hub. Use this as a FALLBACK after `skill_list` when (a) the domain is unknown, (b) `skill_list` returned too many results to scan, or (c) you need to find a skill by keywords that appear in the body. ' +
       'Pass a free-text `query` describing the task. ' +
       'Optionally pass `domain` (e.g. "youtube.com") to restrict to that domain + the global partition; if omitted the server scans every domain. ' +
-      'Returns ranked results with `name`, `description`, `contentPreview`, `skill_id`. ' +
+      'Returns ranked results with `name`, `description`, `contentPreview` (first 240 chars of content), `skill_id`. ' +
       'When something looks relevant, call `skill_get` with the skill_id to read the full body.',
     parameters: OBJ({ domain: STR, query: STR, limit: NUM, includeGlobal: BOOL }, ['query']),
     handler: async ({ domain, query, limit = 5, includeGlobal = true } = {}) => {
@@ -3423,10 +3421,11 @@
     name: 'skill_get',
     group: 'skill',
     description:
-      'Fetch the full body of a skill by `skill_id` (returned from `skill_search` or `skill_list`). ' +
+      'STEP-2 of the skill workflow: fetch the full markdown body of one skill by `skill_id`. ' +
+      'The id comes from a prior `skill_list` (preferred) or `skill_search` call. ' +
       'Domain is optional — the server resolves the partition via a GSI on skill_id. ' +
       'Pass `domain` only if you already know it (slightly faster path). ' +
-      'Calling this bumps the skill\'s usageCount so popular skills surface first in future searches.',
+      'Calling this bumps the skill\'s usageCount so popular skills surface first in future searches/lists.',
     parameters: OBJ({ skill_id: STR, domain: STR }, ['skill_id']),
     handler: async (args = {}) => {
       // Accept the common alias variants — different model serializations
@@ -3441,10 +3440,15 @@
   T({
     name: 'skill_list',
     group: 'skill',
-    description: 'List all skills for a given domain. Use this to browse what\'s available before searching. Pass `domain` (default "global"); cap with `limit`.',
-    parameters: OBJ({ domain: STR, limit: NUM }),
-    handler: async ({ domain = 'global', limit = 50 } = {}) => {
-      return _skillsApi('GET', '/v1/skills', { query: { domain, limit } });
+    description:
+      'PRIMARY skill-discovery tool. Lists all available skills for a domain (metadata only — no content body) so you can scan them cheaply. ' +
+      'CALL THIS FIRST whenever you arrive at a domain-specific task — before doing any web/page exploration. The current tab\'s domain is the obvious choice. ' +
+      'Returns `{ skill_id, name, description, tags, usageCount, contentLength, updatedAt }` per item, sorted by popularity. By default also folds in the `global` partition so you don\'t miss cross-site playbooks. ' +
+      'Pick the skill_id(s) that look relevant, then call `skill_get` to read the full body of each. ' +
+      'Use `skill_search` only when this returns too many results or you need substring matching across content.',
+    parameters: OBJ({ domain: STR, limit: NUM, includeGlobal: BOOL }),
+    handler: async ({ domain = 'global', limit = 50, includeGlobal = true } = {}) => {
+      return _skillsApi('GET', '/v1/skills', { query: { domain, limit, includeGlobal } });
     }
   });
 

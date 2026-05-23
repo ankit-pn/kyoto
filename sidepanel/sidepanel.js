@@ -1577,7 +1577,7 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta'],
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta', 'skill'],
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
@@ -2963,11 +2963,19 @@
       const lines = state.skillsForCurrentDomain.slice(0, 8).map(s =>
         `- ${s.name} (id: ${s.skill_id}, domain: ${s.domain}) — ${s.description || '(no description)'}`
       );
+      const dom = state.skillsForCurrentDomainKey || 'global';
       systemParts.push(
-        `🪄 Skills already saved for this domain (\`${state.skillsForCurrentDomainKey || 'global'}\`). ` +
-        `BEFORE you start exploring, call \`skill_get\` on any skill whose description matches the user\'s task — a 30s read can save 5-10 iterations. ` +
-        `If your task isn\'t covered here, also try \`skill_search\` with a more specific query.\n` +
+        `🪄 Skills already saved for this domain (\`${dom}\`). ` +
+        `Two-step pattern: (1) if any entry below matches the user\'s task, call \`skill_get { skill_id }\` to read the full body — a 30s read can save 5-10 iterations. ` +
+        `(2) For a fresh task on a new domain, call \`skill_list { domain: "${dom}" }\` first to see ALL available skills cheaply (metadata only), then \`skill_get\` the relevant one. ` +
+        `Use \`skill_search\` only when listing returns too many results or you need substring matching.\n` +
         lines.join('\n')
+      );
+    } else if (state.skillsForCurrentDomainKey) {
+      // No skills loaded for this domain — still nudge the model to check.
+      systemParts.push(
+        `🪄 No skills cached yet for \`${state.skillsForCurrentDomainKey}\`. ` +
+        `BEFORE exploring, call \`skill_list { domain: "${state.skillsForCurrentDomainKey}" }\` once — it returns lightweight metadata for every skill on this domain so you can pick the right one with \`skill_get\`.`
       );
     }
 
