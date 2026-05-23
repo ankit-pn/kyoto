@@ -629,9 +629,10 @@
       out.tools = tools;
       out.tool_choice = body.tool_choice || 'auto';
     }
-    if (typeof body.temperature === 'number') out.temperature = body.temperature;
-    if (typeof body.top_p === 'number') out.top_p = body.top_p;
-    // Codex rejects max_output_tokens / max_tokens — drop both.
+    // Codex backend rejects `temperature`, `top_p`, `max_output_tokens`,
+    // `max_tokens` with HTTP 400 "Unsupported parameter". opencode never
+    // sends any of them — sampling is controlled by reasoning.effort
+    // and text.verbosity instead. Intentionally NOT forwarded.
     return out;
   }
 
