@@ -35,7 +35,9 @@ const ToChatLines = new Function(`${extractFn('_responsesEventToChatLines')}\nre
     input: [{ role: 'user', content: [{ type: 'input_text', text: 'hi, in 6 words' }] }],
     stream: true,
     store: false,
+    prompt_cache_key: 'kyoto-live-test',
     reasoning: { effort: 'medium', summary: 'auto' },
+    text: { verbosity: 'low' },
   };
   process.stdout.write('→ POST chatgpt.com/backend-api/codex/responses\n');
   const t0 = Date.now();

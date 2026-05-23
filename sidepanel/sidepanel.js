@@ -573,7 +573,7 @@
   //   plus the surrounding code excludes system from the input messages
   //   for the OAuth path. The api.openai.com path inlines system into
   //   the input array; the OAuth path moves it into instructions.
-  function _chatCompletionsToResponses(body, model) {
+  function _chatCompletionsToResponses(body, model, sessionId = 'kyoto') {
     const systemTexts = [];
     const input = [];
     for (const m of (body.messages || [])) {
@@ -636,6 +636,7 @@
           parameters: t.function.parameters || { type: 'object', properties: {} },
         }))
       : undefined;
+    sessionId = (sessionId || 'kyoto') + '';
     const out = {
       model,
       // Codex backend requires a non-empty `instructions` field (400s
@@ -651,6 +652,9 @@
       // to expect a previous_response_id continuation. (opencode's
       // openAIDefaultOptions sets store:false for all OpenAI requests.)
       store: false,
+      // Current opencode sets promptCacheKey=sessionID for OpenAI
+      // requests. Keep the same cache/routing hint on the Codex backend.
+      prompt_cache_key: sessionId,
     };
     // Reasoning defaults — opencode's gpt5DefaultOptions sets
     // { effort: 'medium', summary: 'auto' } for every gpt-5.x model
@@ -659,6 +663,9 @@
     const idl = String(model || '').toLowerCase();
     if (idl.includes('gpt-5') && !idl.includes('gpt-5-chat') && !idl.includes('gpt-5-pro')) {
       out.reasoning = { effort: 'medium', summary: 'auto' };
+    }
+    if (/^gpt-5\./i.test(String(model || '')) && !/codex|-chat/i.test(String(model || ''))) {
+      out.text = { verbosity: 'low' };
     }
     if (tools && tools.length) {
       out.tools = tools;
@@ -893,7 +900,7 @@
     if (!accountId) {
       throw new Error('Missing ChatGPT account id — sign out and back in.');
     }
-    const codexBody = _chatCompletionsToResponses(body, model);
+    const codexBody = _chatCompletionsToResponses(body, model, state.activeSession?.id);
     const requestId = (globalThis.crypto?.randomUUID?.() || `kyoto-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     console.log('[Codex] POST (via SW proxy)', CODEX_API_URL, {
       bodyPreview: JSON.stringify(codexBody).slice(0, 500),
@@ -940,12 +947,12 @@
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     let buffer = '';
-    // Codex can return HTTP 200 immediately and then sit queued before
-    // sending the first SSE byte, especially near subscription limits.
-    // Do not kill that path after 60s; only abort if startup is truly
-    // stuck, while keeping a shorter guard once streaming has begun.
-    const FIRST_EVENT_TIMEOUT_MS = 10 * 60_000;
-    const STREAM_IDLE_TIMEOUT_MS = 3 * 60_000;
+    // A healthy Codex stream should emit at least a lifecycle event
+    // quickly. If it returns HTTP 200 but no bytes arrive, this is not
+    // normal streaming latency; surface the quota/request metadata
+    // instead of leaving the user staring at an empty response.
+    const FIRST_EVENT_TIMEOUT_MS = 15_000;
+    const STREAM_IDLE_TIMEOUT_MS = 45_000;
     let lastByteAt = Date.now();
     let sawBytes = false;
     let idleTimer = null;
@@ -956,13 +963,19 @@
     const codexLimitHint = () => {
       const plan = header('x-codex-plan-type');
       const active = header('x-codex-active-limit');
+      const hasCredits = header('x-codex-credits-has-credits');
+      const unlimited = header('x-codex-credits-unlimited');
       const used = header('x-codex-primary-used-percent');
       const reset = Number(header('x-codex-primary-reset-after-seconds') || 0);
+      const requestId = header('x-oai-request-id');
       const parts = [];
       if (plan) parts.push(`plan=${plan}`);
       if (active) parts.push(`limit=${active}`);
+      if (hasCredits) parts.push(`hasCredits=${hasCredits}`);
+      if (unlimited) parts.push(`unlimited=${unlimited}`);
       if (used) parts.push(`used=${used}%`);
       if (reset > 0) parts.push(`reset=${Math.ceil(reset / 3600)}h`);
+      if (requestId) parts.push(`request=${requestId}`);
       return parts.length ? ` Codex quota headers: ${parts.join(', ')}.` : '';
     };
     const armIdleTimer = (cancel, controller) => {
@@ -976,9 +989,9 @@
           cancel('idle-timeout');
           try {
             controller.error(new Error(
-              `Codex accepted the request but was ${phase} for ${Math.round(elapsed / 1000)}s.` +
+              `Codex accepted the request but sent no SSE bytes while ${phase} for ${Math.round(elapsed / 1000)}s.` +
               codexLimitHint() +
-              ` Aborted to avoid hanging forever.`
+              ` This is a backend/quota stall, not an OAuth failure.`
             ));
           } catch {}
         }

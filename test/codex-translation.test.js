@@ -80,6 +80,7 @@ function deepIncludes(actual, expected, label) {
   eq(out.max_tokens, undefined, '1: max_tokens stripped');
   eq(out.max_output_tokens, undefined, '1: max_output_tokens stripped');
   eq(out.store, false, '1: store:false');
+  eq(out.prompt_cache_key, 'kyoto', '1: prompt_cache_key default');
   eq(out.stream, true, '1: stream:true');
   eq(out.model, 'gpt-5.5', '1: model passed through');
 }
@@ -117,11 +118,19 @@ function deepIncludes(actual, expected, label) {
   eq(_chatCompletionsToResponses(body, 'gpt-5-pro').reasoning, undefined, '3e: gpt-5-pro no reasoning');
 }
 
-// 4) No text.verbosity field by default (opencode only sends it when
-//    explicitly opted in via providerOptions.textVerbosity).
+// 4) Current opencode defaults versioned non-chat/non-codex GPT-5 to
+//    low verbosity. Codex variants do not get this.
 {
   const out = _chatCompletionsToResponses({ messages: [{ role: 'user', content: 'hi' }] }, 'gpt-5.5');
-  eq(out.text, undefined, '4: no text.verbosity by default');
+  eq(out.text, { verbosity: 'low' }, '4a: gpt-5.5 text verbosity low');
+  eq(_chatCompletionsToResponses({ messages: [{ role: 'user', content: 'hi' }] }, 'gpt-5.3-codex').text, undefined, '4b: codex no text verbosity');
+  eq(_chatCompletionsToResponses({ messages: [{ role: 'user', content: 'hi' }] }, 'gpt-5.2-chat').text, undefined, '4c: chat no text verbosity');
+}
+
+// 4b) Caller can pass the session id used as OpenAI prompt_cache_key.
+{
+  const out = _chatCompletionsToResponses({ messages: [{ role: 'user', content: 'hi' }] }, 'gpt-5.5', 'sess_abc');
+  eq(out.prompt_cache_key, 'sess_abc', '4d: prompt cache key from session');
 }
 
 // 5) Assistant text + tool_calls translate to the right input items in
