@@ -1196,7 +1196,13 @@
     settingsSnapshot: () => ({
       provider: state.settings?.provider,
       model: state.settings?.model
-    })
+    }),
+    // Spawn a child agent in its own tab and its own conversation.
+    // Resolves when the child loop finishes (no more tool calls or
+    // max-steps hit). Multiple concurrent subagents are supported — the
+    // model can emit multiple `agent` tool calls in one turn and they
+    // all run in parallel, each in its own tab.
+    spawnSubagent: (opts) => spawnSubagent(opts)
   };
 
   // Interactive prompt surfaced by the `ask_user` tool. Renders a card
@@ -2711,7 +2717,7 @@
     s3Endpoint: '',
     // Skills hub — domain-scoped playbook store backed by a remote API.
     // Defaults to the public hub (skills.kryvik.com) shipped with the
-    // extension. tools.js exposes KYOTO_DEFAULT_SKILLS_HUB; we read it
+    // extension. tools/core.js exposes KYOTO_DEFAULT_SKILLS_HUB; we read it
     // here so user overrides in the settings drawer still work but the
     // out-of-box experience needs no configuration.
     skillsHubUrl: window.KYOTO_DEFAULT_SKILLS_HUB?.url || '',
@@ -2870,6 +2876,81 @@
     await persistSession(s);
     if (s.tabId != null) state.tabToSession[s.tabId] = s.id;
     return s;
+  }
+
+  // ── Subagents ────────────────────────────────────────
+  // The parent agent calls the `agent` tool, which routes here. We open
+  // a fresh tab (if startUrl is supplied) or reuse an existing tabId,
+  // create a child session bound to that tab with `_subagent: true`, push
+  // the prompt, run the same chat loop that drives a regular session,
+  // and resolve with the final assistant text. Tool calls inside the
+  // child session get their `tabId` injected by callToolOrMCP so the
+  // child's actions always target ITS tab — not whatever tab the user
+  // has clicked into in the foreground.
+  async function spawnSubagent({ prompt, startUrl, tabId, closeTab = false, makeActive = false, parentSessionId, model, restrictGroups }) {
+    if (!prompt || !String(prompt).trim()) throw new Error('prompt required');
+    let tab;
+    if (tabId != null) {
+      try { tab = await chrome.tabs.get(tabId); } catch { tab = null; }
+    }
+    if (!tab) {
+      const url = (startUrl && /^https?:|^chrome:|^about:/.test(startUrl)) ? startUrl : 'about:blank';
+      tab = await chrome.tabs.create({ url, active: !!makeActive });
+    }
+    const sub = createSessionObject(tab);
+    sub.title = `↳ ${String(prompt).split('\n')[0].slice(0, 50)}`;
+    sub.history = [{ role: 'user', content: String(prompt) }];
+    sub._subagent = true;
+    sub._subagentParent = parentSessionId || state.activeSession?.id || null;
+    sub._subagentStartedAt = Date.now();
+    if (model) sub.model = model;
+    // Restrict the subagent's toolset to avoid recursive runaway and
+    // expensive UI prompts. Default: exclude the `meta` group (ask_user
+    // would pop a question card to the user with no parent context) and
+    // exclude the agent's own subagent spawn (we don't currently allow
+    // grandchild agents to prevent exponential cost).
+    sub._subagentRestrictedTools = new Set(['ask_user', 'agent']);
+    if (Array.isArray(restrictGroups)) sub._subagentEnabledGroups = new Set(restrictGroups);
+    await persistSession(sub);
+    if (sub.tabId != null) state.tabToSession[sub.tabId] = sub.id;
+    // Make the new session visible in the sessions list. UI doesn't
+    // auto-switch — user can click it open to watch the subagent work.
+    state.sessionsIndex.unshift({ id: sub.id, title: sub.title, createdAt: sub.createdAt, lastActive: sub.lastActive });
+    try { await chrome.storage.local.set({ kyoto_sessions_index: state.sessionsIndex }); } catch {}
+    updateSessionsButton();
+
+    // Run the same chat loop a regular session uses. Awaits until the
+    // child stops (no tool calls, max-steps cap, or error).
+    try {
+      await runChatLoop(sub);
+    } catch (e) {
+      const err = e?.message || String(e);
+      if (closeTab) { try { await chrome.tabs.remove(tab.id); } catch {} }
+      return { ok: false, error: err, sessionId: sub.id, tabId: tab.id };
+    }
+
+    // Harvest the last assistant text.
+    let resultText = '';
+    let usage = null;
+    for (let i = sub.history.length - 1; i >= 0; i--) {
+      const m = sub.history[i];
+      if (m.role !== 'assistant') continue;
+      if (m.content && typeof m.content === 'string') {
+        resultText = m.content;
+        usage = m._usage || usage;
+        break;
+      }
+    }
+    if (closeTab) { try { await chrome.tabs.remove(tab.id); } catch {} }
+    return {
+      ok: true,
+      sessionId: sub.id,
+      tabId: tab.id,
+      tabUrl: (await chrome.tabs.get(tab.id).catch(() => null))?.url || tab.url,
+      result: resultText || '(subagent produced no final message)',
+      messageCount: sub.history.length,
+      usage
+    };
   }
 
   // ── Switch / render whole session ────────────────────
@@ -3778,17 +3859,28 @@
           break stepLoop;
         }
 
-        for (const tc of msg.tool_calls) {
+        // Dispatch this turn's tool calls in PARALLEL. The model often
+        // emits several independent calls in one assistant message —
+        // most notably multiple `agent` calls when fanning out to
+        // subagents — and serialising them would defeat the purpose.
+        // Cards are inserted up-front in the original order; each
+        // updates in place as its tool resolves. History is pushed in
+        // call-order after all settle so the next turn sees a clean
+        // chronological tool-response sequence.
+        const prepared = msg.tool_calls.map(tc => {
           let args; try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = { _raw: tc.function.arguments }; }
           let card = null;
           if (isActive(session.id)) {
             card = addToolCallCard(tc.function.name, jsonString(args).slice(0, 2000));
             card.card.dataset.toolCallId = tc.id;
           }
+          return { tc, args, card };
+        });
 
-          let result;
+        const settled = await Promise.all(prepared.map(async ({ tc, args, card }) => {
           const tStart = Date.now();
-          try { result = await callToolOrMCP(tc.function.name, args); }
+          let result;
+          try { result = await callToolOrMCP(tc.function.name, args, session); }
           catch (e) { result = { error: e?.message || String(e) }; }
           const tElapsed = Date.now() - tStart;
           const resultStr = jsonString(result);
@@ -3799,7 +3891,6 @@
             stateEl.textContent = result?.error ? 'error' : 'done';
             stateEl.className = `tool-state ${result?.error ? 'err' : 'ok'}`;
           }
-
           auditAppend({
             sessionId: session.id,
             tool: tc.function.name,
@@ -3808,13 +3899,16 @@
             isError: !!result?.error,
             resultPreview: resultStr.slice(0, 500)
           });
+          return { tc, resultStr };
+        }));
 
+        for (const { tc, resultStr } of settled) {
           session.history.push({
             role: 'tool', tool_call_id: tc.id, name: tc.function.name,
             content: resultStr.length > 60000 ? resultStr.slice(0, 60000) + '\n…[truncated]' : resultStr
           });
-          await persistSession(session);
         }
+        await persistSession(session);
       }
 
       // Auto-extract a skill when a /goal completes successfully. We
@@ -3887,7 +3981,26 @@
     }
   }
 
-  async function callToolOrMCP(name, args) {
+  // Tools that key off the currently-active tab. When a subagent is
+  // running (its session is pinned to a dedicated tab), we inject that
+  // tabId into the call so its actions land on the right tab even if
+  // the user has clicked away into another window.
+  const TAB_AWARE_TOOLS = new Set([
+    'page_content','page_html','page_query','page_click','page_fill','page_scroll',
+    'page_wait_for','page_eval','page_local_storage','page_session_storage',
+    'page_local_storage_set','page_local_storage_remove','page_session_storage_set',
+    'page_session_storage_remove','page_fill_form','idb_list_databases','idb_list_stores',
+    'idb_read','tab_active','tab_navigate','tab_reload','tab_screenshot',
+    'network_capture_start','console_attach','console_read','page_performance',
+    'debugger_attach','debugger_detach','page_fetch_intercept','page_fetch_intercept_read',
+    'media_detect','youtube_extract','youtube_capture_streams','yt_dlp_command',
+    'minimax_describe_tab'
+  ]);
+
+  async function callToolOrMCP(name, args, session) {
+    if (session?._subagent && session.tabId != null && TAB_AWARE_TOOLS.has(name)) {
+      args = { ...args, tabId: args?.tabId ?? session.tabId };
+    }
     if (state.mcpTools.find(t => t.function.name === name)) {
       return window.KyotoMCP.call(name, args);
     }
@@ -3951,8 +4064,16 @@
     }
 
     const messages = buildMessages(session);
-    const baseTools = toolsEnabled ? window.KyotoTools.schemas(new Set(enabledGroups)) : [];
+    // Subagents inherit the user's enabled groups by default, but the
+    // spawn call can narrow them via _subagentEnabledGroups.
+    const groupSet = session._subagent && session._subagentEnabledGroups
+      ? session._subagentEnabledGroups
+      : new Set(enabledGroups);
+    const baseTools = toolsEnabled ? window.KyotoTools.schemas(groupSet) : [];
     let tools = [...baseTools, ...state.mcpTools, ...(state.customToolSchemas || [])];
+    if (session._subagent && session._subagentRestrictedTools?.size) {
+      tools = tools.filter(t => !session._subagentRestrictedTools.has(t.function?.name));
+    }
     // Hide redundant external VLM tools when the active model is
     // natively multimodal — otherwise the model wastes a turn (and
     // tokens) calling minimax_describe_tab to OCR a screenshot it
