@@ -786,8 +786,13 @@
       const saved = await openaiDeviceFlowPoll(setFlowStatus);
       if (els.openaiFlowStatus) els.openaiFlowStatus.textContent = `Signed in${saved.email ? ' as ' + saved.email : ''}!`;
       renderOpenAIAuth();
-      // Also refresh the provider/model picker if the user is on the
-      // OpenAI provider so the Codex group becomes selectable.
+      // Load OpenAI's model list now that OAuth is authed (so the
+      // picker shows codex models). fetchModels handles the no-API-key
+      // case by serving the fallback list directly.
+      try {
+        const apiKey = (state.settings?.apiKeys || {})['openai'] || '';
+        await fetchModels('openai', apiKey);
+      } catch {}
       try { if (typeof renderModelOptions === 'function') renderModelOptions(); } catch {}
     } catch (e) {
       if (els.openaiFlowStatus) {
@@ -2785,12 +2790,29 @@
       if (isProviderShownInDrawer(provider)) els.modelHint.textContent = `Unknown provider: ${provider}`;
       return;
     }
-    // Custom providers may not need an API key (e.g. local Ollama).
-    if (!apiKey && !cfg.isCustom) {
+    // OpenAI with ChatGPT OAuth signed in (but no API key) is "authed
+    // enough" to select gpt-5-codex* models. /v1/models would 401
+    // without the API key, so skip the fetch and show the fallback list
+    // — runtime will fork to the codex backend or fail clearly per model.
+    const hasOpenaiOauth = provider === 'openai' && !!state.openaiOauth?.accessToken;
+    if (!apiKey && !cfg.isCustom && !hasOpenaiOauth) {
       if (isProviderShownInDrawer(provider)) {
         state.allModels = [];
         els.model.innerHTML = '';
-        els.modelHint.textContent = 'Enter an API key to load models.';
+        els.modelHint.textContent = 'Enter an API key (or sign in with ChatGPT for Codex) to load models.';
+      }
+      return;
+    }
+    if (!apiKey && hasOpenaiOauth && cfg.fallbackModels) {
+      // OAuth-only: skip the keyed /v1/models call entirely.
+      state.modelsByProvider.set(provider, cfg.fallbackModels);
+      if (isProviderShownInDrawer(provider)) {
+        state.allModels = cfg.fallbackModels;
+        els.modelHint.textContent = `${cfg.fallbackModels.length} models (ChatGPT OAuth — Codex models work; others need an API key).`;
+        renderModelOptions();
+      }
+      if (els.modelPopover && !els.modelPopover.classList.contains('hidden')) {
+        try { renderPopoverList(); } catch {}
       }
       return;
     }
@@ -2906,7 +2928,8 @@
       const keys = state.settings?.apiKeys || {};
       const configured = allProviderKeys().filter(p => {
         const cfg = getProviderConfig(p);
-        return cfg?.isCustom || (keys[p] && keys[p].trim());
+        const hasOpenaiOauth = p === 'openai' && !!state.openaiOauth?.accessToken;
+        return cfg?.isCustom || (keys[p] && keys[p].trim()) || hasOpenaiOauth;
       });
       if (!configured.length) {
         els.popoverList.innerHTML = '<p class="popover-empty">No provider keys configured yet. Open Settings, paste a key for OpenRouter / DeepSeek / MiniMax (or add a custom provider) and save.</p>';
@@ -2953,8 +2976,11 @@
     for (const providerId of allProviderKeys()) {
       const cfg = getProviderConfig(providerId);
       const key = keys[providerId] || '';
+      // Treat OpenAI as callable when ChatGPT OAuth is signed in even
+      // without an API key — Codex models are reachable that way.
+      const hasOpenaiOauth = providerId === 'openai' && !!state.openaiOauth?.accessToken;
       // Skip providers we have no way to call.
-      if (!key && !cfg?.isCustom) continue;
+      if (!key && !cfg?.isCustom && !hasOpenaiOauth) continue;
       promises.push(fetchModels(providerId, key).catch(() => {}));
     }
     if (!background) await Promise.all(promises);
@@ -4921,9 +4947,11 @@
         enabled: row.querySelector('.mcp-enabled')?.checked || false
       })).filter(s => s.url);
 
-      // Validation: built-ins need a key; customs may not.
+      // Validation: built-ins need a key; customs may not. OpenAI with
+      // ChatGPT OAuth signed in counts as authed (Codex models reachable).
       const isCustom = !PROVIDERS[provider];
-      if (!isCustom && !apiKey) { els.saveStatus.textContent = 'API key required.'; els.saveStatus.className = 'status err'; return; }
+      const hasOpenaiOauth = provider === 'openai' && !!state.openaiOauth?.accessToken;
+      if (!isCustom && !apiKey && !hasOpenaiOauth) { els.saveStatus.textContent = 'API key required (or sign in with ChatGPT for Codex).'; els.saveStatus.className = 'status err'; return; }
       if (!model) { els.saveStatus.textContent = 'Select a model from the list.'; els.saveStatus.className = 'status err'; return; }
 
       const redactSensitive = !!els.redactSensitive.checked;
