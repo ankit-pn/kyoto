@@ -77,26 +77,52 @@
         return { id, name: id, group, supportsTools: true };
       }).filter(Boolean),
       defaultModel: 'gpt-5-mini',
+      // Mirrors OpenRouter's `openai/gpt-5*` catalogue (26 variants as
+      // of writing) so the user sees the full current lineup. Routing:
+      // any model where isOauthRoutableModel() returns true is reached
+      // via the ChatGPT Plus/Pro OAuth path through the Codex backend.
+      // Everything else needs an API key.
       fallbackModels: [
-        // Frontier — costs OAuth or paid tier.
-        { id: 'gpt-5',                name: 'GPT-5',                group: 'openai-gpt5' },
-        { id: 'gpt-5-mini',           name: 'GPT-5 mini',           group: 'openai-gpt5' },
-        { id: 'gpt-5-nano',           name: 'GPT-5 nano',           group: 'openai-gpt5' },
-        // Codex — reachable via the ChatGPT Plus/Pro OAuth path only.
-        // Listed so the picker shows them; runChatLoop short-circuits
-        // with a "sign in with ChatGPT" hint if the user picks one
-        // without OAuth.
-        { id: 'gpt-5-codex',          name: 'GPT-5 Codex (OAuth)',  group: 'openai-codex' },
-        { id: 'gpt-5-codex-mini',     name: 'GPT-5 Codex mini (OAuth)', group: 'openai-codex' },
-        // 4-series.
-        { id: 'gpt-4.1',              name: 'GPT-4.1',              group: 'openai-gpt4' },
-        { id: 'gpt-4.1-mini',         name: 'GPT-4.1 mini',         group: 'openai-gpt4' },
-        { id: 'gpt-4o',               name: 'GPT-4o',               group: 'openai-gpt4' },
-        { id: 'gpt-4o-mini',          name: 'GPT-4o mini',          group: 'openai-gpt4' },
-        // Reasoning.
-        { id: 'o3',                   name: 'o3',                   group: 'openai-reasoning' },
-        { id: 'o3-mini',              name: 'o3-mini',              group: 'openai-reasoning' },
-        { id: 'o4-mini',              name: 'o4-mini',              group: 'openai-reasoning' }
+        // 5 — base
+        { id: 'gpt-5',                name: 'GPT-5',                          group: 'openai-gpt5' },
+        { id: 'gpt-5-mini',           name: 'GPT-5 mini',                     group: 'openai-gpt5' },
+        { id: 'gpt-5-nano',           name: 'GPT-5 nano',                     group: 'openai-gpt5' },
+        { id: 'gpt-5-chat',           name: 'GPT-5 chat',                     group: 'openai-gpt5' },
+        { id: 'gpt-5-pro',            name: 'GPT-5 pro',                      group: 'openai-gpt5' },
+        // 5 — codex (OAuth)
+        { id: 'gpt-5-codex',          name: 'GPT-5 Codex (OAuth)',            group: 'openai-codex' },
+        { id: 'gpt-5-codex-mini',     name: 'GPT-5 Codex mini (OAuth)',       group: 'openai-codex' },
+        // 5.1
+        { id: 'gpt-5.1',              name: 'GPT-5.1',                        group: 'openai-gpt5' },
+        { id: 'gpt-5.1-chat',         name: 'GPT-5.1 chat',                   group: 'openai-gpt5' },
+        { id: 'gpt-5.1-codex',        name: 'GPT-5.1 Codex (OAuth)',          group: 'openai-codex' },
+        { id: 'gpt-5.1-codex-max',    name: 'GPT-5.1 Codex max (OAuth)',      group: 'openai-codex' },
+        { id: 'gpt-5.1-codex-mini',   name: 'GPT-5.1 Codex mini (OAuth)',     group: 'openai-codex' },
+        // 5.2 — OAuth-allowlisted
+        { id: 'gpt-5.2',              name: 'GPT-5.2 (OAuth)',                group: 'openai-gpt5' },
+        { id: 'gpt-5.2-chat',         name: 'GPT-5.2 chat (OAuth)',           group: 'openai-gpt5' },
+        { id: 'gpt-5.2-codex',        name: 'GPT-5.2 Codex (OAuth)',          group: 'openai-codex' },
+        { id: 'gpt-5.2-pro',          name: 'GPT-5.2 pro (OAuth)',            group: 'openai-gpt5' },
+        // 5.3
+        { id: 'gpt-5.3-chat',         name: 'GPT-5.3 chat (OAuth)',           group: 'openai-gpt5' },
+        { id: 'gpt-5.3-codex',        name: 'GPT-5.3 Codex (OAuth)',          group: 'openai-codex' },
+        // 5.4
+        { id: 'gpt-5.4',              name: 'GPT-5.4 (OAuth)',                group: 'openai-gpt5' },
+        { id: 'gpt-5.4-mini',         name: 'GPT-5.4 mini (OAuth)',           group: 'openai-gpt5' },
+        { id: 'gpt-5.4-nano',         name: 'GPT-5.4 nano (OAuth)',           group: 'openai-gpt5' },
+        { id: 'gpt-5.4-pro',          name: 'GPT-5.4 pro (OAuth)',            group: 'openai-gpt5' },
+        // 5.5
+        { id: 'gpt-5.5',              name: 'GPT-5.5 (OAuth)',                group: 'openai-gpt5' },
+        { id: 'gpt-5.5-pro',          name: 'GPT-5.5 pro (OAuth)',            group: 'openai-gpt5' },
+        // 4-series — API-key path only
+        { id: 'gpt-4.1',              name: 'GPT-4.1',                        group: 'openai-gpt4' },
+        { id: 'gpt-4.1-mini',         name: 'GPT-4.1 mini',                   group: 'openai-gpt4' },
+        { id: 'gpt-4o',               name: 'GPT-4o',                         group: 'openai-gpt4' },
+        { id: 'gpt-4o-mini',          name: 'GPT-4o mini',                    group: 'openai-gpt4' },
+        // Reasoning — API-key path only
+        { id: 'o3',                   name: 'o3',                             group: 'openai-reasoning' },
+        { id: 'o3-mini',              name: 'o3-mini',                        group: 'openai-reasoning' },
+        { id: 'o4-mini',              name: 'o4-mini',                        group: 'openai-reasoning' }
       ]
     },
     minimax: {
@@ -501,6 +527,21 @@
 
   function isCodexModel(model) {
     return typeof model === 'string' && /^gpt-5(\.\d+)?-codex/i.test(model);
+  }
+
+  // Which OpenAI models route through the ChatGPT Plus/Pro OAuth path
+  // (Codex backend at chatgpt.com/backend-api/codex/responses).
+  // Mirrors opencode's allowlist: any "-codex" variant, plus the GPT-5.x
+  // minor versions ChatGPT subscriptions have early access to (5.2+).
+  // Plain `gpt-5` / `gpt-5-mini` / `gpt-5-nano` are paid-API-only and
+  // require an OpenAI key.
+  function isOauthRoutableModel(model) {
+    if (typeof model !== 'string') return false;
+    if (isCodexModel(model)) return true;
+    // gpt-5.2, gpt-5.3, gpt-5.4, gpt-5.5, … — minor versions only.
+    const m = model.match(/^gpt-5\.(\d+)(?:[-.].*)?$/i);
+    if (m) return Number(m[1]) >= 2;
+    return false;
   }
 
   // ─── Codex Responses-API translation ─────────────────────────────
@@ -1130,7 +1171,7 @@
     const cfg = getProviderConfig(provider);
     if (!cfg) { els.testConnStatus.textContent = 'Unknown provider'; els.testConnStatus.className = 'status err'; return; }
     if (!model) { els.testConnStatus.textContent = 'Pick a model first'; els.testConnStatus.className = 'status err'; return; }
-    const codexOauth = provider === 'openai' && isCodexModel(model) && !!state.openaiOauth?.accessToken;
+    const codexOauth = provider === 'openai' && isOauthRoutableModel(model) && !!state.openaiOauth?.accessToken;
     const oauthFallback = provider === 'openai' && !!state.openaiOauth?.accessToken;
     if (!apiKey && !cfg.isCustom && !oauthFallback) { els.testConnStatus.textContent = 'API key required (or sign in with ChatGPT for Codex)'; els.testConnStatus.className = 'status err'; return; }
     els.testConnStatus.textContent = 'Testing…'; els.testConnStatus.className = 'status';
@@ -2852,11 +2893,16 @@
       return;
     }
     if (!apiKey && hasOpenaiOauth && cfg.fallbackModels) {
-      // OAuth-only: skip the keyed /v1/models call entirely.
-      state.modelsByProvider.set(provider, cfg.fallbackModels);
+      // OAuth-only: skip the keyed /v1/models call entirely AND hide
+      // models the ChatGPT subscription can't reach. The user picked
+      // OAuth as their auth — surface only the models that actually
+      // work in that mode (codex + GPT-5.2+). Otherwise picking gpt-5
+      // would dead-end at "No API key" mid-chat.
+      const oauthList = cfg.fallbackModels.filter(m => isOauthRoutableModel(m.id));
+      state.modelsByProvider.set(provider, oauthList);
       if (isProviderShownInDrawer(provider)) {
-        state.allModels = cfg.fallbackModels;
-        els.modelHint.textContent = `${cfg.fallbackModels.length} models (ChatGPT OAuth — Codex models work; others need an API key).`;
+        state.allModels = oauthList;
+        els.modelHint.textContent = `${oauthList.length} models reachable via ChatGPT subscription. Add an OpenAI API key to unlock GPT-4 / o-series too.`;
         renderModelOptions();
       }
       if (els.modelPopover && !els.modelPopover.classList.contains('hidden')) {
@@ -2895,7 +2941,18 @@
       if (!parsed.length && cfg.fallbackModels) {
         setModels(cfg.fallbackModels, `${cfg.fallbackModels.length} models (fallback list).`);
       } else {
-        const sorted = parsed.sort((a, b) => a.id.localeCompare(b.id));
+        let combined = parsed;
+        // For OpenAI when ChatGPT OAuth is signed in, merge in the
+        // OAuth-routable subset of fallback models — /v1/models doesn't
+        // return codex / GPT-5.x variants (those live on the ChatGPT
+        // backend only), so without this the user wouldn't see them
+        // even though their OAuth could reach them.
+        if (provider === 'openai' && state.openaiOauth?.accessToken && cfg.fallbackModels) {
+          const have = new Set(parsed.map(m => m.id));
+          const extra = cfg.fallbackModels.filter(m => isOauthRoutableModel(m.id) && !have.has(m.id));
+          combined = parsed.concat(extra);
+        }
+        const sorted = combined.sort((a, b) => a.id.localeCompare(b.id));
         setModels(sorted, `${sorted.length} models. Pick one and Save.`);
       }
     } catch (e) {
@@ -3541,12 +3598,12 @@
     // Codex models route through the ChatGPT OAuth path — no API key
     // needed (and indeed an API key won't work, codex IDs aren't on
     // the public REST surface).
-    const usingCodexOauth = provider === 'openai' && isCodexModel(model) && !!state.openaiOauth?.accessToken;
+    const usingCodexOauth = provider === 'openai' && isOauthRoutableModel(model) && !!state.openaiOauth?.accessToken;
     if (!apiKey && !cfg.isCustom && !usingCodexOauth) {
-      throw new Error(
-        `No API key configured for ${cfg.label}. ` +
-        `Open Settings, select "${cfg.label}" as the Provider, and enter your key.`
-      );
+      const hint = (provider === 'openai' && state.openaiOauth?.accessToken)
+        ? ` "${model}" is on the paid-API-only path; pick a Codex or GPT-5.2+ model for the ChatGPT-OAuth path, or paste an OpenAI API key.`
+        : ` Open Settings, select "${cfg.label}" as the Provider, and enter your key.`;
+      throw new Error(`No API key configured for ${cfg.label}.${hint}`);
     }
 
     const messages = buildMessages(session);
@@ -3592,9 +3649,9 @@
     // upstream SSE as Chat-Completions deltas so the reader loop below
     // is identical for both code paths.
     let res;
-    if (provider === 'openai' && isCodexModel(model)) {
+    if (provider === 'openai' && isOauthRoutableModel(model)) {
       if (!state.openaiOauth?.accessToken) {
-        throw new Error('GPT-5 Codex models require ChatGPT sign-in. Open Settings → OpenAI to sign in with your ChatGPT Plus/Pro account.');
+        throw new Error(`${model} requires ChatGPT sign-in. Open Settings → ChatGPT Plus/Pro to sign in.`);
       }
       res = await openaiCodexChatFetch({ model, body, signal });
     } else {
