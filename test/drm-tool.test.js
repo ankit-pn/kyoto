@@ -131,7 +131,12 @@ test('drm_check_setup reports devine missing with install instructions', async (
   const r = await win.KyotoTools.call('drm_check_setup', {});
   assert.equal(r.ready, false);
   assert.ok(r.missing.includes('devine'), `expected devine in missing, got ${JSON.stringify(r.missing)}`);
-  assert.ok(r.instructions.some(i => /pipx install devine|pip3 install/i.test(i)));
+  // devine is archived on PyPI as of 2025-07-09 — instructions should
+  // tell the user to install from GitHub.
+  assert.ok(r.instructions.some(i => /git\+https:\/\/github\.com\/devine-dl\/devine/.test(i)),
+    `expected git install hint, got: ${JSON.stringify(r.instructions)}`);
+  assert.ok(r.instructions.some(i => /archived/i.test(i)),
+    `expected mention of the archived state, got: ${JSON.stringify(r.instructions)}`);
 });
 
 test('drm_check_setup reports .wvd missing even when devine is installed', async () => {

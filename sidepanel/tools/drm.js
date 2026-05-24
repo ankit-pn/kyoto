@@ -37,13 +37,65 @@
   }
 
   // ──────── devine binary probe + auto-install ────────
+  //
+  // NOTE (2026-05): devine was archived 2025-07-09 and is no longer on
+  // PyPI. `pip install devine` returns "No matching distribution found".
+  // We install from the GitHub mirror instead. The CDM-Project fork
+  // (https://www.cdm-project.com/CDRM-Team/devine) is also a viable
+  // target for users who want active maintenance.
 
   const _DEVINE_PATHS = [
     '/opt/homebrew/bin/devine',
     '/usr/local/bin/devine',
     '$HOME/.local/bin/devine',
     '/opt/local/bin/devine',
+    // macOS framework Python from python.org installer — common on macOS
+    // when the user installed pywidevine via pip3 instead of pipx.
+    '/Library/Frameworks/Python.framework/Versions/3.13/bin/devine',
+    '/Library/Frameworks/Python.framework/Versions/3.12/bin/devine',
+    '/Library/Frameworks/Python.framework/Versions/3.11/bin/devine',
+    '/Library/Frameworks/Python.framework/Versions/3.10/bin/devine',
   ];
+
+  // Python interpreters to try when probing `python -m devine` and when
+  // installing devine. Framework Python comes first because system
+  // python3 on modern macOS has code-signing restrictions that block
+  // some user-installed C extensions (e.g. pycryptodome's _cpuid_c.so).
+  const _PYTHON_INTERPRETERS = [
+    '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3',
+    '/Library/Frameworks/Python.framework/Versions/3.12/bin/python3',
+    '/Library/Frameworks/Python.framework/Versions/3.11/bin/python3',
+    '/Library/Frameworks/Python.framework/Versions/3.10/bin/python3',
+    '/opt/homebrew/bin/python3',
+    '/usr/local/bin/python3',
+    'python3',
+    'python',
+  ];
+
+  // Find a python that can import pywidevine — strong proxy for "this
+  // interpreter has a working crypto stack". We prefer this one for
+  // any `python -m devine` invocation and for the auto-install step.
+  let _cachedWorkingPython = null;
+  async function _findWorkingPython() {
+    if (_cachedWorkingPython) return _cachedWorkingPython;
+    for (const py of _PYTHON_INTERPRETERS) {
+      try {
+        const r = await _shell(`${py} -c "import pywidevine; print(pywidevine.__version__ if hasattr(pywidevine, '__version__') else 'ok')" 2>&1`, 8000);
+        if (!r._noShell && r.exitCode === 0 && (r.stdout || '').trim()) {
+          _cachedWorkingPython = py;
+          return py;
+        }
+      } catch {}
+    }
+    // Fall back to any python at all so we can still try installs.
+    for (const py of _PYTHON_INTERPRETERS) {
+      try {
+        const r = await _shell(`${py} --version 2>&1`, 5000);
+        if (!r._noShell && r.exitCode === 0) return py;
+      } catch {}
+    }
+    return null;
+  }
 
   async function _devineProbe(invocation) {
     try {
@@ -66,7 +118,9 @@
       const v = await _devineProbe(out);
       if (v) return { binary: out, version: v };
     }
-    for (const py of ['python3', 'python']) {
+    // Try `python -m devine` against every interpreter, framework Python
+    // first — that's where pywidevine usually ends up on macOS.
+    for (const py of _PYTHON_INTERPRETERS) {
       const v = await _devineProbe(`${py} -m devine`);
       if (v) return { binary: `${py} -m devine`, version: v };
     }
@@ -74,12 +128,22 @@
   }
 
   async function _devineAutoInstall() {
-    const candidates = [
-      'pipx install devine',
-      'python3 -m pip install --user --upgrade devine',
-      'pip3 install --user --upgrade devine',
-    ];
     const log = [];
+    const py = await _findWorkingPython();
+    if (!py) {
+      log.push('no usable python3 found on PATH or in framework locations');
+      return { ok: false, log, hint: 'install Python 3.10+ first (python.org installer is easiest on macOS)' };
+    }
+    log.push(`using python: ${py}`);
+
+    // PyPI install is dead since devine was archived 2025-07-09. We
+    // still try it first in case PyPI gets a maintained republish; then
+    // fall through to the git+https path, then to the CDM-Project fork.
+    const candidates = [
+      `${py} -m pip install --user --upgrade devine`,
+      `${py} -m pip install --user "git+https://github.com/devine-dl/devine.git"`,
+      `${py} -m pip install --user "git+https://github.com/CDRM-Project/devine.git"`,
+    ];
     for (const c of candidates) {
       try {
         const r = await _shell(c + ' 2>&1', 300000);
@@ -88,10 +152,23 @@
         if (r.exitCode === 0) {
           const found = await _findDevine();
           if (found) { log.push(`devine ok at: ${found.binary}`); return { ok: true, ...found, log }; }
+          log.push('install reported success but devine binary not found on PATH — may need to add the install dir to PATH');
+        } else {
+          // Surface a short tail of the error so the caller knows why
+          // it failed instead of getting a bare exit code.
+          const tail = (r.stdout || '').slice(-300);
+          if (tail) log.push(`  ↳ ${tail.trim().split('\n').slice(-3).join(' | ')}`);
         }
       } catch (e) { log.push(`${c} -> ${e.message}`); }
     }
-    return { ok: false, log };
+    return {
+      ok: false,
+      log,
+      hint:
+        'devine was archived on 2025-07-09 and is no longer on PyPI. The git installer should still work; ' +
+        'if it failed, try the CDM-Project fork (https://www.cdm-project.com/CDRM-Team/devine) or switch ' +
+        'to a different DRM downloader entirely (e.g. N_m3u8DL-RE).'
+    };
   }
 
   // ──────── .wvd device file probe ────────
@@ -102,8 +179,9 @@
   // presence of any .wvd file is a strong signal that setup is done.
 
   async function _findWvd() {
+    const py = await _findWorkingPython() || 'python3';
     const r = await _shell(
-      `python3 -c "import pathlib, os, sys; ` +
+      `${py} -c "import pathlib, os, sys; ` +
       `roots=[pathlib.Path.home()/'.config/devine/devices', ` +
       `pathlib.Path(os.environ.get('APPDATA',''))/'devine/devices' if os.environ.get('APPDATA') else None]; ` +
       `roots=[r for r in roots if r and r.exists()]; ` +
@@ -158,8 +236,9 @@
     // Quote-safe: base64-encode the contents, decode on the shell side.
     const b64 = btoa(unescape(encodeURIComponent(contents)));
     const safeDomain = (domain || 'cookies').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const pyExe = await _findWorkingPython() || 'python3';
     const py =
-      `python3 -c "import base64, os, pathlib; ` +
+      `${pyExe} -c "import base64, os, pathlib; ` +
       `d=pathlib.Path.home()/'.cache/kyoto-drm'; d.mkdir(parents=True, exist_ok=True); ` +
       `p=d/'cookies-${safeDomain}.txt'; ` +
       `p.write_bytes(base64.b64decode('${b64}')); ` +
@@ -210,16 +289,44 @@
         out.shellHost = { ok: true, platform: pong?.platform || 'unknown', cwd: pong?.cwd };
       } catch (e) { out.shellHost = { ok: false, error: e.message }; missing.push('shellHost'); }
 
+      // Track which python we found and whether it has pywidevine — the
+      // model needs this to pick the right invocation.
+      const workingPy = await _findWorkingPython();
+      out.python = workingPy ? { ok: true, binary: workingPy, hasPywidevine: true } : { ok: false };
+
       const devine = await _findDevine();
       if (devine) out.devine = { ok: true, ...devine };
-      else { out.devine = { ok: false }; missing.push('devine');
-        instructions.push('Install devine: `pipx install devine` (or `pip3 install --user devine`). drm_download will try this automatically.'); }
+      else {
+        out.devine = { ok: false };
+        missing.push('devine');
+        instructions.push(
+          'devine was archived on 2025-07-09 and removed from PyPI. Install from GitHub instead: ' +
+          `\`${workingPy || 'python3'} -m pip install --user "git+https://github.com/devine-dl/devine.git"\`. ` +
+          'drm_download will try this automatically. The CDM-Project fork (https://www.cdm-project.com/CDRM-Team/devine) ' +
+          'is also an option if the original repo gets taken down.'
+        );
+        // Service plugins are an additional gotcha — devine ships with
+        // ~zero working service plugins by default. Mention it so the
+        // user doesn't get stuck after install.
+        instructions.push(
+          'After installing devine you also need a SERVICE PLUGIN for the site you want to download from ' +
+          '(e.g. Crunchyroll). Devine plugins live under `services/<TAG>/` in the devine config dir; ' +
+          'community plugins are typically distributed via private channels.'
+        );
+      }
 
       const wvd = await _findWvd();
       if (wvd?.found) out.wvd = { ok: true, paths: wvd.paths };
       else { out.wvd = { ok: false };
         missing.push('wvd');
-        instructions.push('Place a Widevine device file at `~/.config/devine/devices/<name>.wvd` and set it as the default in `~/.config/devine/devine.yaml` (`cdm.default: <name>`). Kyoto does not distribute .wvd files.'); }
+        instructions.push(
+          '⚠️  THE HARD PART: place a Widevine device file at `~/.config/devine/devices/<name>.wvd` and ' +
+          'set it as the default in `~/.config/devine/devine.yaml` (`cdm.default: <name>`). ' +
+          'Kyoto does NOT distribute .wvd files — these are leaked CDM identities tied to a specific device. ' +
+          'Sourcing one is on you (KeyDive on a rooted Android, or community channels). Without a .wvd, NOTHING ' +
+          'in the pipeline can decrypt anything.'
+        );
+      }
 
       const ff = await _hasBinary('ffmpeg', ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg']);
       out.ffmpeg = ff ? { ok: true, binary: ff } : { ok: false };
@@ -227,7 +334,14 @@
 
       const mp4d = await _hasBinary('mp4decrypt', ['/opt/homebrew/bin/mp4decrypt', '/usr/local/bin/mp4decrypt']);
       out.mp4decrypt = mp4d ? { ok: true, binary: mp4d } : { ok: false };
-      if (!mp4d) { missing.push('mp4decrypt'); instructions.push('Install mp4decrypt (Bento4): `brew install bento4` (macOS) or download from https://www.bento4.com/downloads/.'); }
+      if (!mp4d) {
+        missing.push('mp4decrypt');
+        instructions.push(
+          'Install mp4decrypt (part of Bento4): on macOS, `brew install bento4` if you have Homebrew, ' +
+          'otherwise download the macOS arm64/x64 SDK from https://www.bento4.com/downloads/, unzip, and ' +
+          'add the bin/ folder to PATH. On Linux: `apt install bento4` or build from source.'
+        );
+      }
 
       return { ready: missing.length === 0, ...out, missing, instructions };
     }
@@ -251,9 +365,9 @@
     name: 'drm_download',
     group: 'media',
     description:
-      'Download a DRM-protected video end-to-end via devine. Auto-installs devine if missing (pipx → pip3 --user). Exports the active tab\'s cookies to a Netscape file and passes them to devine via --cookies. ' +
+      'Download a DRM-protected video end-to-end via devine. Auto-installs devine from GitHub if missing (devine was archived 2025-07-09 and is no longer on PyPI — we install from git+https://github.com/devine-dl/devine.git). Exports the active tab\'s cookies to a Netscape file and passes them to devine via --cookies. ' +
       'Runs in the background — returns { ok, jobId, command, hint } so the agent can shell_poll / shell_wait for progress. Files land under the on-disk workspace folder (see workspace_info). ' +
-      'REQUIRES: shell bridge installed, a Widevine .wvd at ~/.config/devine/devices/ (Kyoto does not ship one — call drm_check_setup first to see what\'s missing).',
+      'REQUIRES: shell bridge installed, a Widevine .wvd at ~/.config/devine/devices/ (Kyoto does not ship one — call drm_check_setup first to see what\'s missing), and a working devine service plugin for the target site.',
     parameters: OBJ({
       service: STR,           // devine service tag, e.g. "CR" for Crunchyroll
       url: STR,               // the watch page URL or a service-specific title id
