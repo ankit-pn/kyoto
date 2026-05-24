@@ -4114,7 +4114,8 @@
     'debugger_attach','debugger_detach','page_fetch_intercept','page_fetch_intercept_read',
     'media_detect','youtube_extract','youtube_capture_streams','yt_dlp_command',
     'minimax_describe_tab',
-    'widevine_cdm_info','widevine_request_license','widevine_get_content_keys'
+    'widevine_cdm_info','widevine_request_license','widevine_get_content_keys',
+    'drm_export_cookies','drm_download'
   ]);
 
   async function callToolOrMCP(name, args, session) {

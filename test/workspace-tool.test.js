@@ -121,7 +121,7 @@ function loadHarness({ storage = {}, vfs = null } = {}) {
 
   const files = [
     'core','workspace','browser','cookies','network','python','fs','media',
-    'shell','youtube','data','skills','subagent','finalize'
+    'shell','youtube','data','skills','widevine','drm','subagent','finalize'
   ].map(n => path.join(__dirname, '..', 'sidepanel', 'tools', `${n}.js`));
 
   for (const f of files) {

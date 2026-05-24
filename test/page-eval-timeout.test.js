@@ -81,7 +81,7 @@ function loadHarness({ pageEvalStub } = {}) {
 
   const files = [
     'core','workspace','browser','cookies','network','python','fs','media',
-    'shell','youtube','data','skills','widevine','subagent','finalize'
+    'shell','youtube','data','skills','widevine','drm','subagent','finalize'
   ].map(n => path.join(__dirname, '..', 'sidepanel', 'tools', `${n}.js`));
   for (const f of files) {
     vm.runInContext(fs.readFileSync(f, 'utf-8'), sandbox, { filename: f });
