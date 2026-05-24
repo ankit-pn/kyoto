@@ -309,13 +309,21 @@
         cookiesPath = cookiesRes.path;
       }
 
-      // 4. Resolve the workspace output dir.
+      // Shell single-quote helper. `'foo'\''bar'` is the standard way
+      // to embed a literal apostrophe inside single-quoted shell text.
+      const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
+      // 4. Resolve the workspace output dir. Make sure it exists —
+      // devine doesn't always mkdir its target. The `~/` prefix needs
+      // to expand at the shell level so we can't fully single-quote it;
+      // split the leading `~/` off and quote only the rest.
       const outDir = await window.KyotoWorkspace?.shellDefaultDir?.() || '~/Downloads/Kyoto';
-      // Make sure it exists (devine doesn't always mkdir).
-      await _shell(`python3 -c "import pathlib; pathlib.Path('${outDir.replace(/'/g, "'\\''")}').expanduser().mkdir(parents=True, exist_ok=True)"`, 10000);
+      const mkdirArg = outDir.startsWith('~/')
+        ? `~/${sq(outDir.slice(2))}`
+        : sq(outDir);
+      await _shell(`mkdir -p ${mkdirArg}`, 10000);
 
       // 5. Build the devine command.
-      const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
       const parts = [devine.binary, 'dl'];
       if (quality) parts.push('-q', sq(quality));
       if (audio_language) parts.push('-l', sq(audio_language));

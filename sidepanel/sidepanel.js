@@ -4007,16 +4007,22 @@
         const settled = await Promise.all(prepared.map(async ({ tc, args, card }) => {
           const tStart = Date.now();
           let result;
+          // Clear the timer whichever side wins the race — otherwise
+          // every fast tool call leaks a 5-minute setTimeout and a
+          // late "unhandled rejection" warning when it eventually fires.
+          let timerId;
           try {
-            result = await Promise.race([
-              callToolOrMCP(tc.function.name, args, session),
-              new Promise((_, rej) => setTimeout(
+            const callP = callToolOrMCP(tc.function.name, args, session);
+            const timeoutP = new Promise((_, rej) => {
+              timerId = setTimeout(
                 () => rej(new Error(`tool ${tc.function.name} exceeded chat-loop timeout (${toolTimeoutMs}ms) — cut loose so the turn can complete. Raise Settings → toolTimeoutMs if this is a legitimately long-running tool.`)),
                 toolTimeoutMs
-              ))
-            ]);
+              );
+            });
+            result = await Promise.race([callP, timeoutP]);
           }
           catch (e) { result = { error: e?.message || String(e) }; }
+          finally { clearTimeout(timerId); }
           const tElapsed = Date.now() - tStart;
           const resultStr = jsonString(result);
           if (card) {

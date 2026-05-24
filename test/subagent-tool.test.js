@@ -158,9 +158,13 @@ test('KyotoWorkspace exposes folder/location and prefixes download paths', () =>
   // Path prefixing for chrome.downloads.
   assert.equal(win.KyotoWorkspace.relativePath('foo.zip'), 'Kyoto/foo.zip');
   assert.equal(win.KyotoWorkspace.relativePath('/leading-slash.txt'), 'Kyoto/leading-slash.txt');
-  // Unsafe characters in the folder name get sanitised.
+  // Unsafe characters in the folder name get sanitised — both filesystem-
+  // illegal chars (/, :, ?, etc.) AND shell metacharacters (', `, $) so
+  // the folder name is safe to interpolate into the devine mkdir command.
   win.KyotoWorkspace.setFromSettings({ workspaceFolder: 'My/Bad:Name?' });
   assert.equal(win.KyotoWorkspace.name(), 'My_Bad_Name_');
+  win.KyotoWorkspace.setFromSettings({ workspaceFolder: "My's $Stuff `oops`" });
+  assert.equal(win.KyotoWorkspace.name(), 'My_s _Stuff _oops_');
   // Location switching is validated, fallback is downloads.
   win.KyotoWorkspace.setFromSettings({ workspaceLocation: 'documents' });
   assert.equal(win.KyotoWorkspace.location(), 'documents');
