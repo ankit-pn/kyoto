@@ -483,6 +483,133 @@ test('auto-pause fires a chrome.notifications.create call', async () => {
   assert.ok(/boom/.test(notifications[0].message));
 });
 
+// ──────── iteration 3: dry-run, stats, tags, snooze, reconcile-heal, notify opt-out ────────
+
+test('dryRunJob executes code without registering or scheduling', async () => {
+  const { stubs, _alarms } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const r = await Cron.dryRunJob({
+    code: 'K.log("dry"); K.log("run"); await K.state.set("from_dry_run", 42);'
+  });
+  assert.equal(r.ok, true);
+  assert.ok(r.stdout.includes('dry') && r.stdout.includes('run'));
+  // No job registered:
+  const { jobs } = await Cron.listJobs();
+  assert.equal(jobs.length, 0);
+  // No alarms:
+  assert.equal(_alarms.size, 0);
+  // State write DID persist (so dry-run can verify auth flows):
+  assert.equal((await Cron.stateGet('from_dry_run')).value, 42);
+});
+
+test('dryRunJob captures runtime errors without crashing', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const r = await Cron.dryRunJob({ code: 'this.is.not.valid' });
+  assert.equal(r.ok, false);
+  assert.ok(r.error && r.error.length > 0);
+});
+
+test('cron_stats aggregates ok/fail/skipped and computes percentiles', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'stats-target',
+    schedule: { every: '1m' }, autoPauseAfter: 99,
+    code: 'await K.sleep(20);'
+  });
+  // 3 OK runs, 1 fail, 1 backoff-skip simulated by writing directly.
+  await Cron.runJobNow(j.id);
+  await Cron.runJobNow(j.id);
+  await Cron.runJobNow(j.id);
+  await Cron._appendRun(j.id, { ts: Date.now(), ok: false, ms: 5, stdout: '', stderr: '', error: 'whatever', triggeredBy: 'alarm' });
+  await Cron._appendRun(j.id, { ts: Date.now(), ok: false, ms: 0, stdout: '', stderr: '', error: 'backoff', triggeredBy: 'alarm' });
+  const s = await Cron.getJobStats(j.id);
+  assert.equal(s.totalRuns, 5);
+  assert.equal(s.ok, 3);
+  assert.equal(s.fail, 1);
+  assert.equal(s.skipped, 1);
+  assert.equal(s.successRate, +(3 / 4).toFixed(3));
+  assert.ok(s.p50Ms >= 0);
+  assert.ok(s.avgMs >= 0);
+  assert.equal(s.recentErrors.length, 1);
+  assert.equal(s.recentErrors[0].message, 'whatever');
+});
+
+test('tags: cron_list filters by tag; cron_status counts tags', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  await Cron.addJob({ name: 'cr-auth',   schedule: { every: '1m' }, code: '1', tags: ['crunchyroll', 'auth'] });
+  await Cron.addJob({ name: 'cr-scrape', schedule: { every: '1m' }, code: '1', tags: ['crunchyroll'] });
+  await Cron.addJob({ name: 'other',     schedule: { every: '1m' }, code: '1', tags: ['ad-hoc'] });
+  const cr = await Cron.listJobs({ tag: 'crunchyroll' });
+  assert.equal(cr.jobs.length, 2);
+  assert.ok(cr.jobs.every(j => j.tags.includes('crunchyroll')));
+  const auth = await Cron.listJobs({ tag: 'auth' });
+  assert.equal(auth.jobs.length, 1);
+  const s = await Cron.status();
+  assert.equal(s.tagCounts.crunchyroll, 2);
+  assert.equal(s.tagCounts.auth, 1);
+  assert.equal(s.tagCounts['ad-hoc'], 1);
+});
+
+test('snoozeJob pauses with a deadline; reconcile auto-resumes after it elapses', async () => {
+  const { stubs, _alarms } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({ name: 'snoozy', schedule: { every: '1m' }, code: '1' });
+  await Cron.snoozeJob(j.id, 50);  // 50ms snooze
+  let cur = await Cron.getJob(j.id);
+  assert.equal(cur.paused, true);
+  assert.ok(cur.pauseUntil > Date.now());
+  assert.equal(_alarms.has('kyoto-cron:' + j.id), false, 'alarm should be cleared while snoozed');
+  // Wait for the deadline, then reconcile.
+  await new Promise(r => setTimeout(r, 80));
+  await Cron.reconcile();
+  cur = await Cron.getJob(j.id);
+  assert.equal(cur.paused, false, 'reconcile should have resumed the job');
+  assert.equal(cur.pauseUntil, null);
+  assert.ok(_alarms.has('kyoto-cron:' + j.id), 'alarm should be back');
+});
+
+test('reconcile heals stale _runningSince after a simulated SW crash', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'crashed', schedule: { every: '1m' }, singleton: true, timeoutMs: 200,
+    code: '1',
+  });
+  // Simulate a previous run that started, set _runningSince, and the
+  // SW died — leaving the field set forever. We write directly into
+  // the spec to mimic that condition.
+  const jobs = await stubs.storage.local.get('kyoto.cron.jobs');
+  jobs['kyoto.cron.jobs'][j.id]._runningSince = Date.now() - 60_000;  // 60s ago, well past timeout
+  await stubs.storage.local.set({ 'kyoto.cron.jobs': jobs['kyoto.cron.jobs'] });
+  await Cron.reconcile();
+  const cur = await Cron.getJob(j.id);
+  assert.equal(cur._runningSince, null, 'stale _runningSince should have been cleared');
+  // A reconcile-cleanup log entry should be appended.
+  const logs = await Cron.getJobLogs(j.id, { limit: 5 });
+  assert.ok(logs.runs.some(r => r.error === 'reconcile-cleanup'),
+    'expected reconcile-cleanup log entry');
+});
+
+test('autoPauseNotify: false suppresses the chrome.notifications call', async () => {
+  const { stubs } = makeChromeStub();
+  const notifications = [];
+  stubs.notifications = { create: async (n) => { notifications.push(n); return 'nid'; } };
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'silent-breaks',
+    schedule: { every: '1m' }, autoPauseAfter: 2, autoPauseNotify: false,
+    code: 'throw new Error("x")',
+  });
+  await Cron.runJobNow(j.id);
+  await Cron.runJobNow(j.id);
+  const cur = await Cron.getJob(j.id);
+  assert.equal(cur.paused, true, 'still auto-pauses');
+  assert.equal(notifications.length, 0, 'but no toast was fired');
+});
+
 test('reconcile creates missing alarms and clears orphans', async () => {
   const { stubs, _alarms } = makeChromeStub();
   const Cron = loadCronEngine({ chromeStubs: stubs });

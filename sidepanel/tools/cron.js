@@ -46,6 +46,8 @@
       notes: STR,
       paused: BOOL,
       singleton: BOOL,
+      tags: { type: 'array', items: STR },
+      autoPauseNotify: BOOL,
       timeoutMs: NUM,
       autoPauseAfter: NUM,
     }, ['name', 'schedule', 'code']),
@@ -53,12 +55,39 @@
   });
 
   T({
+    name: 'cron_dry_run',
+    group: 'cron',
+    description:
+      'Run job `code` ONCE with the K sandbox, without registering anything. Same execution environment as a real run (K.state, K.tools, K.fetch, K.chrome) — state mutations DO persist, alarms do not. Use this to verify the code parses and behaves before `cron_add` puts a broken job on the schedule. ' +
+      'Returns { ok, ms, stdout, stderr, error }.',
+    parameters: OBJ({ code: STR, timeoutMs: NUM }, ['code']),
+    handler: async ({ code, timeoutMs }) => bg('CRON_DRY_RUN', { code, timeoutMs }),
+  });
+
+  T({
     name: 'cron_list',
     group: 'cron',
     description:
-      'List all background jobs with their key fields (id, name, schedule, paused, lastRunAt, nextRunAt, consecutiveFailures, lastError). Returns the same shape as `cron_status` minus the meta counters.',
-    parameters: OBJ({ includePaused: BOOL }),
-    handler: async ({ includePaused = true } = {}) => bg('CRON_LIST', { includePaused }),
+      'List all background jobs with their key fields (id, name, schedule, paused, pauseUntil, tags, lastRunAt, nextRunAt, consecutiveFailures, lastError). Pass `tag` to filter to jobs that include that tag.',
+    parameters: OBJ({ includePaused: BOOL, tag: STR }),
+    handler: async ({ includePaused = true, tag } = {}) => bg('CRON_LIST', { includePaused, tag }),
+  });
+
+  T({
+    name: 'cron_snooze',
+    group: 'cron',
+    description: 'Pause a job for `durationMs` and have it auto-resume at the reconcile pass after the deadline. Useful for rate-limit Retry-After windows or planned downtime — preferable to `cron_pause` because there\'s nothing to remember to undo.',
+    parameters: OBJ({ id: STR, durationMs: NUM }, ['id', 'durationMs']),
+    handler: async ({ id, durationMs }) => bg('CRON_SNOOZE', { id, durationMs }),
+  });
+
+  T({
+    name: 'cron_stats',
+    group: 'cron',
+    description:
+      'Aggregate metrics for a job over its kept run history (up to 200 entries). Returns { totalRuns, ok, fail, skipped, successRate, p50Ms, p95Ms, avgMs, recentErrors }. `sinceMs` (epoch ms) filters the window.',
+    parameters: OBJ({ id: STR, sinceMs: NUM }, ['id']),
+    handler: async ({ id, sinceMs }) => bg('CRON_STATS', { id, sinceMs }),
   });
 
   T({
@@ -81,7 +110,10 @@
       code: STR,
       notes: STR,
       paused: BOOL,
+      pauseUntil: NUM,
       singleton: BOOL,
+      tags: { type: 'array', items: STR },
+      autoPauseNotify: BOOL,
       timeoutMs: NUM,
       autoPauseAfter: NUM,
     }, ['id']),

@@ -335,7 +335,7 @@ const HANDLERS = {
 
   // ── cron job management ──
   async CRON_ADD(spec)               { return Cron.addJob(spec || {}); },
-  async CRON_LIST({ includePaused = true } = {}) { return Cron.listJobs({ includePaused }); },
+  async CRON_LIST({ includePaused = true, tag } = {}) { return Cron.listJobs({ includePaused, tag }); },
   async CRON_GET({ id } = {})        { return Cron.getJob(id); },
   async CRON_REMOVE({ id } = {})     { return Cron.removeJob(id); },
   async CRON_PAUSE({ id } = {})      { return Cron.pauseJob(id); },
@@ -344,6 +344,9 @@ const HANDLERS = {
   async CRON_LOGS({ id, limit = 20, sinceMs } = {}) { return Cron.getJobLogs(id, { limit, sinceMs }); },
   async CRON_STATUS()                { return Cron.status(); },
   async CRON_UPDATE({ id, ...patch } = {}) { return Cron.updateJob(id, patch); },
+  async CRON_STATS({ id, sinceMs } = {}) { return Cron.getJobStats(id, { sinceMs }); },
+  async CRON_SNOOZE({ id, durationMs } = {}) { return Cron.snoozeJob(id, durationMs); },
+  async CRON_DRY_RUN(spec)           { return Cron.dryRunJob(spec || {}); },
 };
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -826,8 +829,11 @@ const Cron = (() => {
       schedule: spec.schedule,
       code: spec.code,
       paused: !!spec.paused,
+      pauseUntil: spec.pauseUntil || null,   // auto-resume timestamp
       singleton: !!spec.singleton,
+      autoPauseNotify: spec.autoPauseNotify !== false,   // default ON
       notes: spec.notes || '',
+      tags: Array.isArray(spec.tags) ? spec.tags.filter(t => typeof t === 'string') : [],
       timeoutMs: spec.timeoutMs || DEFAULT_TIMEOUT_MS,
       autoPauseAfter: spec.autoPauseAfter || DEFAULT_AUTO_PAUSE,
       createdAt: now,
@@ -845,14 +851,17 @@ const Cron = (() => {
     return job;
   }
 
-  async function listJobs({ includePaused = true } = {}) {
+  async function listJobs({ includePaused = true, tag } = {}) {
     const jobs = await loadObj(STORAGE_JOBS);
     return {
       jobs: Object.values(jobs)
         .filter(j => includePaused || !j.paused)
+        .filter(j => !tag || (Array.isArray(j.tags) && j.tags.includes(tag)))
         .map(j => ({
           id: j.id, name: j.name, slug: j.slug,
           schedule: j.schedule, paused: j.paused,
+          pauseUntil: j.pauseUntil || null,
+          tags: j.tags || [],
           lastRunAt: j.lastRunAt, nextRunAt: j.nextRunAt,
           consecutiveFailures: j.consecutiveFailures,
           lastError: j.lastError,
@@ -873,7 +882,7 @@ const Cron = (() => {
     const j = jobs[id];
     if (!j) throw new Error(`no job with id ${id}`);
     // Only allow safe fields to be patched.
-    const allow = ['name', 'schedule', 'code', 'notes', 'paused', 'singleton', 'timeoutMs', 'autoPauseAfter'];
+    const allow = ['name', 'schedule', 'code', 'notes', 'paused', 'pauseUntil', 'singleton', 'tags', 'autoPauseNotify', 'timeoutMs', 'autoPauseAfter'];
     for (const k of allow) if (k in patch) j[k] = patch[k];
     if ('schedule' in patch) validateSpec({ name: j.name, schedule: j.schedule, code: j.code });
     jobs[id] = j;
@@ -931,10 +940,93 @@ const Cron = (() => {
     const { jobs } = await listJobs({ includePaused: true });
     const stateAll = await loadObj(STORAGE_STATE);
     const rt = await loadObj(STORAGE_RT);
+    const tagCounts = {};
+    for (const j of jobs) for (const t of (j.tags || [])) tagCounts[t] = (tagCounts[t] || 0) + 1;
     return {
       jobs,
       stateKeys: Object.keys(stateAll).length,
       lastReconcileAt: rt.lastReconcileAt || null,
+      tagCounts,
+    };
+  }
+
+  // Snooze: pause until a future timestamp, auto-resumes at reconcile
+  // when now >= pauseUntil. Convenience over set-paused-true then
+  // remembering-to-resume.
+  async function snoozeJob(id, durationMs) {
+    if (!durationMs || durationMs <= 0) throw new Error('durationMs > 0 required');
+    const j = await getJob(id);
+    j.paused = true;
+    j.pauseUntil = Date.now() + durationMs;
+    await persistJob(j);
+    await clearAlarm(id);
+    return j;
+  }
+
+  // Stats: aggregate the IDB run history into useful counters.
+  async function getJobStats(id, { sinceMs } = {}) {
+    await getJob(id);
+    // We need ALL runs in the window — capped at MAX_RUNS_PER_JOB so
+    // bounded.
+    let runs = await readRuns(id, MAX_RUNS_PER_JOB);
+    if (sinceMs) runs = runs.filter(r => r.ts >= sinceMs);
+    const total = runs.length;
+    let ok = 0, fail = 0, skipped = 0;
+    const durations = [];
+    const recentErrors = [];
+    for (const r of runs) {
+      if (r.error === 'backoff' || r.error === 'singleton-skip' || r.error === 'auto-paused') skipped++;
+      else if (r.ok) { ok++; durations.push(r.ms || 0); }
+      else { fail++; durations.push(r.ms || 0); if (recentErrors.length < 5) recentErrors.push({ ts: r.ts, message: r.error || 'unknown' }); }
+    }
+    durations.sort((a, b) => a - b);
+    const pct = (p) => durations.length ? durations[Math.min(durations.length - 1, Math.floor(durations.length * p))] : 0;
+    return {
+      jobId: id,
+      window: sinceMs ? { sinceMs } : { all: true },
+      totalRuns: total, ok, fail, skipped,
+      successRate: (ok + fail) > 0 ? +(ok / (ok + fail)).toFixed(3) : null,
+      p50Ms: pct(0.50), p95Ms: pct(0.95),
+      avgMs: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0,
+      recentErrors,
+    };
+  }
+
+  // Dry-run: parse + execute the code once without registering. The
+  // sandbox is the SAME one a registered job would get; this just
+  // doesn't store the spec, doesn't create an alarm, doesn't update
+  // job state. State writes ARE persisted (otherwise auth-flow tests
+  // can't be validated) — caller can clean up via state_delete.
+  async function dryRunJob(spec) {
+    if (!spec || !spec.code) throw new Error('code required');
+    const fakeJob = {
+      id: '_dryrun', name: '(dry-run)', timeoutMs: spec.timeoutMs || 30000,
+      lastRunAt: null,
+    };
+    const runBuf = { stdout: [], stderr: [] };
+    const start = Date.now();
+    let ok = false, err = null;
+    let timerId;
+    try {
+      const K = buildSandbox(fakeJob, runBuf);
+      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+      const fn = new AsyncFunction('K', '"use strict";\n' + spec.code);
+      const exec = fn(K);
+      const timeoutP = new Promise((_, rej) => {
+        timerId = setTimeout(() => rej(new Error(`dry-run timed out after ${fakeJob.timeoutMs}ms`)), fakeJob.timeoutMs);
+      });
+      await Promise.race([exec, timeoutP]);
+      ok = true;
+    } catch (e) {
+      err = e?.message || String(e);
+    } finally {
+      clearTimeout(timerId);
+    }
+    return {
+      ok, ms: Date.now() - start,
+      stdout: runBuf.stdout.join('\n'),
+      stderr: runBuf.stderr.join('\n'),
+      error: ok ? null : err,
     };
   }
 
@@ -1248,15 +1340,18 @@ const Cron = (() => {
           appendRun(cur.id, { ts: Date.now(), ok: false, ms: 0,
             stdout: '', stderr: `auto-paused after ${cur.consecutiveFailures} failures`,
             error: 'auto-paused', triggeredBy: 'auto-pause' }).catch(() => {});
-          // Tell the user. Notifications API may not be granted; ignore failure.
-          try {
-            chrome.notifications.create({
-              type: 'basic',
-              iconUrl: 'icons/icon128.png',
-              title: 'Kyoto: cron job auto-paused',
-              message: `"${cur.name}" failed ${cur.consecutiveFailures}x in a row. Last error: ${(err || '').slice(0, 140)}`,
-            });
-          } catch {}
+          // Tell the user — unless they explicitly opted out for this job.
+          // Notifications API may not be granted; ignore failure.
+          if (cur.autoPauseNotify !== false) {
+            try {
+              chrome.notifications.create({
+                type: 'basic',
+                iconUrl: 'icons/icon128.png',
+                title: 'Kyoto: cron job auto-paused',
+                message: `"${cur.name}" failed ${cur.consecutiveFailures}x in a row. Last error: ${(err || '').slice(0, 140)}`,
+              });
+            } catch {}
+          }
         }
       }
       // Update nextRunAt.
@@ -1297,6 +1392,35 @@ const Cron = (() => {
   // doesn't. Make sure storage and chrome.alarms agree.
   async function reconcile() {
     const jobs = await loadObj(STORAGE_JOBS);
+    const now = Date.now();
+    let mutated = false;
+    // First pass: heal stale _runningSince (SW died mid-run for a
+    // singleton — without this, the job is stuck "already running"
+    // forever) and auto-resume snoozed jobs whose pauseUntil elapsed.
+    for (const j of Object.values(jobs)) {
+      if (j._runningSince && (now - j._runningSince) > ((j.timeoutMs || DEFAULT_TIMEOUT_MS) + 5000)) {
+        j._runningSince = null;
+        mutated = true;
+        appendRun(j.id, {
+          ts: now, ok: false, ms: 0, stdout: '',
+          stderr: 'reconcile cleared stale _runningSince (SW restart mid-run?)',
+          error: 'reconcile-cleanup', triggeredBy: 'reconcile',
+        }).catch(() => {});
+      }
+      if (j.paused && j.pauseUntil && now >= j.pauseUntil) {
+        j.paused = false;
+        j.pauseUntil = null;
+        j.consecutiveFailures = 0;
+        j._backoffUntil = null;
+        mutated = true;
+        appendRun(j.id, {
+          ts: now, ok: true, ms: 0, stdout: 'snooze elapsed; auto-resumed',
+          stderr: '', error: null, triggeredBy: 'reconcile',
+        }).catch(() => {});
+      }
+    }
+    if (mutated) await saveObj(STORAGE_JOBS, jobs);
+
     const haveMaster = await chrome.alarms.get(ALARM_MASTER).then(a => !!a).catch(() => false);
     let needMaster = false;
     const seen = new Set();
@@ -1333,6 +1457,7 @@ const Cron = (() => {
     stateGet, stateSet, stateDelete, stateList,
     addJob, listJobs, getJob, updateJob, removeJob,
     pauseJob, resumeJob, runJobNow, getJobLogs, status,
+    snoozeJob, getJobStats, dryRunJob,
     onAlarm, reconcile,
     // internals exposed for tests:
     _parseEvery: parseEvery, _cronMatches: cronMatches,
