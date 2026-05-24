@@ -58,7 +58,7 @@ function loadHarness({ shellHandler, cookies = [], hasShell = true, platform = '
 
   const files = [
     'core','workspace','browser','cookies','network','python','fs','media',
-    'shell','youtube','data','skills','widevine','drm','m3u8dl','subagent','finalize'
+    'shell','youtube','data','skills','widevine','drm','m3u8dl','crunchyroll','subagent','finalize'
   ].map(n => path.join(__dirname, '..', 'sidepanel', 'tools', `${n}.js`));
   for (const f of files) vm.runInContext(fs.readFileSync(f, 'utf-8'), sandbox, { filename: f });
 
@@ -94,7 +94,7 @@ test('m3u8dl_check_setup reports shell host missing when bridge unavailable', as
 test('m3u8dl_check_setup ready=true when every piece is present', async () => {
   const { win } = loadHarness({
     shellHandler: async (cmd) => {
-      if (/N_m3u8DL-RE.*--version/.test(cmd)) return { exitCode: 0, stdout: 'N_m3u8DL-RE 0.2.0\n' };
+      if (/N_m3u8DL-RE.*--version/.test(cmd)) return { exitCode: 0, stdout: '0.5.1+abcdef1234567\n' };
       if (/import pywidevine/.test(cmd)) return { exitCode: 0, stdout: '1.9.0\n' };
       if (/python3 --version|python --version/.test(cmd)) return { exitCode: 0, stdout: 'Python 3.11.5\n' };
       if (/pywidevine.*__version__/.test(cmd)) return { exitCode: 0, stdout: '1.9.0\n' };
@@ -218,7 +218,7 @@ test('m3u8dl_download builds command with --key, --header (Cookie), --save-dir',
       { name: 'sess', value: 'abc', domain: '.crunchyroll.com', path: '/', secure: true, httpOnly: true, expirationDate: 2e9 }
     ],
     shellHandler: async (cmd) => {
-      if (/N_m3u8DL-RE.*--version/.test(cmd)) return { exitCode: 0, stdout: 'N_m3u8DL-RE 0.2.0\n' };
+      if (/N_m3u8DL-RE.*--version/.test(cmd)) return { exitCode: 0, stdout: '0.5.1+abcdef1234567\n' };
       if (/command -v mp4decrypt/.test(cmd)) return { exitCode: 0, stdout: '/usr/local/bin/mp4decrypt\n' };
       if (/import pywidevine/.test(cmd)) return { exitCode: 0, stdout: '1.9.0\n' };
       if (/p\.write_bytes/.test(cmd)) return { exitCode: 0, stdout: '/home/u/.cache/kyoto-m3u8dl/cookies-crunchyroll.com.txt\n' };
@@ -258,7 +258,7 @@ test('m3u8dl_download warns when mp4decrypt is missing but keys are passed', asy
   let bgSent = null;
   const { win } = loadHarness({
     shellHandler: async (cmd) => {
-      if (/N_m3u8DL-RE.*--version/.test(cmd)) return { exitCode: 0, stdout: 'N_m3u8DL-RE 0.2.0\n' };
+      if (/N_m3u8DL-RE.*--version/.test(cmd)) return { exitCode: 0, stdout: '0.5.1+abcdef1234567\n' };
       if (/command -v mp4decrypt/.test(cmd)) return { exitCode: 0, stdout: '' };  // missing
       if (/mkdir -p/.test(cmd)) return { exitCode: 0, stdout: '' };
       return { exitCode: 0, stdout: '' };

@@ -114,11 +114,22 @@
     '/usr/bin/N_m3u8DL-RE',
   ];
 
+  // N_m3u8DL-RE --version output looks like:
+  //   0.5.1+c1f6db5639397dde362c31b31eebd88c796c90da
+  // i.e. a semver prefix. The previous probe used `2>&1 | head -1`, which
+  // exited 0 even when the binary was missing AND its `/N_m3u8DL-RE/i`
+  // regex matched the SHELL ERROR MESSAGE ("/bin/sh: N_m3u8DL-RE: No such
+  // file or directory") — a classic false positive. Require an actual
+  // semver match and pass through the raw exit code.
+  function _isVersionLine(s) {
+    return /^\d+\.\d+\.\d+/.test((s || '').trim().split('\n')[0]);
+  }
+
   async function _findM3U8DL() {
     for (const p of _M3U8DL_PATHS) {
-      const r = await _shell(`${p} --version 2>&1 | head -1`, 5000);
+      const r = await _shell(`${p} --version 2>&1`, 5000);
       if (r._noShell) return null;
-      if (r.exitCode === 0 && /N_m3u8DL-RE/i.test(r.stdout || '')) {
+      if (r.exitCode === 0 && _isVersionLine(r.stdout)) {
         return { binary: p, versionLine: (r.stdout || '').trim().split('\n')[0] };
       }
     }
@@ -126,8 +137,8 @@
     if (which._noShell) return null;
     const out = (which.stdout || '').trim();
     if (out) {
-      const r = await _shell(`${out} --version 2>&1 | head -1`, 5000);
-      if (r.exitCode === 0 && /N_m3u8DL-RE/i.test(r.stdout || '')) {
+      const r = await _shell(`${out} --version 2>&1`, 5000);
+      if (r.exitCode === 0 && _isVersionLine(r.stdout)) {
         return { binary: out, versionLine: (r.stdout || '').trim().split('\n')[0] };
       }
     }
@@ -193,6 +204,12 @@
       if [ -z "$BIN" ]; then echo "binary not found in archive"; exit 1; fi
       cp "$BIN" "$HOME/.local/bin/N_m3u8DL-RE"
       chmod +x "$HOME/.local/bin/N_m3u8DL-RE"
+      # macOS auto-quarantines anything Chrome (and our extension) downloads.
+      # Without stripping com.apple.quarantine, Gatekeeper SIGKILLs the
+      # binary on first run with "Killed: 9". xattr returns nonzero on
+      # non-macOS systems and on macOS when the attribute is absent — both
+      # safe to ignore. The 2>/dev/null suppresses the noise.
+      xattr -d com.apple.quarantine "$HOME/.local/bin/N_m3u8DL-RE" 2>/dev/null || true
       echo "installed: $HOME/.local/bin/N_m3u8DL-RE"
     `;
     const r = await _shell(installScript, 180000);

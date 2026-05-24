@@ -4122,7 +4122,8 @@
     'minimax_describe_tab',
     'widevine_cdm_info','widevine_request_license','widevine_get_content_keys',
     'drm_export_cookies','drm_download',
-    'm3u8dl_download'
+    'm3u8dl_download',
+    'cr_get_stream_info'
   ]);
 
   async function callToolOrMCP(name, args, session) {
