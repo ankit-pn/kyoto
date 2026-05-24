@@ -2711,6 +2711,12 @@
     // as config. Too low and complex multi-tool tasks die half-way.
     maxAgentSteps: 50,
     maxAutoContinues: 2,
+    // Per-tool-call wall-clock timeout (ms). If a single tool call
+    // takes longer than this, it gets cut loose with an error result
+    // so the chat turn can complete instead of wedging forever.
+    // Range 10s..30min; default 5min — generous for slow scrapes /
+    // shell commands while still bounded.
+    toolTimeoutMs: 300000,
     // On-disk workspace folder. Every chrome.downloads call from the
     // agent (fs_zip, chat_export, media_download, workspace_save, …)
     // gets prefixed with this folder. See sidepanel/tools/workspace.js.
@@ -3991,10 +3997,25 @@
           return { tc, args, card };
         });
 
+        // Hard wall-clock per tool call so a misbehaving tool (e.g.
+        // page_eval awaiting a never-resolving promise) can't wedge the
+        // entire chat turn forever — which previously left the assistant
+        // message with tool_calls persisted but no tool responses, and
+        // every subsequent send failed with "An assistant message with
+        // 'tool_calls' must be followed by tool messages...".
+        const toolTimeoutMs = Math.max(10000, Math.min(1800000, Number(state.settings.toolTimeoutMs) || 300000));
         const settled = await Promise.all(prepared.map(async ({ tc, args, card }) => {
           const tStart = Date.now();
           let result;
-          try { result = await callToolOrMCP(tc.function.name, args, session); }
+          try {
+            result = await Promise.race([
+              callToolOrMCP(tc.function.name, args, session),
+              new Promise((_, rej) => setTimeout(
+                () => rej(new Error(`tool ${tc.function.name} exceeded chat-loop timeout (${toolTimeoutMs}ms) — cut loose so the turn can complete. Raise Settings → toolTimeoutMs if this is a legitimately long-running tool.`)),
+                toolTimeoutMs
+              ))
+            ]);
+          }
           catch (e) { result = { error: e?.message || String(e) }; }
           const tElapsed = Date.now() - tStart;
           const resultStr = jsonString(result);

@@ -258,22 +258,38 @@
   T({
     name: 'page_eval',
     group: 'page',
-    description: 'Evaluate JavaScript in the page MAIN world. The result must be JSON-serializable. POWERFUL — can read page state, call site JS, modify DOM.',
-    parameters: OBJ({ code: STR, tabId: NUM }, ['code']),
-    handler: async ({ code, tabId }) => {
+    description: 'Evaluate JavaScript in the page MAIN world. The result must be JSON-serializable. POWERFUL — can read page state, call site JS, modify DOM. `timeoutMs` (default 30000) caps how long the script may run before the wrapper resolves with a timeout error — protects against scripts that `await` a never-resolving promise (e.g. `video.play()` when autoplay is blocked).',
+    parameters: OBJ({ code: STR, tabId: NUM, timeoutMs: NUM }, ['code']),
+    handler: async ({ code, tabId, timeoutMs }) => {
       tabId = tabId ?? (await activeTab()).id;
-      const res = await scrip(tabId, async (src) => {
-        try {
-          let val;
-          try { val = (0, eval)(`(async()=>{return (${src})})()`); }
-          catch { val = (0, eval)(`(async()=>{${src}})()`); }
-          val = await val;
-          try { return { ok: true, result: JSON.parse(JSON.stringify(val)) }; }
-          catch { return { ok: true, result: String(val) }; }
-        } catch (e) {
-          return { ok: false, error: e?.message || String(e), stack: e?.stack };
-        }
-      }, [code], 'MAIN');
+      const tMs = Math.max(500, Math.min(600000, Number(timeoutMs) || 30000));
+      const res = await scrip(tabId, async (src, t) => {
+        // Race the user's promise against a timeout so chrome.scripting
+        // can never hang on a never-resolving await. We always resolve;
+        // errors are returned in the `error` field.
+        return new Promise((resolve) => {
+          let settled = false;
+          const finish = (val) => { if (!settled) { settled = true; resolve(val); } };
+          const tid = setTimeout(
+            () => finish({ ok: false, error: `page_eval timed out after ${t}ms (script kept running — likely a never-resolving await)` }),
+            t
+          );
+          (async () => {
+            try {
+              let val;
+              try { val = (0, eval)(`(async()=>{return (${src})})()`); }
+              catch { val = (0, eval)(`(async()=>{${src}})()`); }
+              val = await val;
+              clearTimeout(tid);
+              try { finish({ ok: true, result: JSON.parse(JSON.stringify(val)) }); }
+              catch { finish({ ok: true, result: String(val) }); }
+            } catch (e) {
+              clearTimeout(tid);
+              finish({ ok: false, error: e?.message || String(e), stack: e?.stack });
+            }
+          })();
+        });
+      }, [code, tMs], 'MAIN');
       return res;
     }
   });
