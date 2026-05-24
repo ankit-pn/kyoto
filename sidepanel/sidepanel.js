@@ -216,6 +216,9 @@
     workspaceSummary: $('workspaceSummary'),
     workspaceZipBtn: $('workspaceZipBtn'),
     workspaceClearBtn: $('workspaceClearBtn'),
+    cronSummary: $('cronSummary'),
+    cronRefreshBtn: $('cronRefreshBtn'),
+    cronList: $('cronList'),
     workspaceFolder: $('workspaceFolder'),
     workspaceLocation: $('workspaceLocation'),
     workspaceProbeBtn: $('workspaceProbeBtn'),
@@ -2703,7 +2706,7 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta', 'skill'],
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta', 'skill', 'cron'],
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
@@ -5187,6 +5190,101 @@
       await window.KyotoVFS.clear();
       updateWorkspaceUI();
     });
+
+    // ── Cron jobs panel ──
+    async function refreshCronList() {
+      if (!els.cronList) return;
+      try {
+        const status = await window.KyotoTools.call('cron_status', {});
+        if (status?.error) {
+          els.cronSummary.textContent = `Error: ${status.error}`;
+          els.cronList.innerHTML = '';
+          return;
+        }
+        const jobs = status?.jobs || [];
+        els.cronSummary.textContent = jobs.length
+          ? `${jobs.length} job${jobs.length === 1 ? '' : 's'} · ${status.stateKeys} state key${status.stateKeys === 1 ? '' : 's'}`
+          : 'no jobs';
+        const ago = (ts) => {
+          if (!ts) return '—';
+          const s = Math.floor((Date.now() - ts) / 1000);
+          if (s < 60) return s + 's ago';
+          if (s < 3600) return Math.floor(s / 60) + 'm ago';
+          if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+          return Math.floor(s / 86400) + 'd ago';
+        };
+        const inFut = (ts) => {
+          if (!ts) return '—';
+          const s = Math.floor((ts - Date.now()) / 1000);
+          if (s < 0) return 'overdue';
+          if (s < 60) return 'in ' + s + 's';
+          if (s < 3600) return 'in ' + Math.floor(s / 60) + 'm';
+          if (s < 86400) return 'in ' + Math.floor(s / 3600) + 'h';
+          return 'in ' + Math.floor(s / 86400) + 'd';
+        };
+        const esc = (s) => String(s || '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+        els.cronList.innerHTML = jobs.map(j => {
+          const sched = j.schedule?.every ? `every ${esc(j.schedule.every)}` : `cron ${esc(j.schedule?.cron || '')}`;
+          const statusDot = j.paused ? '⏸' : (j.consecutiveFailures > 0 ? '✗' : '●');
+          const statusCls = j.paused ? 'paused' : (j.consecutiveFailures > 0 ? 'err' : 'ok');
+          return `
+            <div class="cron-row" data-id="${esc(j.id)}">
+              <span class="cron-dot ${statusCls}">${statusDot}</span>
+              <div class="cron-meta">
+                <div class="cron-name">${esc(j.name)} <span class="cron-sched">· ${sched}</span></div>
+                <div class="cron-times">ran ${ago(j.lastRunAt)} · next ${j.paused ? 'paused' : inFut(j.nextRunAt)}${j.consecutiveFailures > 0 ? ' · ' + j.consecutiveFailures + ' fails' : ''}</div>
+                ${j.lastError ? `<div class="cron-err">${esc(j.lastError.message || '')}</div>` : ''}
+              </div>
+              <div class="cron-actions">
+                <button class="btn-mini" data-act="run">Run</button>
+                <button class="btn-mini" data-act="${j.paused ? 'resume' : 'pause'}">${j.paused ? 'Resume' : 'Pause'}</button>
+                <button class="btn-mini" data-act="logs">Logs</button>
+                <button class="btn-mini" data-act="remove">Delete</button>
+              </div>
+            </div>`;
+        }).join('') || '<p class="hint">No jobs yet. Ask the agent to register one via <code>cron_add</code>.</p>';
+      } catch (e) {
+        els.cronSummary.textContent = `Error: ${e.message}`;
+      }
+    }
+    if (els.cronRefreshBtn) els.cronRefreshBtn.addEventListener('click', refreshCronList);
+    if (els.cronList) {
+      els.cronList.addEventListener('click', async (e) => {
+        const btn = e.target.closest('button[data-act]');
+        if (!btn) return;
+        const row = btn.closest('.cron-row');
+        const id = row?.dataset?.id; if (!id) return;
+        const act = btn.dataset.act;
+        try {
+          if (act === 'run') {
+            const r = await window.KyotoTools.call('cron_run_now', { id });
+            alert(r?.error ? ('Error: ' + r.error) : (r.ok ? `Ran OK · ${r.ms}ms\n${r.stdout || '(no output)'}` : `Failed: ${r.error}\n${r.stderr || ''}`));
+          } else if (act === 'pause') {
+            await window.KyotoTools.call('cron_pause', { id });
+          } else if (act === 'resume') {
+            await window.KyotoTools.call('cron_resume', { id });
+          } else if (act === 'logs') {
+            const r = await window.KyotoTools.call('cron_logs', { id, limit: 20 });
+            if (r?.error) { alert('Error: ' + r.error); return; }
+            const txt = (r.runs || []).map(run =>
+              `[${new Date(run.ts).toISOString()}] ${run.ok ? 'OK' : 'FAIL'} · ${run.ms}ms · ${run.triggeredBy || '-'}` +
+              (run.error ? '\n  err: ' + run.error : '') +
+              (run.stdout ? '\n  stdout: ' + run.stdout.split('\n').join('\n  ') : '') +
+              (run.stderr ? '\n  stderr: ' + run.stderr.split('\n').join('\n  ') : '')
+            ).join('\n\n') || '(no runs yet)';
+            alert(txt);
+          } else if (act === 'remove') {
+            if (!confirm('Delete this job and its logs?')) return;
+            await window.KyotoTools.call('cron_remove', { id });
+          }
+          await refreshCronList();
+        } catch (err) {
+          alert('Error: ' + (err.message || err));
+        }
+      });
+    }
+    // Initial paint when settings drawer opens.
+    if (els.cronList) refreshCronList();
     if (els.workspaceProbeBtn) els.workspaceProbeBtn.addEventListener('click', async () => {
       if (!els.workspaceProbeStatus) return;
       els.workspaceProbeStatus.textContent = 'Probing…';

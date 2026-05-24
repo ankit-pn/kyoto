@@ -271,6 +271,14 @@
         <p class="hint">Granted at install time. Required for response-body capture, network modification, and full DevTools control via <code>debugger_attach</code> / <code>debugger_send</code>. Chrome shows a yellow banner on the tab while attached. If you see "Not granted", reload the extension on <code>chrome://extensions</code> (the ⤴ button takes you there).</p>
       </div>
 
+      <h3 class="drawer-section">Background jobs (cron)</h3>
+      <p class="hint">Jobs scheduled via <code>chrome.alarms</code> that the agent registers, manages, and reads logs for. They run as long as Chrome is running. Tools: <code>cron_add / cron_list / cron_pause / cron_run_now / cron_logs / cron_status</code> plus <code>state_get / state_set</code> for the async pipe between jobs. Auto-pause after 5 consecutive failures.</p>
+      <div class="mcp-actions">
+        <span id="cronSummary" class="status">—</span>
+        <button class="btn-mini" id="cronRefreshBtn" type="button">Refresh</button>
+      </div>
+      <div id="cronList" class="cron-list"></div>
+
       <h3 class="drawer-section">Workspace (virtual files)</h3>
       <p class="hint">A scratch filesystem the agent uses to store scraped data outside the conversation context (lives in IndexedDB — GB-scale quota, survives reloads). Tools: <code>fs_write / fs_read / fs_append / fs_list / fs_zip</code>. Slash: <code>/ls</code>, <code>/zip</code>, <code>/clearfs</code>.</p>
       <div class="mcp-actions">
@@ -475,6 +483,7 @@
   <script src="tools/data.js"></script>
   <script src="tools/skills.js"></script>
   <script src="tools/subagent.js"></script>
+  <script src="tools/cron.js"></script>
   <script src="tools/finalize.js"></script>
   <script src="mcp.js"></script>
   <script src="sidepanel.js"></script>

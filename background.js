@@ -325,7 +325,25 @@ const HANDLERS = {
   async CHECK_PERMISSION({ permissions = [], origins = [] } = {}) {
     const has = await chrome.permissions.contains({ permissions, origins });
     return { has };
-  }
+  },
+
+  // ── state pipe (chrome.storage.local with TTL) ──
+  async STATE_GET({ key } = {})      { return Cron.stateGet(key); },
+  async STATE_SET({ key, value, ttlMs, writtenBy } = {}) { return Cron.stateSet(key, value, { ttlMs, writtenBy }); },
+  async STATE_DELETE({ key } = {})   { return Cron.stateDelete(key); },
+  async STATE_LIST({ prefix } = {})  { return Cron.stateList(prefix); },
+
+  // ── cron job management ──
+  async CRON_ADD(spec)               { return Cron.addJob(spec || {}); },
+  async CRON_LIST({ includePaused = true } = {}) { return Cron.listJobs({ includePaused }); },
+  async CRON_GET({ id } = {})        { return Cron.getJob(id); },
+  async CRON_REMOVE({ id } = {})     { return Cron.removeJob(id); },
+  async CRON_PAUSE({ id } = {})      { return Cron.pauseJob(id); },
+  async CRON_RESUME({ id } = {})     { return Cron.resumeJob(id); },
+  async CRON_RUN_NOW({ id, async: asyncRun = false } = {}) { return Cron.runJobNow(id, { async: asyncRun }); },
+  async CRON_LOGS({ id, limit = 20, sinceMs } = {}) { return Cron.getJobLogs(id, { limit, sinceMs }); },
+  async CRON_STATUS()                { return Cron.status(); },
+  async CRON_UPDATE({ id, ...patch } = {}) { return Cron.updateJob(id, patch); },
 };
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -508,3 +526,643 @@ chrome.runtime.onConnect.addListener((port) => {
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────
+// Background jobs (cron) + shared state pipe
+// ─────────────────────────────────────────────────────────────────
+// Design: see PLAN-cron.md. tl;dr:
+//   - Job specs in chrome.storage.local[kyoto.cron.jobs].
+//   - State pipe in chrome.storage.local[kyoto.cron.state] with TTL.
+//   - Run history in IndexedDB `kyoto-cron-logs` so it doesn't eat
+//     the 5MB storage quota.
+//   - chrome.alarms wakes the SW; we dispatch by jobId.
+//   - For cron-expr jobs we keep a 1-minute master alarm and check
+//     each tick which jobs are due.
+//
+// Job code runs in the SW with a K sandbox object:
+//   K.state, K.log, K.stderr, K.now, K.job, K.tools, K.chrome
+// K.tools is a SW-safe subset; the K.chrome escape hatch is right
+// there for anything else.
+
+const Cron = (() => {
+  'use strict';
+
+  const STORAGE_JOBS  = 'kyoto.cron.jobs';
+  const STORAGE_STATE = 'kyoto.cron.state';
+  const STORAGE_RT    = 'kyoto.cron.runtime';
+  const ALARM_PREFIX  = 'kyoto-cron:';
+  const ALARM_MASTER  = 'kyoto-cron:master';
+  const SCHEMA_VERSION = 1;
+  const MAX_STATE_BYTES = 50 * 1024;   // 50KB per value
+  const MAX_RUNS_PER_JOB = 200;
+  const DEFAULT_AUTO_PAUSE = 5;
+  const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;  // 5 min per run
+
+  // ── chrome.storage.local read/write helpers ──
+  async function loadObj(key) {
+    const got = await chrome.storage.local.get(key);
+    return got[key] || {};
+  }
+  async function saveObj(key, val) {
+    await chrome.storage.local.set({ [key]: val });
+  }
+
+  // ── State pipe ──
+  function _expired(rec) {
+    if (!rec || !rec.ttlMs) return false;
+    return (rec.writtenAt + rec.ttlMs) <= Date.now();
+  }
+
+  async function stateGet(key) {
+    if (!key) throw new Error('key required');
+    const all = await loadObj(STORAGE_STATE);
+    const rec = all[key];
+    if (!rec) return { missing: true };
+    const expired = _expired(rec);
+    return {
+      value: rec.value, writtenAt: rec.writtenAt,
+      ttlMs: rec.ttlMs || null, writtenBy: rec.writtenBy || null,
+      expired
+    };
+  }
+
+  async function stateSet(key, value, { ttlMs, writtenBy } = {}) {
+    if (!key) throw new Error('key required');
+    const serialized = JSON.stringify(value);
+    if (serialized && serialized.length > MAX_STATE_BYTES) {
+      throw new Error(`state value too large (${serialized.length} > ${MAX_STATE_BYTES} bytes). Keep cron state small; put bulk data in KyotoVFS.`);
+    }
+    const all = await loadObj(STORAGE_STATE);
+    all[key] = {
+      value, writtenAt: Date.now(),
+      ttlMs: ttlMs || null,
+      writtenBy: writtenBy || 'agent',
+    };
+    await saveObj(STORAGE_STATE, all);
+    return { ok: true, writtenAt: all[key].writtenAt };
+  }
+
+  async function stateDelete(key) {
+    const all = await loadObj(STORAGE_STATE);
+    if (!(key in all)) return { deleted: false };
+    delete all[key];
+    await saveObj(STORAGE_STATE, all);
+    return { deleted: true };
+  }
+
+  async function stateList(prefix) {
+    const all = await loadObj(STORAGE_STATE);
+    const items = Object.entries(all)
+      .filter(([k]) => !prefix || k.startsWith(prefix))
+      .map(([key, rec]) => ({
+        key, writtenAt: rec.writtenAt,
+        ttlMs: rec.ttlMs || null,
+        expired: _expired(rec),
+        writtenBy: rec.writtenBy || null,
+        bytes: JSON.stringify(rec.value || null).length,
+      }));
+    return { count: items.length, items };
+  }
+
+  // ── Run-history IndexedDB ──
+  // Separate DB so it doesn't fight KyotoVFS or chrome.storage quota.
+  const IDB_NAME = 'kyoto-cron-logs';
+  const IDB_VERSION = 1;
+  const IDB_STORE = 'runs';
+  let _idbPromise = null;
+
+  function openIdb() {
+    if (_idbPromise) return _idbPromise;
+    _idbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          // Composite key [jobId, ts] so reads-by-job are cheap and
+          // appends are naturally chronological.
+          const os = db.createObjectStore(IDB_STORE, { keyPath: ['jobId', 'ts'] });
+          os.createIndex('byJob', 'jobId', { unique: false });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return _idbPromise;
+  }
+
+  async function appendRun(jobId, run) {
+    const db = await openIdb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put({ jobId, ...run });
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    // Trim oldest beyond cap.
+    const runs = await readRuns(jobId, MAX_RUNS_PER_JOB + 50);
+    if (runs.length > MAX_RUNS_PER_JOB) {
+      const toDelete = runs.slice(MAX_RUNS_PER_JOB);  // sorted newest-first
+      const db2 = await openIdb();
+      await new Promise((resolve, reject) => {
+        const tx = db2.transaction(IDB_STORE, 'readwrite');
+        const os = tx.objectStore(IDB_STORE);
+        for (const r of toDelete) os.delete([r.jobId, r.ts]);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+  }
+
+  async function readRuns(jobId, limit = 20) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const idx = tx.objectStore(IDB_STORE).index('byJob');
+      const out = [];
+      // Walk in reverse — newest first.
+      const cursorReq = idx.openCursor(IDB_KeyRange_only(jobId), 'prev');
+      cursorReq.onsuccess = () => {
+        const cur = cursorReq.result;
+        if (!cur || out.length >= limit) return resolve(out);
+        out.push(cur.value);
+        cur.continue();
+      };
+      cursorReq.onerror = () => reject(cursorReq.error);
+    });
+  }
+
+  function IDB_KeyRange_only(v) { return IDBKeyRange.only(v); }
+
+  async function deleteRunsForJob(jobId) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const idx = tx.objectStore(IDB_STORE).index('byJob');
+      const cursorReq = idx.openCursor(IDBKeyRange.only(jobId));
+      cursorReq.onsuccess = () => {
+        const cur = cursorReq.result;
+        if (!cur) return;
+        cur.delete();
+        cur.continue();
+      };
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  // ── Schedule parsing ──
+  // Supported `every` shorthand: '30s','5m','2h','1d'.
+  function parseEvery(s) {
+    if (typeof s !== 'string') return null;
+    const m = s.trim().match(/^(\d+(?:\.\d+)?)\s*(s|m|h|d)$/i);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    const unit = m[2].toLowerCase();
+    const ms = n * (unit === 's' ? 1000 : unit === 'm' ? 60000 : unit === 'h' ? 3600000 : 86400000);
+    return ms;
+  }
+
+  // Tiny cron-expr matcher: minute hour dom month dow.
+  // Each field: '*', N, N-M, N,N,N, '*/N', or combinations.
+  // Returns true if `d` matches the expr.
+  function parseField(expr, min, max) {
+    if (expr === '*') return new Set(rangeArr(min, max));
+    const out = new Set();
+    for (const part of expr.split(',')) {
+      let step = 1; let body = part;
+      if (part.includes('/')) {
+        const [b, s] = part.split('/');
+        body = b || '*'; step = parseInt(s, 10) || 1;
+      }
+      let lo = min, hi = max;
+      if (body !== '*') {
+        if (body.includes('-')) {
+          const [a, b] = body.split('-').map(Number);
+          lo = a; hi = b;
+        } else {
+          lo = parseInt(body, 10);
+          hi = parseInt(body, 10);
+        }
+      }
+      for (let i = lo; i <= hi; i += step) if (i >= min && i <= max) out.add(i);
+    }
+    return out;
+  }
+  function rangeArr(lo, hi) { const a = []; for (let i = lo; i <= hi; i++) a.push(i); return a; }
+
+  function cronMatches(expr, d) {
+    const parts = String(expr || '').trim().split(/\s+/);
+    if (parts.length !== 5) return false;
+    const [min, hr, dom, mon, dow] = parts;
+    try {
+      if (!parseField(min, 0, 59).has(d.getMinutes())) return false;
+      if (!parseField(hr,  0, 23).has(d.getHours())) return false;
+      if (!parseField(dom, 1, 31).has(d.getDate())) return false;
+      if (!parseField(mon, 1, 12).has(d.getMonth() + 1)) return false;
+      if (!parseField(dow, 0, 6 ).has(d.getDay())) return false;
+      return true;
+    } catch { return false; }
+  }
+
+  // ── Job management ──
+  function slugify(s) {
+    return String(s || '').toLowerCase().trim()
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'job';
+  }
+  function newId() {
+    return 'job_' + Math.random().toString(36).slice(2, 12);
+  }
+
+  function validateSpec(spec) {
+    if (!spec || typeof spec !== 'object') throw new Error('spec required');
+    if (!spec.name || typeof spec.name !== 'string') throw new Error('name required (string)');
+    if (!spec.schedule || typeof spec.schedule !== 'object') throw new Error('schedule required');
+    if (!spec.schedule.every && !spec.schedule.cron) {
+      throw new Error('schedule.every (e.g. "25m") or schedule.cron (e.g. "0 * * * *") required');
+    }
+    if (spec.schedule.every && parseEvery(spec.schedule.every) == null) {
+      throw new Error(`invalid schedule.every: ${spec.schedule.every}. Use N s/m/h/d, e.g. "30m".`);
+    }
+    if (spec.schedule.every && parseEvery(spec.schedule.every) < 30000) {
+      throw new Error(`schedule.every minimum is 30s (chrome.alarms limit). Got ${spec.schedule.every}.`);
+    }
+    if (!spec.code || typeof spec.code !== 'string') throw new Error('code required (JS string)');
+  }
+
+  async function addJob(spec) {
+    validateSpec(spec);
+    const jobs = await loadObj(STORAGE_JOBS);
+    const slug = slugify(spec.name);
+    // Enforce slug uniqueness so logs / alarm names are predictable.
+    for (const j of Object.values(jobs)) {
+      if (j.slug === slug) throw new Error(`a job with slug "${slug}" already exists (id ${j.id})`);
+    }
+    const id = newId();
+    const now = Date.now();
+    const job = {
+      id, name: spec.name, slug,
+      schedule: spec.schedule,
+      code: spec.code,
+      paused: !!spec.paused,
+      notes: spec.notes || '',
+      timeoutMs: spec.timeoutMs || DEFAULT_TIMEOUT_MS,
+      autoPauseAfter: spec.autoPauseAfter || DEFAULT_AUTO_PAUSE,
+      createdAt: now,
+      lastRunAt: null, lastError: null,
+      nextRunAt: null,
+      consecutiveFailures: 0,
+      _schemaVersion: SCHEMA_VERSION,
+    };
+    jobs[id] = job;
+    await saveObj(STORAGE_JOBS, jobs);
+    if (!job.paused) await scheduleAlarm(job);
+    job.nextRunAt = job.nextRunAt;
+    return job;
+  }
+
+  async function listJobs({ includePaused = true } = {}) {
+    const jobs = await loadObj(STORAGE_JOBS);
+    return {
+      jobs: Object.values(jobs)
+        .filter(j => includePaused || !j.paused)
+        .map(j => ({
+          id: j.id, name: j.name, slug: j.slug,
+          schedule: j.schedule, paused: j.paused,
+          lastRunAt: j.lastRunAt, nextRunAt: j.nextRunAt,
+          consecutiveFailures: j.consecutiveFailures,
+          lastError: j.lastError,
+        }))
+        .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    };
+  }
+
+  async function getJob(id) {
+    const jobs = await loadObj(STORAGE_JOBS);
+    const j = jobs[id];
+    if (!j) throw new Error(`no job with id ${id}`);
+    return j;
+  }
+
+  async function updateJob(id, patch) {
+    const jobs = await loadObj(STORAGE_JOBS);
+    const j = jobs[id];
+    if (!j) throw new Error(`no job with id ${id}`);
+    // Only allow safe fields to be patched.
+    const allow = ['name', 'schedule', 'code', 'notes', 'paused', 'timeoutMs', 'autoPauseAfter'];
+    for (const k of allow) if (k in patch) j[k] = patch[k];
+    if ('schedule' in patch) validateSpec({ name: j.name, schedule: j.schedule, code: j.code });
+    jobs[id] = j;
+    await saveObj(STORAGE_JOBS, jobs);
+    await clearAlarm(id);
+    if (!j.paused) await scheduleAlarm(j);
+    return j;
+  }
+
+  async function removeJob(id) {
+    const jobs = await loadObj(STORAGE_JOBS);
+    if (!jobs[id]) return { removed: false };
+    delete jobs[id];
+    await saveObj(STORAGE_JOBS, jobs);
+    await clearAlarm(id);
+    deleteRunsForJob(id).catch(() => {});
+    return { removed: true };
+  }
+
+  async function pauseJob(id) {
+    const j = await getJob(id);
+    j.paused = true;
+    await saveObj(STORAGE_JOBS, { ...(await loadObj(STORAGE_JOBS)), [id]: j });
+    await clearAlarm(id);
+    return j;
+  }
+
+  async function resumeJob(id) {
+    const j = await getJob(id);
+    j.paused = false;
+    j.consecutiveFailures = 0;  // give it a clean slate
+    await saveObj(STORAGE_JOBS, { ...(await loadObj(STORAGE_JOBS)), [id]: j });
+    await scheduleAlarm(j);
+    return j;
+  }
+
+  async function runJobNow(id, { async: asyncRun = false } = {}) {
+    const j = await getJob(id);
+    if (asyncRun) {
+      executeJob(j, { triggeredBy: 'run_now' }).catch(() => {});
+      return { queued: true, id };
+    }
+    return executeJob(j, { triggeredBy: 'run_now' });
+  }
+
+  async function getJobLogs(id, { limit = 20, sinceMs } = {}) {
+    await getJob(id);  // verifies exists
+    let runs = await readRuns(id, limit);
+    if (sinceMs) runs = runs.filter(r => r.ts >= sinceMs);
+    return { jobId: id, runs };
+  }
+
+  async function status() {
+    const { jobs } = await listJobs({ includePaused: true });
+    const stateAll = await loadObj(STORAGE_STATE);
+    const rt = await loadObj(STORAGE_RT);
+    return {
+      jobs,
+      stateKeys: Object.keys(stateAll).length,
+      lastReconcileAt: rt.lastReconcileAt || null,
+    };
+  }
+
+  // ── Alarms ──
+  function alarmNameFor(jobId) { return ALARM_PREFIX + jobId; }
+
+  async function scheduleAlarm(job) {
+    // For cron-expr jobs we don't create a per-job alarm — the master
+    // 1-minute tick handles them. For `every` jobs we create a
+    // periodic alarm with the right period.
+    if (job.schedule.cron) {
+      // Make sure master exists.
+      const existing = await chrome.alarms.get(ALARM_MASTER);
+      if (!existing) {
+        await chrome.alarms.create(ALARM_MASTER, { periodInMinutes: 1, delayInMinutes: 1 });
+      }
+      job.nextRunAt = nextCronTickFrom(Date.now(), job.schedule.cron);
+      await persistJob(job);
+      return;
+    }
+    const ms = parseEvery(job.schedule.every);
+    const minutes = Math.max(0.5, ms / 60000);   // chrome.alarms minimum is 30s
+    await chrome.alarms.create(alarmNameFor(job.id), { periodInMinutes: minutes, delayInMinutes: minutes });
+    job.nextRunAt = Date.now() + ms;
+    await persistJob(job);
+  }
+
+  async function clearAlarm(jobId) {
+    try { await chrome.alarms.clear(alarmNameFor(jobId)); } catch {}
+  }
+
+  async function persistJob(job) {
+    const jobs = await loadObj(STORAGE_JOBS);
+    jobs[job.id] = job;
+    await saveObj(STORAGE_JOBS, jobs);
+  }
+
+  function nextCronTickFrom(fromMs, expr) {
+    // Walk forward minute-by-minute up to 7 days, find first match.
+    // Cheap enough: max 7*24*60 = 10,080 iterations.
+    const d = new Date(fromMs); d.setSeconds(0, 0);
+    for (let i = 0; i < 7 * 24 * 60; i++) {
+      d.setMinutes(d.getMinutes() + 1);
+      if (cronMatches(expr, d)) return d.getTime();
+    }
+    return null;
+  }
+
+  // ── K sandbox: what job code can call ──
+  function buildSandbox(job, runBuffer) {
+    const log = (...args) => runBuffer.stdout.push(args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '));
+    const stderr = (...args) => runBuffer.stderr.push(args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '));
+    const tools = {
+      async network_fetch({ url, method = 'GET', headers = {}, body, credentials = 'include', timeoutMs = 30000 } = {}) {
+        const ac = new AbortController();
+        const t = setTimeout(() => ac.abort(), timeoutMs);
+        try {
+          const res = await fetch(url, { method, headers, body, credentials, signal: ac.signal });
+          const text = await res.text();
+          const out = {}; res.headers.forEach((v, k) => out[k] = v);
+          return { status: res.status, ok: res.ok, headers: out, body: text };
+        } finally { clearTimeout(t); }
+      },
+      async page_eval({ tabId, code, timeoutMs = 30000 } = {}) {
+        if (tabId == null) throw new Error('page_eval requires tabId');
+        const [r] = await chrome.scripting.executeScript({
+          target: { tabId }, world: 'MAIN', args: [code, timeoutMs],
+          func: (src, ms) => new Promise((resolve) => {
+            let settled = false;
+            const finish = (val) => { if (!settled) { settled = true; resolve(val); } };
+            const tid = setTimeout(() => finish({ ok: false, error: 'page_eval timed out after ' + ms + 'ms' }), ms);
+            (async () => {
+              try {
+                let v; try { v = (0, eval)('(async()=>{return (' + src + ')})()'); }
+                catch { v = (0, eval)('(async()=>{' + src + '})()'); }
+                v = await v;
+                clearTimeout(tid);
+                try { finish({ ok: true, result: JSON.parse(JSON.stringify(v)) }); }
+                catch { finish({ ok: true, result: String(v) }); }
+              } catch (e) {
+                clearTimeout(tid);
+                finish({ ok: false, error: e?.message || String(e) });
+              }
+            })();
+          })
+        });
+        return r?.result;
+      },
+      cookies_get: (args) => chrome.cookies.get(args),
+      cookies_getAll: (args) => chrome.cookies.getAll(args),
+      tabs_query: (args) => chrome.tabs.query(args),
+      tabs_get: ({ tabId }) => chrome.tabs.get(tabId),
+      downloads_download: (args) => chrome.downloads.download(args),
+      notification: ({ title, message } = {}) =>
+        chrome.notifications.create({ type: 'basic', iconUrl: 'icons/icon128.png', title: title || 'Kyoto', message: message || '' }),
+    };
+    return {
+      job: { id: job.id, name: job.name, lastRunAt: job.lastRunAt },
+      now: () => Date.now(),
+      log, stderr,
+      state: {
+        get: stateGet,
+        set: (k, v, opts = {}) => stateSet(k, v, { ...opts, writtenBy: 'job:' + job.id }),
+        delete: stateDelete,
+        list: stateList,
+      },
+      tools,
+      chrome,  // escape hatch for anything not in tools
+      fetch,
+    };
+  }
+
+  // ── Execute one job ──
+  async function executeJob(job, { triggeredBy = 'alarm' } = {}) {
+    const start = Date.now();
+    const runBuf = { stdout: [], stderr: [] };
+    let ok = false; let err = null;
+    let timerId;
+    try {
+      const K = buildSandbox(job, runBuf);
+      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+      const fn = new AsyncFunction('K', '"use strict";\n' + job.code);
+      const exec = fn(K);
+      // Per-run wall clock cap. Clear the timer whichever side wins
+      // the race so a fast job doesn't leak a 5-minute setTimeout.
+      const timeoutP = new Promise((_, rej) => {
+        timerId = setTimeout(
+          () => rej(new Error(`job timed out after ${job.timeoutMs}ms`)),
+          job.timeoutMs
+        );
+      });
+      await Promise.race([exec, timeoutP]);
+      ok = true;
+    } catch (e) {
+      err = e?.message || String(e);
+    } finally {
+      clearTimeout(timerId);
+    }
+    const ms = Date.now() - start;
+    const run = {
+      ts: start, ok, ms,
+      stdout: runBuf.stdout.slice(-100).join('\n').slice(-4000),
+      stderr: runBuf.stderr.slice(-100).join('\n').slice(-4000),
+      error: ok ? null : err,
+      triggeredBy,
+    };
+    appendRun(job.id, run).catch(() => {});
+
+    // Update job state.
+    const jobs = await loadObj(STORAGE_JOBS);
+    const cur = jobs[job.id];
+    if (cur) {
+      cur.lastRunAt = start;
+      if (ok) {
+        cur.consecutiveFailures = 0;
+        cur.lastError = null;
+      } else {
+        cur.consecutiveFailures = (cur.consecutiveFailures || 0) + 1;
+        cur.lastError = { ts: start, message: err };
+        if (cur.consecutiveFailures >= (cur.autoPauseAfter || DEFAULT_AUTO_PAUSE)) {
+          cur.paused = true;
+          await clearAlarm(cur.id);
+          runBuf.stderr.push(`[auto-paused after ${cur.consecutiveFailures} consecutive failures]`);
+          // also append a sentinel run record so the agent sees why.
+          appendRun(cur.id, { ts: Date.now(), ok: false, ms: 0,
+            stdout: '', stderr: `auto-paused after ${cur.consecutiveFailures} failures`,
+            error: 'auto-paused', triggeredBy: 'auto-pause' }).catch(() => {});
+        }
+      }
+      // Update nextRunAt.
+      if (cur.schedule?.cron) cur.nextRunAt = nextCronTickFrom(Date.now(), cur.schedule.cron);
+      else if (cur.schedule?.every) cur.nextRunAt = Date.now() + (parseEvery(cur.schedule.every) || 0);
+      jobs[job.id] = cur;
+      await saveObj(STORAGE_JOBS, jobs);
+    }
+    return { ok, ms, error: err, stdout: run.stdout, stderr: run.stderr };
+  }
+
+  // ── Alarm dispatch ──
+  async function onAlarm(alarm) {
+    if (alarm.name === ALARM_MASTER) {
+      // Master tick: fire any cron-expr jobs whose minute has arrived.
+      const jobs = await loadObj(STORAGE_JOBS);
+      const now = new Date();
+      for (const j of Object.values(jobs)) {
+        if (j.paused) continue;
+        if (!j.schedule?.cron) continue;
+        if (cronMatches(j.schedule.cron, now)) {
+          executeJob(j, { triggeredBy: 'cron' }).catch(() => {});
+        }
+      }
+      return;
+    }
+    if (!alarm.name.startsWith(ALARM_PREFIX)) return;
+    const id = alarm.name.slice(ALARM_PREFIX.length);
+    if (id === 'master') return;
+    const jobs = await loadObj(STORAGE_JOBS);
+    const j = jobs[id];
+    if (!j || j.paused) return;
+    executeJob(j, { triggeredBy: 'alarm' }).catch(() => {});
+  }
+
+  // ── Reconcile on SW startup ──
+  // SW can restart mid-run; alarms persist but our in-memory state
+  // doesn't. Make sure storage and chrome.alarms agree.
+  async function reconcile() {
+    const jobs = await loadObj(STORAGE_JOBS);
+    const haveMaster = await chrome.alarms.get(ALARM_MASTER).then(a => !!a).catch(() => false);
+    let needMaster = false;
+    const seen = new Set();
+    for (const j of Object.values(jobs)) {
+      if (j.schedule?.cron && !j.paused) needMaster = true;
+      if (j.schedule?.every && !j.paused) {
+        seen.add(alarmNameFor(j.id));
+        const existing = await chrome.alarms.get(alarmNameFor(j.id)).catch(() => null);
+        if (!existing) {
+          const ms = parseEvery(j.schedule.every);
+          if (ms) await chrome.alarms.create(alarmNameFor(j.id), { periodInMinutes: Math.max(0.5, ms / 60000), delayInMinutes: Math.max(0.5, ms / 60000) });
+        }
+      }
+    }
+    if (needMaster && !haveMaster) {
+      await chrome.alarms.create(ALARM_MASTER, { periodInMinutes: 1, delayInMinutes: 1 });
+    }
+    if (!needMaster && haveMaster) {
+      await chrome.alarms.clear(ALARM_MASTER);
+    }
+    // Cancel orphan alarms (job removed but alarm leaked).
+    const all = await chrome.alarms.getAll().catch(() => []);
+    for (const a of all) {
+      if (a.name.startsWith(ALARM_PREFIX) && a.name !== ALARM_MASTER && !seen.has(a.name)) {
+        await chrome.alarms.clear(a.name).catch(() => {});
+      }
+    }
+    const rt = await loadObj(STORAGE_RT);
+    rt.lastReconcileAt = Date.now();
+    await saveObj(STORAGE_RT, rt);
+  }
+
+  return {
+    stateGet, stateSet, stateDelete, stateList,
+    addJob, listJobs, getJob, updateJob, removeJob,
+    pauseJob, resumeJob, runJobNow, getJobLogs, status,
+    onAlarm, reconcile,
+    // internals exposed for tests:
+    _parseEvery: parseEvery, _cronMatches: cronMatches,
+    _nextCronTickFrom: nextCronTickFrom,
+    _appendRun: appendRun, _readRuns: readRuns,
+  };
+})();
+
+// Hook the alarm + lifecycle events.
+chrome.alarms.onAlarm.addListener((alarm) => { Cron.onAlarm(alarm).catch(() => {}); });
+chrome.runtime.onStartup.addListener(() => { Cron.reconcile().catch(() => {}); });
+chrome.runtime.onInstalled.addListener(() => { Cron.reconcile().catch(() => {}); });
+// Also reconcile on first SW load (covers extension reload / update).
+Cron.reconcile().catch(() => {});

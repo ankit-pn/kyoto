@@ -731,6 +731,26 @@ body {
   margin-top: 4px;
 }
 
+/* ── Cron jobs list (settings drawer) ────── */
+.cron-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.cron-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.cron-dot { font-size: 14px; line-height: 1.2; flex-shrink: 0; width: 14px; text-align: center; }
+.cron-dot.ok { color: #4caf50; }
+.cron-dot.err { color: #e57373; }
+.cron-dot.paused { color: var(--text-faint); }
+.cron-meta { flex: 1; min-width: 0; font-size: 12px; }
+.cron-name { font-weight: 500; color: var(--text); }
+.cron-name .cron-sched { font-weight: normal; color: var(--text-faint); font-size: 11.5px; }
+.cron-times { color: var(--text-faint); font-size: 11.5px; margin-top: 2px; }
+.cron-err { color: #e57373; font-size: 11.5px; margin-top: 2px; overflow-wrap: anywhere; }
+.cron-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
 /* ── Reasoning card ─────────────────────── */
 .reasoning-card {
   margin-bottom: 10px;
