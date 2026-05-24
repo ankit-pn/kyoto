@@ -347,6 +347,8 @@ const HANDLERS = {
   async CRON_STATS({ id, sinceMs } = {}) { return Cron.getJobStats(id, { sinceMs }); },
   async CRON_SNOOZE({ id, durationMs } = {}) { return Cron.snoozeJob(id, durationMs); },
   async CRON_DRY_RUN(spec)           { return Cron.dryRunJob(spec || {}); },
+  async CRON_EXPORT()                { return Cron.exportAll(); },
+  async CRON_IMPORT({ payload, mode = 'merge' } = {}) { return Cron.importAll(payload, { mode }); },
 };
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -602,7 +604,18 @@ const Cron = (() => {
       writtenBy: writtenBy || 'agent',
     };
     await saveObj(STORAGE_STATE, all);
-    return { ok: true, writtenAt: all[key].writtenAt };
+    // Aggregate size watch. chrome.storage.local total quota is ~5MB
+    // shared with everything else Kyoto stores. Warn (don't block) at
+    // 80% so the caller / agent has runway to clean up. The actual
+    // QuotaExceededError would surface from saveObj naturally if we
+    // hit the wall.
+    const bytesUsed = JSON.stringify(all).length;
+    const SOFT_CAP = 4 * 1024 * 1024;   // 4MB = ~80% of 5MB
+    const out = { ok: true, writtenAt: all[key].writtenAt, bytesUsed };
+    if (bytesUsed > SOFT_CAP) {
+      out.sizeWarning = `state store at ${(bytesUsed / 1024 / 1024).toFixed(2)}MB; chrome.storage.local quota is ~5MB total. Consider state_delete on stale keys or move bulk data to KyotoVFS.`;
+    }
+    return out;
   }
 
   async function stateDelete(key) {
@@ -812,6 +825,16 @@ const Cron = (() => {
       }
     }
     if (!spec.code || typeof spec.code !== 'string') throw new Error('code required (JS string)');
+    // Parse-check the code now so a typo doesn't get stored and only
+    // fail at next alarm. AsyncFunction throws SyntaxError synchronously
+    // on bad input.
+    try {
+      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+      // eslint-disable-next-line no-new
+      new AsyncFunction('K', '"use strict";\n' + spec.code);
+    } catch (e) {
+      throw new Error('code does not parse: ' + (e?.message || String(e)));
+    }
   }
 
   async function addJob(spec) {
@@ -883,8 +906,14 @@ const Cron = (() => {
     if (!j) throw new Error(`no job with id ${id}`);
     // Only allow safe fields to be patched.
     const allow = ['name', 'schedule', 'code', 'notes', 'paused', 'pauseUntil', 'singleton', 'tags', 'autoPauseNotify', 'timeoutMs', 'autoPauseAfter'];
-    for (const k of allow) if (k in patch) j[k] = patch[k];
-    if ('schedule' in patch) validateSpec({ name: j.name, schedule: j.schedule, code: j.code });
+    // Validate the proposed result BEFORE mutating the stored record,
+    // so a rejected update doesn't half-apply.
+    const candidate = { ...j };
+    for (const k of allow) if (k in patch) candidate[k] = patch[k];
+    if ('schedule' in patch || 'code' in patch) {
+      validateSpec({ name: candidate.name, schedule: candidate.schedule, code: candidate.code });
+    }
+    Object.assign(j, candidate);
     jobs[id] = j;
     await saveObj(STORAGE_JOBS, jobs);
     await clearAlarm(id);
@@ -990,6 +1019,67 @@ const Cron = (() => {
       avgMs: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0,
       recentErrors,
     };
+  }
+
+  // Export: dump every job spec + state entry so the user can back up
+  // or move to another machine. Run history is intentionally not
+  // included — it's local diagnostic data, not portable config.
+  async function exportAll() {
+    const jobs = await loadObj(STORAGE_JOBS);
+    const state = await loadObj(STORAGE_STATE);
+    return {
+      _kyotoCronExport: 1,
+      exportedAt: Date.now(),
+      schemaVersion: SCHEMA_VERSION,
+      jobs: Object.values(jobs).map(j => ({
+        name: j.name, schedule: j.schedule, code: j.code,
+        notes: j.notes, tags: j.tags || [],
+        paused: j.paused, pauseUntil: j.pauseUntil || null,
+        singleton: !!j.singleton, autoPauseNotify: j.autoPauseNotify !== false,
+        timeoutMs: j.timeoutMs, autoPauseAfter: j.autoPauseAfter,
+      })),
+      state: Object.fromEntries(Object.entries(state).map(([k, rec]) => [k, {
+        value: rec.value,
+        ttlMs: rec.ttlMs || null,
+      }])),
+    };
+  }
+
+  // Import: restore from an export. mode='merge' (default) keeps
+  // existing jobs and skips any whose slug already exists; mode='replace'
+  // nukes everything first. State always merges (importing the same
+  // key OVERWRITES — that's the point of the pipe).
+  async function importAll(payload, { mode = 'merge' } = {}) {
+    if (!payload || typeof payload !== 'object') throw new Error('payload required');
+    if (!Array.isArray(payload.jobs)) throw new Error('payload.jobs must be an array');
+    const summary = { jobsAdded: 0, jobsSkipped: 0, stateKeys: 0, mode };
+    if (mode === 'replace') {
+      const existing = await loadObj(STORAGE_JOBS);
+      for (const id of Object.keys(existing)) await clearAlarm(id);
+      await saveObj(STORAGE_JOBS, {});
+      await saveObj(STORAGE_STATE, {});
+    }
+    const existingSlugs = new Set(Object.values(await loadObj(STORAGE_JOBS)).map(j => j.slug));
+    for (const spec of payload.jobs) {
+      const slug = slugify(spec.name || '');
+      if (existingSlugs.has(slug)) { summary.jobsSkipped++; continue; }
+      try {
+        await addJob(spec);
+        existingSlugs.add(slug);
+        summary.jobsAdded++;
+      } catch (e) {
+        summary.jobsSkipped++;
+      }
+    }
+    if (payload.state && typeof payload.state === 'object') {
+      for (const [key, entry] of Object.entries(payload.state)) {
+        try {
+          await stateSet(key, entry?.value, { ttlMs: entry?.ttlMs || null, writtenBy: 'import' });
+          summary.stateKeys++;
+        } catch {}
+      }
+    }
+    return summary;
   }
 
   // Dry-run: parse + execute the code once without registering. The
@@ -1242,6 +1332,26 @@ const Cron = (() => {
         delete: stateDelete,
         list: stateList,
       },
+      // Programmatic cron API. Jobs can compose: a scrape that sees an
+      // expired token can K.cron.run(authRefreshId); an auth refresher
+      // that hits a 429 can K.cron.snoozeSelf(60_000). Safety: a job
+      // can't K.cron.run(itself) — that's a recursion footgun. Use
+      // K.cron.snoozeSelf for self-mutation.
+      cron: {
+        list:  (opts = {}) => listJobs(opts),
+        run:   async (id, opts = {}) => {
+          if (id === job.id) throw new Error('K.cron.run cannot target the current job (use snoozeSelf or just let the schedule fire). Refusing to recurse.');
+          return runJobNow(id, opts);
+        },
+        snooze: (id, durationMs) => {
+          if (id === job.id) throw new Error('use K.cron.snoozeSelf(durationMs) instead');
+          return snoozeJob(id, durationMs);
+        },
+        snoozeSelf: (durationMs) => snoozeJob(job.id, durationMs),
+        stats: (id, opts = {}) => getJobStats(id, opts),
+        logs:  (id, opts = {}) => getJobLogs(id, opts),
+        getSelf: () => getJob(job.id),
+      },
       tools,
       chrome,  // escape hatch for anything not in tools
       fetch,
@@ -1448,9 +1558,33 @@ const Cron = (() => {
         await chrome.alarms.clear(a.name).catch(() => {});
       }
     }
+    // Run-history GC: delete IDB run entries older than 30 days. Cap
+    // already trims at 200/job, but a slow job (one run/day) would
+    // keep 200 days of dust around without this.
+    await gcOldRuns(30 * 86400 * 1000).catch(() => {});
+
     const rt = await loadObj(STORAGE_RT);
     rt.lastReconcileAt = Date.now();
     await saveObj(STORAGE_RT, rt);
+  }
+
+  async function gcOldRuns(maxAgeMs) {
+    const cutoff = Date.now() - maxAgeMs;
+    const db = await openIdb();
+    let deleted = 0;
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const req = tx.objectStore(IDB_STORE).openCursor();
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return;
+        if (c.value.ts < cutoff) { c.delete(); deleted++; }
+        c.continue();
+      };
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    return { deleted };
   }
 
   return {
@@ -1458,6 +1592,7 @@ const Cron = (() => {
     addJob, listJobs, getJob, updateJob, removeJob,
     pauseJob, resumeJob, runJobNow, getJobLogs, status,
     snoozeJob, getJobStats, dryRunJob,
+    exportAll, importAll, gcOldRuns,
     onAlarm, reconcile,
     // internals exposed for tests:
     _parseEvery: parseEvery, _cronMatches: cronMatches,

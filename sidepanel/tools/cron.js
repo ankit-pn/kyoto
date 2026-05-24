@@ -35,7 +35,7 @@
     description:
       'Register a background job. `schedule.every` (e.g. "25m", "30s", "1h", "1d") for simple periodic — minimum 30s. ' +
       '`schedule.cron` ("min hr dom mon dow") for calendar schedules, e.g. "0 * * * *" (top of every hour), "0 9 * * 1-5" (weekdays 9am). ' +
-      '`code` is a JS string evaluated as an async function body in the service worker with a `K` sandbox exposing K.state, K.log, K.stderr, K.now, K.sleep(ms), K.job, K.tools (network_fetch, page_eval, cookies_get, tabs_query, downloads_download, notification, fs_write, fs_read, fs_list, fs_delete), K.chrome, K.fetch. ' +
+      '`code` is a JS string evaluated as an async function body in the service worker with a `K` sandbox exposing K.state, K.log, K.stderr, K.now, K.sleep(ms), K.job, K.tools (network_fetch, page_eval, cookies_get, tabs_query, downloads_download, notification, fs_write, fs_read, fs_list, fs_delete), K.cron (list, run, snooze, snoozeSelf, stats, logs, getSelf — lets jobs trigger / snooze / inspect each other), K.chrome, K.fetch. ' +
       '`singleton: true` skips a firing if the previous run is still in flight (auth refreshers should set this). ' +
       'On failure: exponential backoff — next runs are skipped until basePeriod × min(32, 2^(failures-1)) elapses. After `autoPauseAfter` (default 5) consecutive failures the job is auto-paused and a system notification fires. ' +
       'Returns { id, name, slug, nextRunAt, ... }. Job runs ONLY while Chrome is running.',
@@ -88,6 +88,27 @@
       'Aggregate metrics for a job over its kept run history (up to 200 entries). Returns { totalRuns, ok, fail, skipped, successRate, p50Ms, p95Ms, avgMs, recentErrors }. `sinceMs` (epoch ms) filters the window.',
     parameters: OBJ({ id: STR, sinceMs: NUM }, ['id']),
     handler: async ({ id, sinceMs }) => bg('CRON_STATS', { id, sinceMs }),
+  });
+
+  T({
+    name: 'cron_export',
+    group: 'cron',
+    description:
+      'Dump every job spec + state-pipe entry as a JSON-serialisable object. Run history is NOT included (local diagnostic data). Use to back up before risky edits, or to move a job set to another machine. The output is portable across Kyoto installs at the same schema version.',
+    parameters: OBJ(),
+    handler: async () => bg('CRON_EXPORT'),
+  });
+
+  T({
+    name: 'cron_import',
+    group: 'cron',
+    description:
+      'Restore from a `cron_export` payload. `mode: "merge"` (default) keeps existing jobs and skips any whose slug conflicts; `mode: "replace"` clears all jobs + state first and imports fresh. State keys always overwrite (that\'s the point of the pipe). Returns { jobsAdded, jobsSkipped, stateKeys, mode }.',
+    parameters: OBJ({
+      payload: {},
+      mode: { type: 'string', enum: ['merge', 'replace'] },
+    }, ['payload']),
+    handler: async ({ payload, mode = 'merge' }) => bg('CRON_IMPORT', { payload, mode }),
   });
 
   T({

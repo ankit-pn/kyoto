@@ -610,6 +610,178 @@ test('autoPauseNotify: false suppresses the chrome.notifications call', async ()
   assert.equal(notifications.length, 0, 'but no toast was fired');
 });
 
+// ──────── iteration 4: K.cron API, parseability, GC, export/import, size watch ────────
+
+test('addJob rejects code that does not parse', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  await assert.rejects(
+    () => Cron.addJob({ name: 'bad-syntax', schedule: { every: '1m' }, code: 'await 1 +' }),
+    /code does not parse/
+  );
+});
+
+test('updateJob with broken code is rejected before being stored', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({ name: 'ok', schedule: { every: '1m' }, code: 'K.log(1)' });
+  await assert.rejects(
+    () => Cron.updateJob(j.id, { code: 'function ( {' }),
+    /code does not parse/
+  );
+  // Original code should be untouched.
+  const cur = await Cron.getJob(j.id);
+  assert.equal(cur.code, 'K.log(1)');
+});
+
+test('K.cron.run triggers another job from inside the current one', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  // Set up a "refresher" job that writes a token, plus a "scraper"
+  // that calls K.cron.run on the refresher when its state is missing.
+  const refresher = await Cron.addJob({
+    name: 'refresher', schedule: { every: '1m' },
+    code: 'await K.state.set("token", "fresh-" + K.now());'
+  });
+  const scraper = await Cron.addJob({
+    name: 'scraper', schedule: { every: '1m' },
+    code: `
+      let tok = await K.state.get("token");
+      if (tok.missing) {
+        await K.cron.run("${refresher.id}");
+        tok = await K.state.get("token");
+      }
+      await K.state.set("scraper_saw", tok.value);
+    `
+  });
+  await Cron.runJobNow(scraper.id);
+  const saw = await Cron.stateGet('scraper_saw');
+  assert.ok(saw.value && saw.value.startsWith('fresh-'),
+    'scraper should have triggered refresher and read the token, got: ' + JSON.stringify(saw));
+});
+
+test('K.cron.run refuses to target the current job (recursion guard)', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'self-runner', schedule: { every: '1m' },
+    code: 'await K.cron.run(K.job.id);'  // would recurse forever
+  });
+  const r = await Cron.runJobNow(j.id);
+  assert.equal(r.ok, false);
+  assert.ok(/cannot target the current job/i.test(r.error));
+});
+
+test('K.cron.snoozeSelf snoozes the current job', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'self-snoozer', schedule: { every: '1m' },
+    code: 'await K.cron.snoozeSelf(60_000); K.log("snoozed");'
+  });
+  const r = await Cron.runJobNow(j.id);
+  assert.equal(r.ok, true);
+  const cur = await Cron.getJob(j.id);
+  assert.equal(cur.paused, true);
+  assert.ok(cur.pauseUntil > Date.now());
+});
+
+test('K.cron.stats and K.cron.logs read other jobs from inside one', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const tracked = await Cron.addJob({ name: 'tracked', schedule: { every: '1m' }, code: 'K.log("hi")' });
+  await Cron.runJobNow(tracked.id);
+  const observer = await Cron.addJob({
+    name: 'observer', schedule: { every: '1m' },
+    code: `
+      const stats = await K.cron.stats("${tracked.id}");
+      const logs  = await K.cron.logs("${tracked.id}", { limit: 5 });
+      await K.state.set("observed", { totalRuns: stats.totalRuns, logCount: logs.runs.length });
+    `
+  });
+  const r = await Cron.runJobNow(observer.id);
+  assert.equal(r.ok, true, r.error);
+  const o = await Cron.stateGet('observed');
+  assert.equal(o.value.totalRuns, 1);
+  assert.equal(o.value.logCount, 1);
+});
+
+test('gcOldRuns deletes IDB rows older than the cutoff', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({ name: 'old-runner', schedule: { every: '1m' }, code: '1' });
+  // Inject runs at ages 100 days, 5 days, 1 hour.
+  const now = Date.now();
+  await Cron._appendRun(j.id, { ts: now - 100 * 86400_000, ok: true, ms: 1, stdout: '', stderr: '', error: null, triggeredBy: 'old' });
+  await Cron._appendRun(j.id, { ts: now -   5 * 86400_000, ok: true, ms: 1, stdout: '', stderr: '', error: null, triggeredBy: 'middle' });
+  await Cron._appendRun(j.id, { ts: now -          3600_000, ok: true, ms: 1, stdout: '', stderr: '', error: null, triggeredBy: 'fresh' });
+  const r = await Cron.gcOldRuns(30 * 86400_000);  // 30-day cutoff
+  assert.ok(r.deleted >= 1);
+  const after = await Cron._readRuns(j.id, 50);
+  // Only entries within 30 days should remain.
+  assert.ok(after.every(x => (now - x.ts) <= 30 * 86400_000),
+    'all surviving runs should be within 30d, got: ' + JSON.stringify(after.map(x => (now - x.ts) / 86400_000 + 'd ago')));
+});
+
+test('exportAll returns a portable payload; importAll merge skips duplicate slugs', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  await Cron.addJob({ name: 'one', schedule: { every: '1m' }, code: 'K.log("a")', tags: ['t1'] });
+  await Cron.stateSet('shared.key', { hello: 'world' });
+  const payload = await Cron.exportAll();
+  assert.equal(payload._kyotoCronExport, 1);
+  assert.equal(payload.jobs.length, 1);
+  assert.equal(payload.jobs[0].name, 'one');
+  assert.ok(payload.state['shared.key']);
+
+  // Import into a fresh engine.
+  const { stubs: stubs2 } = makeChromeStub();
+  const Cron2 = loadCronEngine({ chromeStubs: stubs2 });
+  await Cron2.addJob({ name: 'one', schedule: { every: '1m' }, code: 'K.log("local")' });
+  const r = await Cron2.importAll(payload, { mode: 'merge' });
+  assert.equal(r.jobsAdded, 0, 'slug conflict skips');
+  assert.equal(r.jobsSkipped, 1);
+  assert.equal(r.stateKeys, 1);
+  // Local "one" still has the local code.
+  const list = await Cron2.listJobs();
+  const one = list.jobs.find(j => j.name === 'one');
+  const full = await Cron2.getJob(one.id);
+  assert.equal(full.code, 'K.log("local")');
+  // But the state key was imported.
+  assert.deepStrictEqual((await Cron2.stateGet('shared.key')).value, { hello: 'world' });
+});
+
+test('importAll replace mode wipes existing jobs and imports fresh', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  await Cron.addJob({ name: 'before', schedule: { every: '1m' }, code: '1' });
+  const payload = {
+    _kyotoCronExport: 1,
+    jobs: [{ name: 'after', schedule: { every: '1m' }, code: '2' }],
+    state: {},
+  };
+  const r = await Cron.importAll(payload, { mode: 'replace' });
+  assert.equal(r.jobsAdded, 1);
+  const list = await Cron.listJobs();
+  assert.equal(list.jobs.length, 1);
+  assert.equal(list.jobs[0].name, 'after');
+});
+
+test('stateSet returns sizeWarning when aggregate state exceeds 80% of 5MB', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  // 49KB per write × 90 keys ≈ 4.4MB. The 50KB per-value cap stays
+  // separate; we're checking the AGGREGATE.
+  const chunk = 'a'.repeat(49 * 1024);
+  for (let i = 0; i < 90; i++) {
+    await Cron.stateSet('big.' + i, chunk);
+  }
+  const r = await Cron.stateSet('big.last', chunk);
+  assert.ok(r.sizeWarning, 'should warn when over 80%, got: ' + JSON.stringify(r));
+  assert.ok(/MB/.test(r.sizeWarning));
+  assert.ok(r.bytesUsed > 4 * 1024 * 1024);
+});
+
 test('reconcile creates missing alarms and clears orphans', async () => {
   const { stubs, _alarms } = makeChromeStub();
   const Cron = loadCronEngine({ chromeStubs: stubs });
