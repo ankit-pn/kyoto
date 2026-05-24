@@ -3826,6 +3826,46 @@
   // Re-runs the streaming + tool loop on a session whose history already
   // ends with the user message we want a response to. Used by both
   // sendMessage (after pushing) and the replay/edit path.
+  // Walk the history backwards looking for assistant messages with
+  // tool_calls that don't have a matching role:'tool' message for
+  // every tool_call_id. Append synthetic placeholder responses so the
+  // OpenAI-compat servers don't reject the next turn with
+  // "insufficient tool messages following tool_calls". Returns true if
+  // it changed anything.
+  function sanitiseDanglingToolCalls(session, reason = '[unanswered — previous turn ended unexpectedly]') {
+    const h = session?.history;
+    if (!Array.isArray(h) || !h.length) return false;
+    let changed = false;
+    for (let i = 0; i < h.length; i++) {
+      const m = h[i];
+      if (m.role !== 'assistant' || !Array.isArray(m.tool_calls) || !m.tool_calls.length) continue;
+      const answered = new Set();
+      // Tool responses for this assistant message must appear AFTER it
+      // and BEFORE the next assistant/user message that would close out
+      // the response window. Scan forward.
+      let insertAt = i + 1;
+      for (let j = i + 1; j < h.length; j++) {
+        if (h[j].role === 'tool' && h[j].tool_call_id) {
+          answered.add(h[j].tool_call_id);
+          insertAt = j + 1;
+        } else if (h[j].role === 'assistant' || h[j].role === 'user' || h[j].role === 'system') {
+          break;
+        }
+      }
+      const missing = m.tool_calls.filter(tc => tc.id && !answered.has(tc.id));
+      if (!missing.length) continue;
+      const placeholders = missing.map(tc => ({
+        role: 'tool', tool_call_id: tc.id, name: tc.function?.name || 'unknown',
+        content: JSON.stringify({ error: reason }),
+        _aborted: true,
+      }));
+      h.splice(insertAt, 0, ...placeholders);
+      i = insertAt + placeholders.length - 1;
+      changed = true;
+    }
+    return changed;
+  }
+
   async function runChatLoop(session) {
     const runtime = (state.runtimes[session.id] ??= {});
     runtime.busy = true;
@@ -3833,6 +3873,16 @@
     if (isActive(session.id)) {
       els.sendBtn.disabled = true;
       els.stopBtn.classList.remove('hidden');
+    }
+    // Defense in depth: a prior turn may have crashed (panel closed,
+    // page reload, runtime kill) between persisting the assistant
+    // tool_calls and persisting the tool results. The persisted history
+    // then has unanswered tool_call_ids, and every subsequent send to
+    // an OpenAI-compat server fails with "An assistant message with
+    // 'tool_calls' must be followed by tool messages...". Heal it
+    // before we hit the wire.
+    if (await sanitiseDanglingToolCalls(session)) {
+      await persistSession(session);
     }
     try {
       const maxSteps = Math.max(1, Math.min(200, Number(state.settings.maxAgentSteps) || 50));
@@ -4002,30 +4052,12 @@
         await persistSession(session);
       }
     } catch (e) {
-      // Sanitise history: if the last assistant message has tool_calls
-      // without all of their tool responses present, OpenAI-compat
-      // servers will reject the very next turn with "insufficient tool
-      // messages following tool_calls message". Synthesise placeholder
-      // tool responses so the conversation stays well-formed.
+      // OpenAI-compat servers reject the next turn with "insufficient
+      // tool messages following tool_calls" if any tool_call_id is
+      // unanswered. Plug the hole before we hand control back.
       try {
-        const h = session.history;
-        for (let i = h.length - 1; i >= 0; i--) {
-          const m = h[i];
-          if (m.role !== 'assistant' || !Array.isArray(m.tool_calls) || !m.tool_calls.length) continue;
-          const answered = new Set();
-          for (let j = i + 1; j < h.length; j++) {
-            if (h[j].role === 'tool' && h[j].tool_call_id) answered.add(h[j].tool_call_id);
-          }
-          for (const tc of m.tool_calls) {
-            if (!tc.id || answered.has(tc.id)) continue;
-            h.push({
-              role: 'tool', tool_call_id: tc.id, name: tc.function?.name || 'unknown',
-              content: JSON.stringify({ error: e.name === 'AbortError' ? '[stopped by user]' : `[aborted: ${e.message}]` }),
-              _aborted: true,
-            });
-          }
-          break;
-        }
+        const reason = e.name === 'AbortError' ? '[stopped by user]' : `[aborted: ${e.message}]`;
+        sanitiseDanglingToolCalls(session, reason);
       } catch {}
       if (e.name === 'AbortError') {
         session.history.push({ role: 'assistant', content: '_[stopped]_', _error: true });
