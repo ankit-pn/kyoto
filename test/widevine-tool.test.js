@@ -8,12 +8,20 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function loadHarness({ stubEME = null, stubFetch = null } = {}) {
+// The widevine license-request tools now inject their EME flow into
+// the active tab's MAIN world via chrome.scripting.executeScript. The
+// harness simulates that by hot-swapping the sandbox's `navigator` +
+// `fetch` for the duration of each executeScript call, then invoking
+// the injected `func` in-place. The injected function is defined
+// inside the same vm context as the rest of widevine.js, so it picks
+// up whatever globals we put on `sandbox` at call time.
+function loadHarness({ pageMKSA = null, pageFetch = null } = {}) {
   const win = {
     addEventListener: () => {},
     removeEventListener: () => {},
     dispatchEvent: () => true,
   };
+  const baseNavigator = { clipboard: { writeText: async () => {} } };
   const sandbox = {
     window: win,
     self: win,
@@ -27,7 +35,31 @@ function loadHarness({ stubEME = null, stubFetch = null } = {}) {
     },
     chrome: {
       runtime: { id: 'test-ext', connectNative: () => { throw new Error('no native in test'); } },
-      tabs: {},
+      tabs: {
+        query: async () => [{ id: 1, windowId: 0, url: 'https://example.test/' }],
+        get: async (id) => ({ id, windowId: 0, url: 'https://example.test/' }),
+      },
+      scripting: {
+        executeScript: async ({ target, world, func, args }) => {
+          // Hot-swap page-world globals around the injected func.
+          const savedNav = sandbox.navigator;
+          const savedFetch = sandbox.fetch;
+          if (pageMKSA || pageFetch) {
+            sandbox.navigator = {
+              ...savedNav,
+              requestMediaKeySystemAccess: pageMKSA || savedNav.requestMediaKeySystemAccess,
+            };
+            if (pageFetch) sandbox.fetch = pageFetch;
+          }
+          try {
+            const result = await Promise.resolve(func.apply(null, args || []));
+            return [{ result }];
+          } finally {
+            sandbox.navigator = savedNav;
+            sandbox.fetch = savedFetch;
+          }
+        }
+      },
       storage: { local: { get: async () => ({}), set: async () => {} } },
       cookies: {},
       history: {},
@@ -36,7 +68,7 @@ function loadHarness({ stubEME = null, stubFetch = null } = {}) {
     },
     indexedDB: {},
     crypto: { subtle: {}, getRandomValues: (a) => a },
-    fetch: stubFetch || (async () => ({ ok: false, status: 0 })),
+    fetch: async () => ({ ok: false, status: 0 }),
     URL: Object.assign(class extends URL {}, {
       createObjectURL: () => 'blob:test',
       revokeObjectURL: () => {}
@@ -57,9 +89,7 @@ function loadHarness({ stubEME = null, stubFetch = null } = {}) {
     console, Math, Date, JSON, Object, Array, Set, Map, Number, String,
     Boolean, RegExp, Error, Promise, atob, btoa,
     performance: { now: () => Date.now(), getEntriesByType: () => [] },
-    navigator: stubEME
-      ? { clipboard: { writeText: async () => {} }, requestMediaKeySystemAccess: stubEME }
-      : { clipboard: { writeText: async () => {} } },
+    navigator: baseNavigator,
     location: {}
   };
   sandbox.globalThis = sandbox;
@@ -72,6 +102,9 @@ function loadHarness({ stubEME = null, stubFetch = null } = {}) {
   for (const f of files) {
     vm.runInContext(fs.readFileSync(f, 'utf-8'), sandbox, { filename: f });
   }
+  // Expose the chrome stub on win too so individual tests can monkey-
+  // patch it (e.g. spy on chrome.tabs.get to assert routing behaviour).
+  win.chrome = sandbox.chrome;
   return win;
 }
 
@@ -202,14 +235,16 @@ test('widevine_extract_pssh requires at least one input', async () => {
   assert.ok(r.error, `expected error, got ${JSON.stringify(r)}`);
 });
 
-test('widevine_request_license fails cleanly when EME is not available', async () => {
-  const win = loadHarness();  // no stubEME → navigator.requestMediaKeySystemAccess undefined
+test('widevine_request_license fails cleanly when EME is not available in the page', async () => {
+  // No pageMKSA → the injected pageEmeFlow's requestMediaKeySystemAccess
+  // call rejects (undefined), which we capture as "EME setup failed".
+  const win = loadHarness();
   const r = await win.KyotoTools.call('widevine_request_license', {
     license_url: 'https://example.com/license',
     pssh: bytesToB64(buildPssh({ version: 0 }))
   });
   assert.ok(r.error, `expected error, got ${JSON.stringify(r)}`);
-  assert.ok(/requestMediaKeySystemAccess/i.test(r.error), `expected EME error, got: ${r.error}`);
+  assert.ok(/EME setup failed/i.test(r.error), `expected EME setup error, got: ${r.error}`);
 });
 
 function stubSession() {
@@ -267,7 +302,7 @@ test('widevine_request_license posts to the license server and returns usable ke
     })
   });
 
-  const win = loadHarness({ stubEME: stubMKSA, stubFetch });
+  const win = loadHarness({ pageMKSA: stubMKSA, pageFetch: stubFetch });
   const r = await win.KyotoTools.call('widevine_request_license', {
     license_url: 'https://lic.example/req',
     pssh: bytesToB64(buildPssh({ version: 0 })),
@@ -275,7 +310,6 @@ test('widevine_request_license posts to the license server and returns usable ke
   });
   assert.ok(!r.error, `unexpected error: ${r.error}`);
   assert.equal(r.success, true, JSON.stringify(r));
-  assert.equal(r.sessionId, 'test-session-1');
   assert.equal(r.keys.length, 1);
   assert.equal(r.keys[0].status, 'usable');
   assert.equal(r.keys[0].kid, '11112222333344445555666677778888');
@@ -294,14 +328,14 @@ test('widevine_request_license with challenge_only returns the challenge without
   const stubMKSA = async () => ({
     createMediaKeys: async () => ({ createSession: () => stubSession() })
   });
-  const win = loadHarness({ stubEME: stubMKSA, stubFetch });
+  const win = loadHarness({ pageMKSA: stubMKSA, pageFetch: stubFetch });
   const r = await win.KyotoTools.call('widevine_request_license', {
     license_url: 'https://lic.example/req',
     pssh: bytesToB64(buildPssh({ version: 0 })),
     challenge_only: true
   });
   assert.ok(!r.error, `unexpected error: ${r.error}`);
-  assert.ok(r.challenge, 'should return challenge');
+  assert.ok(r.challengeHex, 'should return challengeHex');
   assert.equal(r.challengeBytes, 6);  // matches stubSession's challenge
   assert.equal(fetched, false, 'challenge_only must NOT hit the license server');
 });
@@ -315,7 +349,7 @@ test('widevine_get_content_keys parses PSSH + fetches license in one call', asyn
   const stubMKSA = async () => ({
     createMediaKeys: async () => ({ createSession: () => stubSession() })
   });
-  const win = loadHarness({ stubEME: stubMKSA, stubFetch });
+  const win = loadHarness({ pageMKSA: stubMKSA, pageFetch: stubFetch });
   const box = buildPssh({ version: 1, kids: [hexToBytes('22223333444455556666777788889999')] });
   const r = await win.KyotoTools.call('widevine_get_content_keys', {
     license_url: 'https://lic.example/req',
@@ -332,12 +366,65 @@ test('widevine_get_content_keys parses PSSH + fetches license in one call', asyn
   );
 });
 
+test('widevine_extract_pssh tags un-parseable PSSH entries with an error (instead of silently dropping fields)', async () => {
+  const win = loadHarness();
+  // Inject a base64 that decodes to something that ISN'T a pssh box.
+  const bogus = Buffer.from(new Uint8Array(20).fill(0xab)).toString('base64');
+  const mpd = `<MPD><cenc:pssh xmlns:cenc="urn:mpeg:cenc:2013">${bogus}</cenc:pssh></MPD>`;
+  const r = await win.KyotoTools.call('widevine_extract_pssh', { mpd });
+  assert.equal(r.psshEntries.length, 1);
+  assert.equal(r.psshEntries[0].b64, bogus);
+  assert.ok(r.psshEntries[0].error, `expected error field, got ${JSON.stringify(r.psshEntries[0])}`);
+});
+
+test('widevine_request_license reports session.update failures (e.g. malformed license)', async () => {
+  // CDM rejects the license response. The injected flow must surface
+  // the error rather than hanging until the 35s timeout.
+  const stubFetch = async () => ({
+    ok: true, status: 200,
+    arrayBuffer: async () => new Uint8Array([0xde, 0xad]).buffer.slice(0),
+    text: async () => ''
+  });
+  function brokenSession() {
+    const s = stubSession();
+    s.update = async () => { throw new Error('CDM_PARSE_ERROR'); };
+    return s;
+  }
+  const stubMKSA = async () => ({
+    createMediaKeys: async () => ({ createSession: () => brokenSession() })
+  });
+  const win = loadHarness({ pageMKSA: stubMKSA, pageFetch: stubFetch });
+  const r = await win.KyotoTools.call('widevine_request_license', {
+    license_url: 'https://lic.example/req',
+    pssh: bytesToB64(buildPssh({ version: 0 }))
+  });
+  assert.ok(r.error, `expected error, got ${JSON.stringify(r)}`);
+  assert.ok(/session\.update failed/i.test(r.error) && /CDM_PARSE_ERROR/.test(r.error),
+    `expected session.update error, got: ${r.error}`);
+});
+
+test('widevine_request_license routes through an explicit tabId when supplied', async () => {
+  const tabsAsked = [];
+  const stubFetch = async () => ({ ok: true, arrayBuffer: async () => new Uint8Array().buffer.slice(0), text: async () => '' });
+  const stubMKSA = async () => ({ createMediaKeys: async () => ({ createSession: () => stubSession() }) });
+  const win = loadHarness({ pageMKSA: stubMKSA, pageFetch: stubFetch });
+  // Hook chrome.tabs.get to record which tab the tool resolved.
+  const origGet = win.chrome.tabs.get;
+  win.chrome.tabs.get = async (id) => { tabsAsked.push(id); return origGet(id); };
+  await win.KyotoTools.call('widevine_request_license', {
+    license_url: 'https://lic.example/req',
+    pssh: bytesToB64(buildPssh({ version: 0 })),
+    tabId: 42
+  });
+  assert.ok(tabsAsked.includes(42), `expected tabs.get(42), got ${JSON.stringify(tabsAsked)}`);
+});
+
 test('widevine_request_license surfaces license server failures', async () => {
   const stubFetch = async () => ({ ok: false, status: 403, text: async () => 'forbidden' });
   const stubMKSA = async () => ({
     createMediaKeys: async () => ({ createSession: () => stubSession() })
   });
-  const win = loadHarness({ stubEME: stubMKSA, stubFetch });
+  const win = loadHarness({ pageMKSA: stubMKSA, pageFetch: stubFetch });
   const r = await win.KyotoTools.call('widevine_request_license', {
     license_url: 'https://lic.example/req',
     pssh: bytesToB64(buildPssh({ version: 0 }))

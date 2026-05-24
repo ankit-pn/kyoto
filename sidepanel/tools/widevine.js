@@ -1,43 +1,41 @@
 // Widevine L3 decryptor — PSSH parsing, license server communication,
 // and key extraction via browser EME / CDM APIs.
 //
+// EME only works inside a *page* (MAIN world), not in the extension
+// side panel.  The license-request tools therefore inject a self-contained
+// async function into the active tab's main world so the CDM can operate.
+//
+// CRITICAL: Injected functions must ALWAYS resolve (never reject)
+// because chrome.scripting.executeScript puts rejections in `error`, not
+// `result`, and scrip() only reads `result`.  Errors are indicated by the
+// `error` field on the resolved object.
+//
 // Tools:
-//   widevine_parse_pssh         — Parse a base64 PSSH box into system ID, key IDs, version.
-//   widevine_extract_pssh       — Scan MPD/manifest text for PSSH entries; also accepts
-//                                 raw init-segment bytes (base64).
-//   widevine_request_license    — Use the browser's EME CDM to generate a license request for
-//                                 a PSSH, POST it to a license server, and return keys.
-//   widevine_get_content_keys   — Convenience: parse PSSH + request license in one call.
+//   widevine_parse_pssh         — Parse a base64 PSSH box.
+//   widevine_extract_pssh       — Scan MPD / init-segment for PSSH entries.
+//   widevine_cdm_info           — Probe whether Widevine L3 is available on
+//                                 the active tab.
+//   widevine_request_license    — Inject EME flow → generate challenge →
+//                                 POST to license server → return keys.
+//   widevine_get_content_keys   — Parse PSSH + request license in one call.
 
 (() => {
   'use strict';
-  const { T, STR, NUM, BOOL, OBJ, bg } = window.KyotoTR;
+  const { T, STR, NUM, BOOL, OBJ, activeTab, scrip } = window.KyotoTR;
 
-  // ── helpers: PSSH parsing ─────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+  //  H E L P E R S   (extension world — no EME here)
+  // ═══════════════════════════════════════════════════════════
 
   function b64ToBytes(b64) {
     const bin = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
     return new Uint8Array([...bin].map(c => c.charCodeAt(0)));
   }
 
-  function bytesToB64(bytes) {
-    const bin = String.fromCharCode(...bytes);
-    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  }
-
   function bytesToHex(bytes) {
     return [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
-  function hexToBytes(hex) {
-    const out = new Uint8Array(hex.length / 2);
-    for (let i = 0; i < hex.length; i += 2) out[i / 2] = parseInt(hex.substr(i, 2), 16);
-    return out;
-  }
-
-  // DataView must use the typed-array's own byteOffset / byteLength,
-  // otherwise reads against a subview land in the wrong slice of the
-  // underlying ArrayBuffer.
   function _dv(buf) {
     return new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   }
@@ -46,8 +44,7 @@
     if (offset + 12 > buf.length) return null;
     const dv = _dv(buf);
     const size = dv.getUint32(offset);
-    const pssh = dv.getUint32(offset + 4);
-    if (pssh !== 0x70737368) return null; // 'pssh'
+    if (dv.getUint32(offset + 4) !== 0x70737368) return null;
     if (offset + 28 > buf.length) return null;
     const version = dv.getUint8(offset + 8);
     const flags = (dv.getUint8(offset + 9) << 16) | (dv.getUint8(offset + 10) << 8) | dv.getUint8(offset + 11);
@@ -60,9 +57,8 @@
       kidCount = dv.getUint32(offset + 28);
       dataOffset = offset + 32;
       if (dataOffset + kidCount * 16 > buf.length) return null;
-      for (let i = 0; i < kidCount; i++) {
+      for (let i = 0; i < kidCount; i++)
         kids.push(buf.slice(dataOffset + i * 16, dataOffset + (i + 1) * 16));
-      }
       dataOffset += kidCount * 16;
     } else {
       dataOffset = offset + 28;
@@ -71,14 +67,10 @@
     const dataSize = dv.getUint32(dataOffset);
     if (dataOffset + 4 + dataSize > buf.length) return null;
     const data = buf.slice(dataOffset + 4, dataOffset + 4 + dataSize);
-    return {
-      size, version, flags,
-      systemId: bytesToHex(systemId),
-      systemIdBytes: bytesToB64(systemId),
-      keyIds: kids.map(k => bytesToHex(k)),
-      dataSize,
-      data: bytesToB64(data)
-    };
+    return { size, version, flags, dataSize,
+             systemId: bytesToHex(systemId),
+             keyIds: kids.map(k => bytesToHex(k)),
+             data, rawPsshSize: size };
   }
 
   function findPsshBoxes(buf) {
@@ -87,74 +79,44 @@
     for (let i = 0; i + 12 <= buf.length; i++) {
       try {
         if (dv.getUint32(i + 4) === 0x70737368) {
-          const pssh = parsePsshBox(buf, i);
-          if (pssh) {
-            boxes.push({ offset: i, ...pssh });
-            i += Math.max(1, pssh.size) - 1;
-          }
+          const p = parsePsshBox(buf, i);
+          if (p) { boxes.push({ offset: i, ...p }); i += Math.max(1, p.size) - 1; }
         }
       } catch {}
     }
     return boxes;
   }
 
-  // ── MPD helpers ────────
-
   function extractPsshFromMpd(mpd) {
     const results = [];
-    const psshRegex = /<cenc:pssh[^>]*>([^<]+)<\/cenc:pssh>/gi;
+    const re = /<cenc:pssh[^>]*>([^<]+)<\/cenc:pssh>/gi;
     let m;
-    while ((m = psshRegex.exec(mpd))) {
-      const psshB64 = m[1].trim();
+    while ((m = re.exec(mpd))) {
+      const b64 = m[1].trim();
       try {
-        const buf = b64ToBytes(psshB64);
-        const parsed = parsePsshBox(buf, 0);
-        results.push({ b64: psshB64, ...parsed });
-      } catch {
-        results.push({ b64: psshB64, error: 'Failed to parse PSSH' });
-      }
+        const buf = b64ToBytes(b64);
+        const p = parsePsshBox(buf, 0);
+        if (p) results.push({ b64, ...p });
+        else results.push({ b64, error: 'Not a valid PSSH box' });
+      } catch { results.push({ b64, error: 'Failed to parse' }); }
     }
     return results;
   }
 
-  // ── EME license flow ──────────────────────────────────
-
-  const WIDEVINE_SYSTEM_ID = 'edef8ba979d64acea3c827dcd51d21ed';
-
-  function toUint8Array(data) {
-    if (data instanceof Uint8Array) return data;
-    if (typeof data === 'string') return b64ToBytes(data);
-    if (Array.isArray(data)) return new Uint8Array(data);
-    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    throw new Error('Cannot convert to Uint8Array');
-  }
-
-  async function getKeySystemConfig() {
-    return [
-      {
-        initDataTypes: ['cenc', 'webm', 'keyids'],
-        videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.4d401e"' }],
-        audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
-        distinctiveIdentifier: 'optional',
-        persistentState: 'required',
-        sessionTypes: ['temporary', 'persistent-license']
-      }
-    ];
-  }
-
-  // ── TOOLS ────────
+  // ═══════════════════════════════════════════════════════════
+  //  T O O L S
+  // ═══════════════════════════════════════════════════════════
 
   T({
     name: 'widevine_parse_pssh',
     group: 'widevine',
-    description: 'Parse a base64-encoded PSSH box. Returns system ID (hex), version, flags, key IDs (hex), and raw data fields. The Widevine system ID is edef8ba9-79d6-4ace-a3c8-27dcd51d21ed.',
+    description: 'Parse a base64-encoded PSSH box. Returns system ID, version, flags, key IDs (hex), data size, and human-readable system name.',
     parameters: OBJ({ pssh: STR }, ['pssh']),
     handler: async ({ pssh }) => {
-      if (!pssh) throw new Error('pssh required (base64 string)');
       const buf = b64ToBytes(pssh);
-      const parsed = parsePsshBox(buf, 0);
-      if (!parsed) throw new Error('Not a valid PSSH box');
-      const knownSystems = {
+      const p = parsePsshBox(buf, 0);
+      if (!p) throw new Error('Not a valid PSSH box');
+      const systems = {
         'edef8ba979d64acea3c827dcd51d21ed': 'Widevine',
         '9a04f07998404286ab92e65be0885f95': 'PlayReady',
         '1077efecc0b24d02ace33c1e52e2fb4b': 'W3C Common',
@@ -162,9 +124,11 @@
         'a68129d3475b4f1aaca2512c09dcc2a7': 'FairPlay'
       };
       return {
-        ...parsed,
-        systemName: knownSystems[parsed.systemId] || 'Unknown',
-        systemIdGuid: parsed.systemId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5')
+        size: p.size, version: p.version, flags: p.flags,
+        systemId: p.systemId,
+        systemIdGuid: p.systemId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5'),
+        systemName: systems[p.systemId] || 'Unknown',
+        keyIds: p.keyIds, dataSize: p.dataSize
       };
     }
   });
@@ -172,276 +136,307 @@
   T({
     name: 'widevine_extract_pssh',
     group: 'widevine',
-    description: 'Extract PSSH boxes from DASH MPD XML or from a raw init segment (provided as base64). Searches for <cenc:pssh> elements in XML or scans the binary for pssh atoms. Returns all found PSSH entries with parsed key IDs and system IDs.',
-    parameters: OBJ({
-      mpd: STR,
-      init_segment_b64: STR,
-      url: STR
-    }),
+    description: 'Extract PSSH boxes from DASH MPD XML or a raw init segment (base64). Searches <cenc:pssh> elements in XML or scans binary for pssh atoms.',
+    parameters: OBJ({ mpd: STR, init_segment_b64: STR, url: STR }),
     handler: async ({ mpd, init_segment_b64, url } = {}) => {
-      let content = mpd;
-      if (!content && init_segment_b64) {
-        const buf = b64ToBytes(init_segment_b64);
-        const boxes = findPsshBoxes(buf);
-        return {
-          source: 'init-segment',
-          psshBoxes: boxes
-        };
+      if (mpd) {
+        const entries = extractPsshFromMpd(mpd);
+        return { source: 'mpd', system: /<ContentProtection/i.test(mpd) ? 'DASH' : 'Unknown', psshEntries: entries };
       }
-      if (!content && url) {
+      if (init_segment_b64) {
+        const buf = b64ToBytes(init_segment_b64);
+        return { source: 'init-segment', psshBoxes: findPsshBoxes(buf) };
+      }
+      if (url) {
         const res = await fetch(url, { credentials: 'omit' });
         if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
-        content = await res.text();
+        const text = await res.text();
+        if (/<cenc:pssh/i.test(text))
+          return { source: 'url', system: 'DASH', psshEntries: extractPsshFromMpd(text) };
+        const buf = b64ToBytes(text);
+        return { source: 'url (binary)', psshBoxes: findPsshBoxes(buf) };
       }
-      if (!content) throw new Error('Provide mpd, init_segment_b64, or url');
-      if (/<cenc:pssh/i.test(content)) {
-        const psshEntries = extractPsshFromMpd(content);
-        return {
-          source: mpd ? 'mpd' : 'url',
-          system: /<ContentProtection/i.test(content) ? 'DASH' : 'Unknown',
-          psshEntries
-        };
-      }
-      const buf = b64ToBytes(content);
-      const boxes = findPsshBoxes(buf);
-      return {
-        source: 'raw-data',
-        psshBoxes: boxes
-      };
+      throw new Error('Provide mpd, init_segment_b64, or url');
     }
   });
 
   T({
+    name: 'widevine_cdm_info',
+    group: 'widevine',
+    description: 'Probe the active tab to check if Widevine (com.widevine.alpha) is available. Returns CDM status, robustness levels, and whether persistent state is supported. Use this to confirm the page can run EME before calling other widevine tools.',
+    parameters: OBJ({ tabId: NUM }),
+    handler: async ({ tabId } = {}) => {
+      const t = tabId != null ? await chrome.tabs.get(tabId) : await activeTab();
+      return scrip(t.id, function() {
+        try {
+          if (typeof navigator === 'undefined' || !navigator.requestMediaKeySystemAccess)
+            return { available: false, error: 'requestMediaKeySystemAccess not available' };
+          return navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
+            initDataTypes: ['cenc', 'webm'],
+            videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.4d401e"' }],
+            audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
+            distinctiveIdentifier: 'optional',
+            persistentState: 'optional',
+            sessionTypes: ['temporary', 'persistent-license']
+          }]).then(function(access) {
+            var cfg = access.getConfiguration();
+            return {
+              available: true, keySystem: access.keySystem,
+              distinctiveIdentifier: cfg.distinctiveIdentifier,
+              persistentState: cfg.persistentState,
+              sessionTypes: cfg.sessionTypes,
+              audioContentTypes: (cfg.audioCapabilities || []).map(function(c) { return c.contentType; }),
+              videoContentTypes: (cfg.videoCapabilities || []).map(function(c) { return c.contentType; }),
+              initDataTypes: cfg.initDataTypes
+            };
+          }).catch(function(e) {
+            return { available: false, error: e.message || String(e) };
+          });
+        } catch (e) {
+          return { available: false, error: e.message || String(e) };
+        }
+      }, [], 'MAIN');
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  //  S H A R E D    E M E    I N J E C T E D    F U N C T I O N
+  //
+  // Both widevine_request_license and widevine_get_content_keys
+  // need to run a full EME license-request flow inside the page's
+  // MAIN world.  Instead of duplicating the logic we define a
+  // single helper and pass a mode flag.
+  //
+  // IMPORTANT: this function MUST always resolve (never reject).
+  // Errors are in the `error` field of the resolved object.
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * Run the full EME license flow inside the target tab's MAIN world.
+   *
+   * @param {object} param0
+   * @param {string}  param0.psshB64        - base64 PSSH init data
+   * @param {string}  param0.licenseUrl     - license server URL
+   * @param {object|null} param0.headersObj - extra headers for license POST
+   * @param {boolean} param0.challengeOnly  - stop after generating challenge
+   * @returns {Promise<object>}  { keys?, challengeHex?, sessionId?, error? }
+   */
+  async function emeFlowInPage({ psshB64, licenseUrl, headersObj, challengeOnly, tabId }) {
+    const tab = tabId != null ? await chrome.tabs.get(tabId) : await activeTab();
+
+    /**
+     * ╔══════════════════════════════════════════════════════╗
+     * ║  THIS FUNCTION RUNS IN THE  P A G E   MAIN WORLD   ║
+     * ║  — no outer references, fully self-contained —      ║
+     * ║  — ALWAYS resolves, errors in `error` field —       ║
+     * ╚══════════════════════════════════════════════════════╝
+     */
+    function pageEmeFlow(psshB64, licenseUrl, headersObj, challengeOnly) {
+      function _b64ToBytes(b64) {
+        var bin = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
+        var out = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+      }
+      function _hex(buf) {
+        var h = '';
+        for (var i = 0; i < buf.length; i++) h += buf[i].toString(16).padStart(2, '0');
+        return h;
+      }
+
+      var cfg = [{
+        initDataTypes: ['cenc', 'webm'],
+        videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.4d401e"' }],
+        audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
+        distinctiveIdentifier: 'optional',
+        persistentState: 'required',
+        sessionTypes: ['temporary', 'persistent-license']
+      }];
+
+      return new Promise(function(resolve) {
+        var settled = false, tid = null, iid = null;
+
+        function cleanup() {
+          if (tid != null) { clearTimeout(tid); tid = null; }
+          if (iid != null) { clearInterval(iid); iid = null; }
+        }
+        function ok(val) {
+          if (settled) return;
+          settled = true; cleanup(); resolve(val);
+        }
+        function err(msg) {
+          if (settled) return;
+          settled = true; cleanup(); resolve({ error: msg });
+        }
+        function collectKeys(session) {
+          var keys = [], usable = [];
+          session.keyStatuses.forEach(function(st, kid) {
+            var k = { kid: _hex(new Uint8Array(kid)), status: st };
+            keys.push(k);
+            if (st === 'usable') usable.push(k.kid);
+          });
+          return { keys: keys, usableKeys: usable, success: usable.length > 0 };
+        }
+
+        // ── start ──
+        var initData;
+        try { initData = _b64ToBytes(psshB64); } catch (e) { return err('Invalid PSSH base64'); }
+
+        // Wrap in try so a synchronous throw (e.g. requestMediaKeySystemAccess
+        // missing entirely) still routes through err() instead of escaping
+        // the Promise body as a bare TypeError.
+        try {
+          navigator.requestMediaKeySystemAccess('com.widevine.alpha', cfg).then(function(access) {
+            return access.createMediaKeys();
+          }).then(function(mk) {
+          var session = mk.createSession('temporary');
+          var requestSent = false;
+
+          session.addEventListener('message', function(event) {
+            if (settled) return;
+            if (event.messageType === 'individualization-request') {
+              return err('Device needs provisioning (individualization required)');
+            }
+            if (event.messageType !== 'license-request') return;
+            if (requestSent) return;
+            requestSent = true;
+
+            var challenge = new Uint8Array(event.message);
+
+            if (challengeOnly) {
+              return ok({
+                challengeHex: _hex(challenge),
+                challengeBytes: challenge.length,
+                sessionId: session.sessionId || ''
+              });
+            }
+
+            // POST to license server
+            var hdrs = { 'Content-Type': 'application/octet-stream' };
+            if (headersObj) {
+              var hk = Object.keys(headersObj);
+              for (var i = 0; i < hk.length; i++) hdrs[hk[i]] = headersObj[hk[i]];
+            }
+
+            fetch(licenseUrl, {
+              method: 'POST',
+              headers: hdrs,
+              body: challenge.buffer.slice(challenge.byteOffset, challenge.byteOffset + challenge.byteLength),
+              credentials: 'omit'
+            }).then(function(res) {
+              if (!res.ok) {
+                return res.text().catch(function() { return ''; }).then(function(t) {
+                  err('License server HTTP ' + res.status + (t ? ': ' + t.slice(0, 400) : ''));
+                });
+              }
+              return res.arrayBuffer()
+                .then(function(buf) { return session.update(new Uint8Array(buf)); })
+                .catch(function(e) { err('session.update failed: ' + (e.message || String(e))); });
+            }).catch(function(e) {
+              err('License fetch failed: ' + (e.message || String(e)));
+            });
+          });
+
+          session.addEventListener('keystatuseschange', function() {
+            if (session.keyStatuses.size > 0) ok(collectKeys(session));
+          });
+
+          // belt-and-braces poll — some CDMs don't fire the event
+          iid = setInterval(function() {
+            if (!settled && session.keyStatuses.size > 0) ok(collectKeys(session));
+          }, 250);
+
+          tid = setTimeout(function() {
+            if (!settled) err('License request timed out after 35s');
+          }, 35000);
+
+          return session.generateRequest('cenc', initData);
+        }).catch(function(e) {
+          err('EME setup failed: ' + (e.message || String(e)));
+        });
+        } catch (e) {
+          err('EME setup failed: ' + (e.message || String(e)));
+        }
+      });
+    }
+
+    const result = await scrip(tab.id, pageEmeFlow,
+      [psshB64, licenseUrl, headersObj, !!challengeOnly], 'MAIN');
+
+    if (!result) throw new Error('EME injection returned nothing');
+    if (result.error) throw new Error(result.error);
+    return result;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  widevine_request_license
+  // ═══════════════════════════════════════════════════════════
+
+  T({
     name: 'widevine_request_license',
     group: 'widevine',
-    description: 'Request a Widevine license from a license server. Uses the browser CDM to generate a proper license challenge from the PSSH, sends it to the license server, and processes the response. Returns the license response content (base64) and any extracted metadata. Set challenge_only=true to get the license challenge without sending it.',
+    description: 'Request a Widevine license from a license server. Injects the EME flow into the active page\'s MAIN world so the CDM can generate a challenge. POSTs the challenge to the license server with optional custom headers (e.g. Authorization, x-cr-video-token), then returns key IDs and statuses. Set challenge_only=true to get just the challenge without contacting the server.',
     parameters: OBJ({
       license_url: STR,
       pssh: STR,
       headers: OBJ(),
       challenge_only: BOOL,
-      session_type: { type: 'string', enum: ['temporary', 'persistent-license'] }
+      tabId: NUM
     }, ['license_url', 'pssh']),
-    handler: async ({ license_url, pssh, headers, challenge_only, session_type } = {}) => {
+    handler: async ({ license_url, pssh, headers, challenge_only, tabId } = {}) => {
       if (!pssh) throw new Error('pssh required');
       if (!challenge_only && !license_url) throw new Error('license_url required (or set challenge_only: true)');
-      const initData = b64ToBytes(pssh);
-
-      const keySystemAccess = await navigator.requestMediaKeySystemAccess(
-        'com.widevine.alpha',
-        await getKeySystemConfig()
-      );
-      const mediaKeys = await keySystemAccess.createMediaKeys();
-      const session = mediaKeys.createSession(session_type || 'temporary');
-
-      return new Promise((resolve, reject) => {
-        let settled = false;
-        let licenseInfo = null;
-        let timeoutHandle = null;
-        let intervalHandle = null;
-
-        const cleanup = () => {
-          if (timeoutHandle != null) { clearTimeout(timeoutHandle); timeoutHandle = null; }
-          if (intervalHandle != null) { clearInterval(intervalHandle); intervalHandle = null; }
-        };
-        const done = (resOrErr, isErr = false) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          isErr ? reject(resOrErr) : resolve(resOrErr);
-        };
-
-        const onMessage = async (event) => {
-          if (settled) return;
-          if (event.messageType === 'individualization-request') {
-            done({
-              error: 'Individualization required. This device needs provisioning before license requests.',
-              sessionId: session.sessionId
-            });
-            return;
-          }
-          if (event.messageType !== 'license-request') return;
-
-          const challenge = new Uint8Array(event.message);
-          if (challenge_only) {
-            done({
-              challenge: bytesToB64(challenge),
-              challengeHex: bytesToHex(challenge),
-              challengeBytes: challenge.length,
-              sessionId: session.sessionId,
-              messageType: event.messageType
-            });
-            return;
-          }
-          try {
-            const res = await fetch(license_url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/octet-stream', ...(headers || {}) },
-              body: challenge.buffer.slice(challenge.byteOffset, challenge.byteOffset + challenge.byteLength),
-              credentials: 'omit'
-            });
-            if (!res.ok) {
-              const errBody = await res.text().catch(() => '');
-              done(new Error(`License server returned HTTP ${res.status}${errBody ? ': ' + errBody.slice(0, 200) : ''}`), true);
-              return;
-            }
-            const licenseBuf = await res.arrayBuffer();
-            licenseInfo = { licenseSize: licenseBuf.byteLength };
-            await session.update(new Uint8Array(licenseBuf));
-            // session.update doesn't directly emit a useful event; the
-            // CDM may fire keystatuseschange. If keys are already there
-            // resolve now; otherwise let the keystatuseschange poll do it.
-            if (session.keyStatuses.size > 0) finalize();
-          } catch (e) {
-            done(new Error(`License request failed: ${e.message}`), true);
-          }
-        };
-
-        const finalize = () => {
-          if (settled) return;
-          const keys = [];
-          session.keyStatuses.forEach((status, keyId) => {
-            keys.push({ kid: bytesToHex(new Uint8Array(keyId)), status });
-          });
-          done({
-            success: keys.some(k => k.status === 'usable'),
-            sessionId: session.sessionId,
-            licenseServerResponse: licenseInfo,
-            keys,
-            note: keys.length === 0
-              ? 'No keys were obtained. The license server may require additional headers, a token, or device provisioning.'
-              : undefined
-          });
-        };
-
-        session.addEventListener('message', onMessage);
-        session.addEventListener('keystatuseschange', () => {
-          if (session.keyStatuses.size > 0) finalize();
-        });
-
-        // Belt-and-braces: some CDMs don't fire keystatuseschange after
-        // session.update — poll briefly so we still return.
-        intervalHandle = setInterval(() => {
-          if (session.keyStatuses.size > 0) finalize();
-        }, 250);
-
-        timeoutHandle = setTimeout(() => {
-          if (session.keyStatuses.size > 0) finalize();
-          else done(new Error('License request timed out after 30s'), true);
-        }, 30000);
-
-        session.generateRequest('cenc', initData).catch(e => done(e, true));
+      return emeFlowInPage({
+        psshB64: pssh,
+        licenseUrl: license_url || '',
+        headersObj: headers || null,
+        challengeOnly: !!challenge_only,
+        tabId
       });
     }
   });
 
+  // ═══════════════════════════════════════════════════════════
+  //  widevine_get_content_keys
+  // ═══════════════════════════════════════════════════════════
+
   T({
     name: 'widevine_get_content_keys',
     group: 'widevine',
-    description: 'Convenience tool: parse a PSSH and request a Widevine license from the server in one call. Returns key IDs and their statuses. Equivalent to calling widevine_parse_pssh followed by widevine_request_license with the parsed PSSH.',
+    description: 'Parse a PSSH and request a Widevine license from the server in one call. Runs EME in the page\'s MAIN world. Supply auth headers (e.g. Authorization, x-cr-video-token) for services like Crunchyroll that require tokens. Returns key IDs with CDM statuses (usable/expired/output-restricted) plus basic PSSH metadata.',
     parameters: OBJ({
       license_url: STR,
       pssh: STR,
-      headers: OBJ()
+      headers: OBJ(),
+      tabId: NUM
     }, ['license_url', 'pssh']),
-    handler: async ({ license_url, pssh, headers } = {}) => {
-      const buf = b64ToBytes(pssh);
-      const parsed = parsePsshBox(buf, 0);
-      if (!parsed) throw new Error('Invalid PSSH box');
+    handler: async ({ license_url, pssh, headers, tabId } = {}) => {
+      if (!pssh) throw new Error('pssh required');
+      if (!license_url) throw new Error('license_url required');
 
-      const initData = buf;
-      const keySystemConfig = await getKeySystemConfig();
-      const keySystemAccess = await navigator.requestMediaKeySystemAccess(
-        'com.widevine.alpha',
-        keySystemConfig
-      );
+      let psshInfo = null;
+      try {
+        const buf = b64ToBytes(pssh);
+        const p = parsePsshBox(buf, 0);
+        if (p) {
+          psshInfo = {
+            systemId: p.systemId,
+            systemIdGuid: p.systemId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5'),
+            systemName: p.systemId === 'edef8ba979d64acea3c827dcd51d21ed' ? 'Widevine' : 'Unknown',
+            keyIds: p.keyIds, dataSize: p.dataSize
+          };
+        }
+      } catch {}
 
-      const mediaKeys = await keySystemAccess.createMediaKeys();
-      const session = mediaKeys.createSession('temporary');
-
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('License request timed out after 30s'));
-        }, 30000);
-
-        let messageHandler;
-        messageHandler = async (event) => {
-          if (event.messageType === 'individualization-request') {
-            clearTimeout(timeout);
-            resolve({
-              error: 'Individualization required',
-              psshInfo: {
-                systemId: parsed.systemId,
-                keyIds: parsed.keyIds,
-                systemIdGuid: parsed.systemId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5')
-              }
-            });
-            return;
-          }
-
-          if (event.messageType !== 'license-request') return;
-
-          const challenge = new Uint8Array(event.message);
-          try {
-            const fetchHeaders = { 'Content-Type': 'application/octet-stream', ...(headers || {}) };
-            const res = await fetch(license_url, {
-              method: 'POST',
-              headers: fetchHeaders,
-              body: challenge.buffer.slice(0),
-              credentials: 'omit'
-            });
-
-            if (!res.ok) {
-              const errBody = await res.text().catch(() => '');
-              clearTimeout(timeout);
-              reject(new Error(`License server HTTP ${res.status}: ${errBody.slice(0, 200)}`));
-              return;
-            }
-
-            const licenseBuf = await res.arrayBuffer();
-            await session.update(new Uint8Array(licenseBuf));
-          } catch (e) {
-            clearTimeout(timeout);
-            reject(e);
-          }
-        };
-
-        session.addEventListener('message', messageHandler);
-
-        session.addEventListener('keystatuseschange', () => {
-          const kidList = [];
-          const allUsable = [];
-          session.keyStatuses.forEach((status, keyId) => {
-            const kidHex = bytesToHex(new Uint8Array(keyId));
-            kidList.push({ kid: kidHex, status });
-            if (status === 'usable') allUsable.push(kidHex);
-          });
-
-          if (kidList.length > 0) {
-            clearTimeout(timeout);
-            session.removeEventListener('message', messageHandler);
-            resolve({
-              success: allUsable.length > 0,
-              psshInfo: {
-                systemId: parsed.systemId,
-                systemIdGuid: parsed.systemId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5'),
-                keyIds: parsed.keyIds
-              },
-              keys: kidList,
-              usableKeys: allUsable,
-              sessionId: session.sessionId,
-              note: allUsable.length === 0 && kidList.length > 0
-                ? 'Keys were returned but none are marked as "usable" by the CDM.'
-                : undefined
-            });
-          }
-        });
-
-        session.generateRequest('cenc', initData).catch((e) => {
-          clearTimeout(timeout);
-          reject(new Error(`generateRequest failed: ${e.message}`));
-        });
+      const result = await emeFlowInPage({
+        psshB64: pssh,
+        licenseUrl: license_url,
+        headersObj: headers || null,
+        challengeOnly: false,
+        tabId
       });
+
+      return { ...result, psshInfo };
     }
   });
 
