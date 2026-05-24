@@ -28,8 +28,8 @@
     function _safeFolder(name) {
       // Strip both filesystem-illegal characters AND shell metacharacters
       // (', `, $) — the workspace folder name flows through shell commands
-      // for the documents-mode mv and the devine mkdir. Leaving ' / $ /
-      // backtick in would let a folder like `My's Stuff` break those.
+      // for the documents-mode mv. Leaving ' / $ / backtick in would let a
+      // folder like `My's Stuff` break those.
       const cleaned = String(name || '').trim()
         .replace(/[\\/:*?"<>|'`$]+/g, '_')
         .replace(/^\.+/, '')

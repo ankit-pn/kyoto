@@ -61,7 +61,7 @@ function loadToolsHarness() {
 
   const files = [
     'core','workspace','browser','cookies','network','python','fs','media',
-    'shell','youtube','data','skills','widevine','drm','m3u8dl','crunchyroll','subagent','finalize'
+    'shell','youtube','data','skills','subagent','finalize'
   ].map(n => path.join(__dirname, '..', 'sidepanel', 'tools', `${n}.js`));
 
   for (const f of files) {
@@ -95,8 +95,6 @@ test('every expected tool family is registered', () => {
     'json_to_typescript','minimax_describe_tab', // data
     'memory_add','skill_list','ask_user', // skills
     'agent',                        // subagent
-    'widevine_parse_pssh','widevine_extract_pssh',
-    'widevine_request_license','widevine_get_content_keys', // widevine
   ];
   for (const n of must) {
     assert.ok(names.has(n), `missing tool: ${n}`);
@@ -160,7 +158,7 @@ test('KyotoWorkspace exposes folder/location and prefixes download paths', () =>
   assert.equal(win.KyotoWorkspace.relativePath('/leading-slash.txt'), 'Kyoto/leading-slash.txt');
   // Unsafe characters in the folder name get sanitised — both filesystem-
   // illegal chars (/, :, ?, etc.) AND shell metacharacters (', `, $) so
-  // the folder name is safe to interpolate into the devine mkdir command.
+  // the folder name is safe to interpolate into any shell command.
   win.KyotoWorkspace.setFromSettings({ workspaceFolder: 'My/Bad:Name?' });
   assert.equal(win.KyotoWorkspace.name(), 'My_Bad_Name_');
   win.KyotoWorkspace.setFromSettings({ workspaceFolder: "My's $Stuff `oops`" });
