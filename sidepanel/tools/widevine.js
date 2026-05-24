@@ -40,6 +40,17 @@
     return new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   }
 
+  // The agent sometimes calls with tabId: 0 thinking that means "the
+  // active tab" — but Chrome tab IDs are always positive integers, so 0
+  // makes chrome.tabs.get throw "No tab with id: 0". Treat 0, NaN,
+  // non-integers, and negatives as "no tabId" and fall through.
+  async function _resolveTab(tabId) {
+    if (Number.isInteger(tabId) && tabId > 0) {
+      return chrome.tabs.get(tabId);
+    }
+    return activeTab();
+  }
+
   function parsePsshBox(buf, offset) {
     if (offset + 12 > buf.length) return null;
     const dv = _dv(buf);
@@ -163,38 +174,68 @@
   T({
     name: 'widevine_cdm_info',
     group: 'widevine',
-    description: 'Probe the active tab to check if Widevine (com.widevine.alpha) is available. Returns CDM status, robustness levels, and whether persistent state is supported. Use this to confirm the page can run EME before calling other widevine tools.',
+    description: 'Probe the active tab to check if Widevine (com.widevine.alpha) is available. Tries a ladder of configurations from most-permissive ("just play this codec") to most-restrictive ("persistent license for offline"); returns the first one the CDM accepts. Use this to confirm the page can run EME before calling other widevine tools.',
     parameters: OBJ({ tabId: NUM }),
     handler: async ({ tabId } = {}) => {
-      const t = tabId != null ? await chrome.tabs.get(tabId) : await activeTab();
+      const t = await _resolveTab(tabId);
       return scrip(t.id, function() {
-        try {
-          if (typeof navigator === 'undefined' || !navigator.requestMediaKeySystemAccess)
-            return { available: false, error: 'requestMediaKeySystemAccess not available' };
-          return navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
-            initDataTypes: ['cenc', 'webm'],
-            videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.4d401e"' }],
+        // Self-contained probe — runs in the page's MAIN world.
+        if (typeof navigator === 'undefined' || !navigator.requestMediaKeySystemAccess)
+          return { available: false, error: 'requestMediaKeySystemAccess not available' };
+
+        // Ladder: most-common Widevine L3 first, then variants for
+        // sites that require persistent-license or different codecs.
+        var ladder = [
+          { label: 'L3-baseline', cfg: {
+            initDataTypes: ['cenc'],
             audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
-            distinctiveIdentifier: 'optional',
-            persistentState: 'optional',
-            sessionTypes: ['temporary', 'persistent-license']
-          }]).then(function(access) {
-            var cfg = access.getConfiguration();
-            return {
-              available: true, keySystem: access.keySystem,
-              distinctiveIdentifier: cfg.distinctiveIdentifier,
-              persistentState: cfg.persistentState,
-              sessionTypes: cfg.sessionTypes,
-              audioContentTypes: (cfg.audioCapabilities || []).map(function(c) { return c.contentType; }),
-              videoContentTypes: (cfg.videoCapabilities || []).map(function(c) { return c.contentType; }),
-              initDataTypes: cfg.initDataTypes
-            };
-          }).catch(function(e) {
-            return { available: false, error: e.message || String(e) };
-          });
-        } catch (e) {
-          return { available: false, error: e.message || String(e) };
+            videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.42E01E"' }]
+          }},
+          { label: 'L3-main30', cfg: {
+            initDataTypes: ['cenc'],
+            audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
+            videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.4d401e"' }]
+          }},
+          { label: 'L3-persistent', cfg: {
+            initDataTypes: ['cenc'],
+            audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
+            videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.42E01E"' }],
+            persistentState: 'required',
+            sessionTypes: ['persistent-license', 'temporary']
+          }}
+        ];
+
+        function tryNext(i, tried) {
+          if (i >= ladder.length) {
+            return { available: false, error: 'all configs rejected', tried: tried };
+          }
+          var entry = ladder[i];
+          try {
+            return navigator.requestMediaKeySystemAccess('com.widevine.alpha', [entry.cfg])
+              .then(function(access) {
+                var c = access.getConfiguration();
+                return {
+                  available: true,
+                  keySystem: access.keySystem,
+                  matchedConfig: entry.label,
+                  distinctiveIdentifier: c.distinctiveIdentifier,
+                  persistentState: c.persistentState,
+                  sessionTypes: c.sessionTypes,
+                  audioContentTypes: (c.audioCapabilities || []).map(function(x) { return x.contentType; }),
+                  videoContentTypes: (c.videoCapabilities || []).map(function(x) { return x.contentType; }),
+                  initDataTypes: c.initDataTypes
+                };
+              })
+              .catch(function(e) {
+                tried.push({ config: entry.label, error: e.message || String(e) });
+                return tryNext(i + 1, tried);
+              });
+          } catch (e) {
+            tried.push({ config: entry.label, error: e.message || String(e) });
+            return tryNext(i + 1, tried);
+          }
         }
+        return tryNext(0, []);
       }, [], 'MAIN');
     }
   });
@@ -222,7 +263,7 @@
    * @returns {Promise<object>}  { keys?, challengeHex?, sessionId?, error? }
    */
   async function emeFlowInPage({ psshB64, licenseUrl, headersObj, challengeOnly, tabId }) {
-    const tab = tabId != null ? await chrome.tabs.get(tabId) : await activeTab();
+    const tab = await _resolveTab(tabId);
 
     /**
      * ╔══════════════════════════════════════════════════════╗
@@ -244,14 +285,44 @@
         return h;
       }
 
-      var cfg = [{
-        initDataTypes: ['cenc', 'webm'],
-        videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.4d401e"' }],
-        audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
-        distinctiveIdentifier: 'optional',
-        persistentState: 'required',
-        sessionTypes: ['temporary', 'persistent-license']
-      }];
+      // Fallback ladder mirrors widevine_cdm_info — many sites reject
+      // the most-flexible config (persistent-license + persistentState
+      // optional) but happily accept a bare temporary-only one.
+      var configLadder = [
+        {
+          initDataTypes: ['cenc'],
+          audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
+          videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.42E01E"' }]
+        },
+        {
+          initDataTypes: ['cenc'],
+          audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
+          videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.4d401e"' }]
+        },
+        {
+          initDataTypes: ['cenc'],
+          audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
+          videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.42E01E"' }],
+          persistentState: 'required',
+          sessionTypes: ['persistent-license', 'temporary']
+        }
+      ];
+
+      function tryConfigs(i, tried) {
+        if (i >= configLadder.length) {
+          return Promise.reject(new Error('all configs rejected: ' + JSON.stringify(tried)));
+        }
+        try {
+          return navigator.requestMediaKeySystemAccess('com.widevine.alpha', [configLadder[i]])
+            .catch(function(e) {
+              tried.push(e.message || String(e));
+              return tryConfigs(i + 1, tried);
+            });
+        } catch (e) {
+          tried.push(e.message || String(e));
+          return tryConfigs(i + 1, tried);
+        }
+      }
 
       return new Promise(function(resolve) {
         var settled = false, tid = null, iid = null;
@@ -286,7 +357,7 @@
         // missing entirely) still routes through err() instead of escaping
         // the Promise body as a bare TypeError.
         try {
-          navigator.requestMediaKeySystemAccess('com.widevine.alpha', cfg).then(function(access) {
+          tryConfigs(0, []).then(function(access) {
             return access.createMediaKeys();
           }).then(function(mk) {
           var session = mk.createSession('temporary');

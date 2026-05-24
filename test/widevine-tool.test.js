@@ -419,6 +419,60 @@ test('widevine_request_license routes through an explicit tabId when supplied', 
   assert.ok(tabsAsked.includes(42), `expected tabs.get(42), got ${JSON.stringify(tabsAsked)}`);
 });
 
+test('widevine_request_license treats tabId:0 as missing and falls back to the active tab', async () => {
+  // Agents sometimes pass tabId: 0 when they mean "the active tab".
+  // Chrome rejects tabs.get(0) — make sure we don't.
+  const tabsGetCalls = [];
+  const stubFetch = async () => ({ ok: true, arrayBuffer: async () => new Uint8Array().buffer.slice(0), text: async () => '' });
+  const stubMKSA = async () => ({ createMediaKeys: async () => ({ createSession: () => stubSession() }) });
+  const win = loadHarness({ pageMKSA: stubMKSA, pageFetch: stubFetch });
+  const origGet = win.chrome.tabs.get;
+  win.chrome.tabs.get = async (id) => { tabsGetCalls.push(id); return origGet(id); };
+  const r = await win.KyotoTools.call('widevine_request_license', {
+    license_url: 'https://lic.example/req',
+    pssh: bytesToB64(buildPssh({ version: 0 })),
+    tabId: 0
+  });
+  assert.ok(!r.error, `expected success (fell back to active tab), got: ${r.error}`);
+  assert.ok(!tabsGetCalls.includes(0), `tabs.get(0) should NOT be called; calls were: ${JSON.stringify(tabsGetCalls)}`);
+});
+
+test('widevine_cdm_info walks the config ladder when the first config is rejected', async () => {
+  // Page rejects the first two configs, accepts the third. We should
+  // see matchedConfig: 'L3-persistent' and an `available: true`.
+  let calls = 0;
+  const pageMKSA = async (keySystem, configs) => {
+    calls++;
+    const cfg = configs[0];
+    if (calls < 3) throw new Error('Unsupported keySystem or supportedConfigurations');
+    return {
+      keySystem: 'com.widevine.alpha',
+      getConfiguration: () => ({
+        distinctiveIdentifier: 'optional',
+        persistentState: cfg.persistentState || 'optional',
+        sessionTypes: cfg.sessionTypes || ['temporary'],
+        audioCapabilities: cfg.audioCapabilities,
+        videoCapabilities: cfg.videoCapabilities,
+        initDataTypes: cfg.initDataTypes
+      })
+    };
+  };
+  const win = loadHarness({ pageMKSA });
+  const r = await win.KyotoTools.call('widevine_cdm_info', {});
+  assert.equal(r.available, true, JSON.stringify(r));
+  assert.equal(r.matchedConfig, 'L3-persistent');
+  assert.equal(calls, 3, 'should have tried all three configs');
+});
+
+test('widevine_cdm_info reports tried-list when every config is rejected', async () => {
+  const pageMKSA = async () => { throw new Error('Unsupported keySystem or supportedConfigurations'); };
+  const win = loadHarness({ pageMKSA });
+  const r = await win.KyotoTools.call('widevine_cdm_info', {});
+  assert.equal(r.available, false);
+  assert.ok(/all configs rejected/.test(r.error));
+  assert.ok(Array.isArray(r.tried) && r.tried.length === 3);
+});
+
 test('widevine_request_license surfaces license server failures', async () => {
   const stubFetch = async () => ({ ok: false, status: 403, text: async () => 'forbidden' });
   const stubMKSA = async () => ({
