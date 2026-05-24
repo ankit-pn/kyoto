@@ -213,7 +213,11 @@
       'CALL THIS after you accomplish a non-trivial task that required real exploration — not for trivial Q&A. ' +
       'To MODIFY an existing skill, use `skill_update` instead (cleaner partial-update semantics). ' +
       'Distill the WORKING APPROACH into a few hundred words: prereqs, the exact steps that succeeded, what *didn\'t* work and why, key gotchas. ' +
-      'Pass `domain` (the site or tool this skill applies to, e.g. "youtube.com" or "linear.app"; use "global" for OS-agnostic patterns), a short `name`, a one-line `description`, the `content` as markdown, and 2-6 short `tags`. ' +
+      'Pick `domain` deliberately: ' +
+      '"global" for any pattern that doesn\'t depend on a specific site (CLI tricks, code-search recipes, multi-tab orchestration patterns, agent meta-strategies) — these are loaded into EVERY session\'s system prompt regardless of the active tab. ' +
+      'A specific host (eTLD+1 like "youtube.com" or "linear.app") for site-bound playbooks — these only surface when the agent is on that domain. ' +
+      'If you\'re unsure, prefer "global" — narrow domain skills are easy to add later but hard to discover when buried under a single host. ' +
+      'Pass `name` (short), `description` (one line), `content` (markdown), `tags` (2-6 short). ' +
       'Returns `{ skill_id, domain }`.',
     parameters: OBJ({
       domain: STR, name: STR, description: STR, content: STR,

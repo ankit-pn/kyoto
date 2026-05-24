@@ -1809,12 +1809,15 @@
       '{ "skip": true, "reason": "..." }   // if the task was trivial (single tool, pure Q&A, no exploration)\n' +
       '— or —\n' +
       '{\n' +
-      '  "domain": "<eTLD+1 if site-bound, else \\"global\\">",\n' +
+      '  "domain": "<eTLD+1 if the playbook genuinely depends on this site; otherwise \\"global\\">",\n' +
       '  "name": "<imperative title, <60 chars>",\n' +
       '  "description": "<one-line summary, <200 chars>",\n' +
       '  "content": "<markdown playbook: ### Prereqs, ### Steps (numbered), ### What does NOT work, ### Gotchas>",\n' +
       '  "tags": ["<kebab-case>", ...]   // 2-6 tags\n' +
       '}\n\n' +
+      'Domain choice — be deliberate. "global" if the playbook is about a CLI tool, a code-search pattern, an agent meta-strategy, ' +
+      'or anything that\'d work on any host. Use the page URL\'s eTLD+1 only if the playbook genuinely wouldn\'t apply elsewhere ' +
+      '(site-specific selectors, service-specific API endpoints). When in doubt, prefer "global" — global skills surface in EVERY session.\n\n' +
       `Context — page URL: ${pageUrl || '(none)'}  · domain hint: ${domainHint}\n` +
       `User goal: ${goal}\n` +
       `Tool sequence (in order, max 30):\n${seq || '(none)'}\n` +
@@ -2223,10 +2226,17 @@
     });
     if (save?.error) { addMessage('assistant', `_Skill save failed: ${save.error}_`, { error: true }); return; }
     addMessage('assistant', `_💡 Saved skill **${name}** under \`${domain}\` (\`${save.skill_id}\`). ${events.length} captured actions distilled into ${content.length} chars of playbook._`);
-    // Refresh the per-domain cache so the system prompt picks it up.
-    if (typeof refreshSkillsForDomain === 'function') {
-      try { _skillsDomainCache.delete(domain); await refreshSkillsForDomain(domain); } catch {}
-    }
+    // Refresh the relevant cache so the system prompt picks it up.
+    // Globals live in their own cache; everything else is per-domain.
+    try {
+      if (domain === 'global') {
+        _invalidateGlobalSkills();
+        await refreshGlobalSkills();
+      } else {
+        _skillsDomainCache.delete(domain);
+        await refreshSkillsForDomain(domain);
+      }
+    } catch {}
   }
 
   async function oneShotCompletion(prompt, { maxTokens = 800, temperature = 0.2 } = {}) {
@@ -2486,8 +2496,11 @@
         addMessage('assistant', `_Delete failed: ${r.error}_`, { error: true });
         return;
       }
-      // Bust the per-domain cache so the next system-prompt build reflects the delete.
-      try { if (typeof _skillsDomainCache !== 'undefined') _skillsDomainCache.delete(existing.domain); } catch {}
+      // Bust the relevant cache so the next system-prompt build reflects the delete.
+      try {
+        if (existing.domain === 'global') _invalidateGlobalSkills();
+        else if (typeof _skillsDomainCache !== 'undefined') _skillsDomainCache.delete(existing.domain);
+      } catch {}
       addMessage('assistant', `_🗑️ Deleted skill **${existing.name}** (\`${skill_id}\`) from \`${existing.domain}\`._`);
       return;
     }
@@ -3672,29 +3685,64 @@
   // Per-domain skill cache for system-prompt enrichment. We re-fetch on
   // page change but skip if we already loaded this domain in the last
   // 5 min — keeps the hub call rate low and is fine: skills don't churn.
+  //
+  // Globals are tracked in a SEPARATE cache + state slot so they show
+  // up in every system prompt regardless of current tab (chrome://,
+  // about:blank, etc. would otherwise hide them).
   const _skillsDomainCache = new Map(); // domain -> { at: ms, items: [...] }
+  const _SKILLS_TTL_MS = 5 * 60 * 1000;
+  let _globalSkillsCache = null;        // { at, items }
+
   async function refreshSkillsForDomain(domain) {
     if (!domain) return;
     if (!window.KyotoSkillHub) return;
     const cfg = await window.KyotoSkillHub.config();
     if (!cfg.url || !cfg.key) return;
     const cached = _skillsDomainCache.get(domain);
-    if (cached && Date.now() - cached.at < 5 * 60 * 1000) {
+    if (cached && Date.now() - cached.at < _SKILLS_TTL_MS) {
       state.skillsForCurrentDomain = cached.items;
       state.skillsForCurrentDomainKey = domain;
       return;
     }
     try {
-      const r = await window.KyotoSkillHub.search(domain, '', 8, true);
+      // includeGlobal: false here — globals come from refreshGlobalSkills()
+      // and we don't want them double-counted in the per-domain slot.
+      const r = await window.KyotoSkillHub.search(domain, '', 8, false);
       if (r?.error) return;
-      const items = (r.items || []).map(s => ({
-        skill_id: s.skill_id, domain: s.domain, name: s.name, description: s.description,
-      }));
+      const items = (r.items || [])
+        .filter(s => s.domain !== 'global')
+        .map(s => ({
+          skill_id: s.skill_id, domain: s.domain, name: s.name, description: s.description,
+        }));
       _skillsDomainCache.set(domain, { at: Date.now(), items });
       state.skillsForCurrentDomain = items;
       state.skillsForCurrentDomainKey = domain;
     } catch {}
   }
+
+  // Global skills — always loaded, shown in every system prompt above
+  // the domain-specific section. Same 5-min TTL.
+  async function refreshGlobalSkills() {
+    if (!window.KyotoSkillHub) return;
+    const cfg = await window.KyotoSkillHub.config();
+    if (!cfg.url || !cfg.key) return;
+    if (_globalSkillsCache && Date.now() - _globalSkillsCache.at < _SKILLS_TTL_MS) {
+      state.globalSkills = _globalSkillsCache.items;
+      return;
+    }
+    try {
+      const r = await window.KyotoSkillHub.search('global', '', 12, false);
+      if (r?.error) return;
+      const items = (r.items || []).map(s => ({
+        skill_id: s.skill_id, domain: 'global', name: s.name, description: s.description,
+      }));
+      _globalSkillsCache = { at: Date.now(), items };
+      state.globalSkills = items;
+    } catch {}
+  }
+  // Expose internal bust hooks for the manager / save flow.
+  function _invalidateGlobalSkills() { _globalSkillsCache = null; state.globalSkills = []; }
+  function _invalidateAllSkills() { _skillsDomainCache.clear(); _invalidateGlobalSkills(); state.skillsForCurrentDomain = []; state.skillsForCurrentDomainKey = null; }
 
   async function refreshPageContext() {
     els.ctxDot.className = 'dot load';
@@ -3719,6 +3767,7 @@
       // Refresh the per-domain skill list so the system prompt can surface
       // them. Best-effort, cached for ~5 min to avoid spamming the hub.
       refreshSkillsForDomain(urlDomain(state.page.url || '')).catch(() => {});
+      refreshGlobalSkills().catch(() => {});
     } catch {
       state.page = null;
       els.ctxDot.className = 'dot err';
@@ -4420,31 +4469,50 @@
       );
     }
 
-    // Skills hub — surface skills already saved for this domain so the
-    // model knows to call skill_get instead of rediscovering the workflow.
-    // skillsForCurrentDomain is refreshed by refreshPageContext().
-    // Subagents are skipped: state.skillsForCurrentDomain tracks the
+    // Skills hub — surface skills already saved so the model knows to
+    // call skill_get instead of rediscovering the workflow.
+    //
+    // Two sections injected separately:
+    //   1. GLOBAL skills (apply anywhere, no domain dependency).
+    //   2. DOMAIN-specific skills for the current page's eTLD+1.
+    // Subagents skip both: state.skillsForCurrentDomain tracks the
     // user's foreground tab, not the subagent's bound tab, so injecting
-    // it would just add irrelevant noise. The subagent can call
-    // skill_list explicitly if it wants domain-specific playbooks.
-    if (!session._subagent && state.skillsForCurrentDomain?.length) {
-      const lines = state.skillsForCurrentDomain.slice(0, 8).map(s =>
-        `- ${s.name} (id: ${s.skill_id}, domain: ${s.domain}) — ${s.description || '(no description)'}`
-      );
-      const dom = state.skillsForCurrentDomainKey || 'global';
-      systemParts.push(
-        `🪄 Skills already saved for this domain (\`${dom}\`). ` +
-        `Two-step pattern: (1) if any entry below matches the user\'s task, call \`skill_get { skill_id }\` to read the full body — a 30s read can save 5-10 iterations. ` +
-        `(2) For a fresh task on a new domain, call \`skill_list { domain: "${dom}" }\` first to see ALL available skills cheaply (metadata only), then \`skill_get\` the relevant one. ` +
-        `Use \`skill_search\` only when listing returns too many results or you need substring matching.\n` +
-        lines.join('\n')
-      );
-    } else if (!session._subagent && state.skillsForCurrentDomainKey) {
-      // No skills loaded for this domain — still nudge the model to check.
-      systemParts.push(
-        `🪄 No skills cached yet for \`${state.skillsForCurrentDomainKey}\`. ` +
-        `BEFORE exploring, call \`skill_list { domain: "${state.skillsForCurrentDomainKey}" }\` once — it returns lightweight metadata for every skill on this domain so you can pick the right one with \`skill_get\`.`
-      );
+    // it would just add noise. Subagents can call skill_list themselves.
+    if (!session._subagent) {
+      const globals = state.globalSkills || [];
+      const dom = state.skillsForCurrentDomainKey;
+      const domSkills = state.skillsForCurrentDomain || [];
+
+      if (globals.length) {
+        const lines = globals.slice(0, 12).map(s =>
+          `- ${s.name} (id: ${s.skill_id}) — ${s.description || '(no description)'}`
+        );
+        systemParts.push(
+          `🪄 Global skills (apply on any site / domain-agnostic patterns). ` +
+          `If any of these matches the user's task, call \`skill_get { skill_id }\` to read the full body — a 30s read can save 5-10 iterations. ` +
+          `Discover more with \`skill_list { domain: "global" }\` or \`skill_search { query, includeGlobal: true }\`.\n` +
+          lines.join('\n')
+        );
+      }
+
+      if (domSkills.length) {
+        const lines = domSkills.slice(0, 8).map(s =>
+          `- ${s.name} (id: ${s.skill_id}) — ${s.description || '(no description)'}`
+        );
+        systemParts.push(
+          `🪄 Skills saved for this domain (\`${dom}\`). ` +
+          `Two-step pattern: (1) if one of these matches, \`skill_get { skill_id }\` for the body. ` +
+          `(2) For a fresh task on a new domain, call \`skill_list { domain: "${dom}" }\` to see ALL available skills cheaply, then \`skill_get\`. ` +
+          `Use \`skill_search\` when listing returns too many results.\n` +
+          lines.join('\n')
+        );
+      } else if (dom && dom !== 'global') {
+        systemParts.push(
+          `🪄 No skills cached yet for \`${dom}\`. ` +
+          `BEFORE exploring, call \`skill_list { domain: "${dom}" }\` once — it returns lightweight metadata for every skill on this domain so you can pick the right one with \`skill_get\`. ` +
+          `If you discover a useful workflow that's NOT site-specific, save it with \`skill_save { domain: "global", ... }\` so future sessions see it everywhere.`
+        );
+      }
     }
 
     if (els.useContext.checked && state.page?.content && isActive(session.id)) {
@@ -4620,9 +4688,9 @@
         return;
       }
       _skillsManager.items = r.items || [];
-      // Bust the per-domain enrichment cache so the next system-prompt
-      // build reflects any edits/deletes done here.
-      _skillsDomainCache.clear();
+      // Bust both caches so the next system-prompt build reflects any
+      // edits / deletes done in the manager — including global edits.
+      _invalidateAllSkills();
       renderSkillsManager();
     } catch (e) {
       els.skillsList.innerHTML = `<p class="status err">Error: ${esc(e.message)}</p>`;
@@ -5835,9 +5903,9 @@
         skillsHubUrl !== (state.settings.skillsHubUrl || '') ||
         skillsHubKey !== (state.settings.skillsHubKey || '');
       if (hubChanged) {
-        try { _skillsDomainCache.clear(); } catch {}
-        state.skillsForCurrentDomain = [];
-        state.skillsForCurrentDomainKey = null;
+        // New hub URL/key → both per-domain AND global caches are
+        // stale (different hub = different skill set).
+        try { _invalidateAllSkills(); } catch {}
       }
 
       await saveSettings({
