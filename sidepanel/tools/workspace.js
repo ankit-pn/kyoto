@@ -243,11 +243,16 @@
       let blob;
       if (vfsPath) {
         if (!window.KyotoVFS) throw new Error('VFS not available');
-        const data = await window.KyotoVFS.read(vfsPath, { encoding: 'binary' });
-        // KyotoVFS returns { content: <base64>, mime, size, ... }
-        const b64 = (data && data.content) || '';
+        // VFS binary mode returns { base64, bytes, totalSize } — no mime.
+        // Pull mime separately via stat() so the saved file gets the
+        // right Content-Type when chrome.downloads writes it.
+        const [data, st] = await Promise.all([
+          window.KyotoVFS.read(vfsPath, { encoding: 'binary' }),
+          window.KyotoVFS.stat(vfsPath).catch(() => null)
+        ]);
+        const b64 = data?.base64 || '';
         const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-        blob = new Blob([bin], { type: mime || data?.mime || 'application/octet-stream' });
+        blob = new Blob([bin], { type: mime || st?.mime || 'application/octet-stream' });
       } else if (content != null) {
         if (encoding === 'base64') {
           const bin = Uint8Array.from(atob(content), c => c.charCodeAt(0));

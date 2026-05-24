@@ -61,7 +61,7 @@ function loadToolsHarness() {
 
   const files = [
     'core','workspace','browser','cookies','network','python','fs','media',
-    'shell','youtube','data','skills','subagent','finalize'
+    'shell','youtube','data','skills','widevine','subagent','finalize'
   ].map(n => path.join(__dirname, '..', 'sidepanel', 'tools', `${n}.js`));
 
   for (const f of files) {
@@ -95,6 +95,8 @@ test('every expected tool family is registered', () => {
     'json_to_typescript','minimax_describe_tab', // data
     'memory_add','skill_list','ask_user', // skills
     'agent',                        // subagent
+    'widevine_parse_pssh','widevine_extract_pssh',
+    'widevine_request_license','widevine_get_content_keys', // widevine
   ];
   for (const n of must) {
     assert.ok(names.has(n), `missing tool: ${n}`);
