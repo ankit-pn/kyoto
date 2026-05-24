@@ -91,6 +91,25 @@ test('m3u8dl_check_setup reports shell host missing when bridge unavailable', as
   assert.ok(r.missing.includes('shellHost'));
 });
 
+test('_findWvd probe also searches the macOS-specific WVDs path', async () => {
+  // The Python probe should glob in `~/Library/Application Support/devine/WVDs`
+  // in addition to `~/.config/devine/devices`. The shell handler captures
+  // every command so we can assert the path was included verbatim.
+  let probeCmd = null;
+  const { win } = loadHarness({
+    shellHandler: async (cmd) => {
+      if (/devine\/devices|devine\/WVDs|kyoto\/wvd/.test(cmd)) { probeCmd = cmd; return { exitCode: 0, stdout: '' }; }
+      return { exitCode: 0, stdout: '' };
+    }
+  });
+  await win.KyotoTools.call('m3u8dl_check_setup', {});
+  assert.ok(probeCmd, 'expected the wvd probe to run');
+  assert.ok(/Library\/Application Support\/devine\/WVDs/.test(probeCmd),
+    `probe command should include macOS WVDs path, got: ${probeCmd}`);
+  assert.ok(/\.config\/devine\/devices/.test(probeCmd),
+    `probe command should still include Linux path, got: ${probeCmd}`);
+});
+
 test('m3u8dl_check_setup ready=true when every piece is present', async () => {
   const { win } = loadHarness({
     shellHandler: async (cmd) => {

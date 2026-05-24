@@ -76,11 +76,19 @@
     return null;
   }
 
+  // devine uses Python's `appdirs` to resolve its WVDs directory, so the
+  // actual location is platform-specific:
+  //   Linux:   ~/.config/devine/devices/
+  //   macOS:   ~/Library/Application Support/devine/WVDs/
+  //   Windows: %APPDATA%/devine/devices/
+  // Plus we also accept ~/.config/kyoto/wvd/ as a Kyoto-specific override
+  // that's easy to remember regardless of OS.
   async function _findWvd() {
     const py = await _findWorkingPython() || 'python3';
     const r = await _shell(
       `${py} -c "import pathlib, os; ` +
       `roots=[pathlib.Path.home()/'.config/devine/devices', ` +
+      `pathlib.Path.home()/'Library/Application Support/devine/WVDs', ` +
       `pathlib.Path.home()/'.config/kyoto/wvd', ` +
       `pathlib.Path(os.environ.get('APPDATA',''))/'devine/devices' if os.environ.get('APPDATA') else None]; ` +
       `roots=[r for r in roots if r and r.exists()]; ` +
@@ -324,7 +332,7 @@
       else {
         out.wvd = { ok: false };
         missing.push('wvd');
-        instructions.push('⚠️  THE HARD PART: place a Widevine device file at `~/.config/devine/devices/<name>.wvd` (or `~/.config/kyoto/wvd/`). Kyoto does NOT distribute .wvd files — they are leaked CDM identities and sourcing one is on you. Without a .wvd, NOTHING in the pipeline can decrypt anything.');
+        instructions.push('⚠️  THE HARD PART: place a Widevine device file in the platform-appropriate WVDs dir — Linux: `~/.config/devine/devices/`, macOS: `~/Library/Application Support/devine/WVDs/`, Windows: `%APPDATA%/devine/devices/`. Run `devine env info` to confirm the exact path. Kyoto does NOT distribute .wvd files — they are leaked CDM identities and sourcing one is on you. Without a .wvd, NOTHING in the pipeline can decrypt anything.');
       }
 
       const ff = await _hasBinary('ffmpeg', ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg']);
@@ -379,7 +387,7 @@
       if (!wvdPath) {
         const found = await _findWvd();
         if (!found?.paths?.length) {
-          return { error: 'No .wvd device file found. Place one under ~/.config/devine/devices/ or ~/.config/kyoto/wvd/.' };
+          return { error: 'No .wvd device file found. Place one in the devine WVDs dir — `devine env info` shows the platform-specific path (macOS: `~/Library/Application Support/devine/WVDs/`, Linux: `~/.config/devine/devices/`, Windows: `%APPDATA%/devine/devices/`).' };
         }
         wvdPath = found.paths[0];
       }

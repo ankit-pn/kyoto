@@ -173,16 +173,20 @@
 
   // ──────── .wvd device file probe ────────
   //
-  // Devine looks for devices in `~/.config/devine/devices/` on Linux/macOS
-  // and `%APPDATA%/devine/devices/` on Windows. We check both. We can't
-  // know if a device is actually loadable without running devine — but
-  // presence of any .wvd file is a strong signal that setup is done.
+  // Devine uses Python's `appdirs` to resolve its WVDs directory, which
+  // is platform-specific:
+  //   Linux:   ~/.config/devine/devices/
+  //   macOS:   ~/Library/Application Support/devine/WVDs/
+  //   Windows: %APPDATA%/devine/devices/
+  // We can't know if a device is actually loadable without running devine
+  // — but presence of any .wvd file is a strong signal that setup is done.
 
   async function _findWvd() {
     const py = await _findWorkingPython() || 'python3';
     const r = await _shell(
       `${py} -c "import pathlib, os, sys; ` +
       `roots=[pathlib.Path.home()/'.config/devine/devices', ` +
+      `pathlib.Path.home()/'Library/Application Support/devine/WVDs', ` +
       `pathlib.Path(os.environ.get('APPDATA',''))/'devine/devices' if os.environ.get('APPDATA') else None]; ` +
       `roots=[r for r in roots if r and r.exists()]; ` +
       `hits=[str(f) for r in roots for f in r.glob('*.wvd')]; ` +
@@ -320,7 +324,9 @@
       else { out.wvd = { ok: false };
         missing.push('wvd');
         instructions.push(
-          '⚠️  THE HARD PART: place a Widevine device file at `~/.config/devine/devices/<name>.wvd` and ' +
+          '⚠️  THE HARD PART: place a Widevine device file in the platform-appropriate WVDs dir ' +
+          '(Linux: `~/.config/devine/devices/`, macOS: `~/Library/Application Support/devine/WVDs/`, ' +
+          'Windows: `%APPDATA%/devine/devices/` — run `devine env info` to confirm) and ' +
           'set it as the default in `~/.config/devine/devine.yaml` (`cdm.default: <name>`). ' +
           'Kyoto does NOT distribute .wvd files — these are leaked CDM identities tied to a specific device. ' +
           'Sourcing one is on you (KeyDive on a rooted Android, or community channels). Without a .wvd, NOTHING ' +
@@ -407,7 +413,7 @@
       if (!wvd?.found) {
         return {
           error: 'No Widevine device file (.wvd) found',
-          searched: ['~/.config/devine/devices/', '%APPDATA%/devine/devices/'],
+          searched: ['~/.config/devine/devices/', '~/Library/Application Support/devine/WVDs/', '%APPDATA%/devine/devices/'],
           hint: 'Place a .wvd file in one of those folders and set it as the default in ~/.config/devine/devine.yaml under `cdm.default`. Kyoto does not distribute .wvd files — sourcing one is on you.'
         };
       }
