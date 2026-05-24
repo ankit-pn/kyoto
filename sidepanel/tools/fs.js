@@ -90,19 +90,29 @@
     name: 'fs_zip',
     group: 'fs',
     description:
-      'Bundle a workspace subtree into a ZIP and trigger a download to the user\'s Downloads folder. ' +
+      'Bundle a workspace subtree into a ZIP and save it under the user\'s on-disk workspace folder (see `workspace_info`). ' +
       '`path` selects the subtree to zip (default "/" = everything). `outputName` overrides the suggested filename (default `kyoto-workspace-<timestamp>.zip`). ' +
-      'Returns { ok, fileCount, bytes, downloadId, suggestedFilename } on success.',
+      'Returns { ok, fileCount, bytes, downloadId, suggestedFilename, savedTo, location, folder } on success.',
     parameters: OBJ({ path: STR, outputName: STR }),
     handler: async ({ path = '/', outputName } = {}) => {
       const blob = await _vfs().exportZip({ path });
       const ts = new Date().toISOString().replace(/[:.]/g, '-').replace(/-Z$/, 'Z');
       const filename = outputName || `kyoto-workspace-${ts}.zip`;
       const url = URL.createObjectURL(blob);
-      const downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
-      setTimeout(() => URL.revokeObjectURL(url), 120000);
-      const t = await _vfs().total();
-      return { ok: true, fileCount: t.fileCount, bytes: blob.size, downloadId, suggestedFilename: filename };
+      try {
+        const r = window.KyotoWorkspace
+          ? await window.KyotoWorkspace.downloadUrl({ url, filename })
+          : { downloadId: await chrome.downloads.download({ url, filename, saveAs: false }), path: filename };
+        const t = await _vfs().total();
+        return {
+          ok: true, fileCount: t.fileCount, bytes: blob.size,
+          downloadId: r.downloadId, suggestedFilename: filename,
+          savedTo: r.path, location: r.location, folder: r.folder,
+          ...(r.note ? { note: r.note } : {})
+        };
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 120000);
+      }
     }
   });
 

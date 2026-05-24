@@ -279,6 +279,26 @@
         <button class="btn-mini" id="workspaceClearBtn" type="button">Clear</button>
       </div>
 
+      <h3 class="drawer-section">Workspace folder (on disk)</h3>
+      <p class="hint">Subfolder name that every file the agent saves to disk (ZIPs, chat exports, <code>media_download</code>, <code>workspace_save</code>) is placed under. Default <strong>downloads-mode</strong> writes to <code>&lt;Chrome's Downloads dir&gt;/&lt;folder&gt;/</code>. <strong>Documents-mode</strong> additionally moves each file to <code>~/Documents/&lt;folder&gt;/</code> after the browser finishes the download — requires the Shell bridge below.</p>
+      <div class="field-row">
+        <div class="field">
+          <label>Folder name</label>
+          <input type="text" id="workspaceFolder" placeholder="Kyoto" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label>Location</label>
+          <select id="workspaceLocation">
+            <option value="downloads">Downloads (subfolder)</option>
+            <option value="documents">Documents (via shell bridge)</option>
+          </select>
+        </div>
+      </div>
+      <div class="mcp-actions">
+        <button class="btn-mini" id="workspaceProbeBtn" type="button">Probe location</button>
+        <p class="status" id="workspaceProbeStatus"></p>
+      </div>
+
       <h3 class="drawer-section">Shell bridge (native messaging)</h3>
       <p class="hint">The <code>shell_exec</code> tool lets the agent run real shell commands on your machine via a small Python host installed under your home directory. Once installed, no sudo or open port is involved — Chrome speaks to it over stdio.</p>
       <div class="field">
@@ -443,6 +463,7 @@
   <script src="vfs.js"></script>
   <script src="models-registry.js"></script>
   <script src="tools/core.js"></script>
+  <script src="tools/workspace.js"></script>
   <script src="tools/browser.js"></script>
   <script src="tools/cookies.js"></script>
   <script src="tools/network.js"></script>

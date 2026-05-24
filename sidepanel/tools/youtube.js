@@ -424,6 +424,12 @@
         return { error: 'url must be a full http(s) URL' };
       }
 
+      // If the user hasn't passed an explicit outputDir, route through
+      // the on-disk workspace so yt-dlp writes alongside everything
+      // else the agent generates.
+      let workspaceDir = null;
+      try { workspaceDir = await window.KyotoWorkspace?.shellDefaultDir(); } catch {}
+
       const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
       const buildCmd = (binary, { ytClients, noCookies = false, ytAuth = null } = {}) => {
         const parts = [binary];
@@ -445,7 +451,7 @@
           if (ytAuth.visitorData) extractorArgs.push(`visitor_data=${ytAuth.visitorData}`);
         }
         if (extractorArgs.length) parts.push('--extractor-args', sq(`youtube:${extractorArgs.join(';')}`));
-        const dir = (outputDir || '~/Downloads').replace(/\/+$/, '');
+        const dir = (outputDir || workspaceDir || '~/Downloads').replace(/\/+$/, '');
         parts.push('-o', sq(`${dir}/%(title)s.%(ext)s`));
         parts.push('--print', sq('after_move:filepath'));
         parts.push('--no-warnings');

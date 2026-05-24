@@ -216,6 +216,10 @@
     workspaceSummary: $('workspaceSummary'),
     workspaceZipBtn: $('workspaceZipBtn'),
     workspaceClearBtn: $('workspaceClearBtn'),
+    workspaceFolder: $('workspaceFolder'),
+    workspaceLocation: $('workspaceLocation'),
+    workspaceProbeBtn: $('workspaceProbeBtn'),
+    workspaceProbeStatus: $('workspaceProbeStatus'),
     shellExtId: $('shellExtId'),
     shellCopyIdBtn: $('shellCopyIdBtn'),
     shellInstallLabel: $('shellInstallLabel'),
@@ -2707,6 +2711,11 @@
     // as config. Too low and complex multi-tool tasks die half-way.
     maxAgentSteps: 50,
     maxAutoContinues: 2,
+    // On-disk workspace folder. Every chrome.downloads call from the
+    // agent (fs_zip, chat_export, media_download, workspace_save, …)
+    // gets prefixed with this folder. See sidepanel/tools/workspace.js.
+    workspaceFolder: 'Kyoto',
+    workspaceLocation: 'downloads', // 'downloads' | 'documents'
     // AWS S3 / S3-compatible (R2, Wasabi, MinIO, B2-S3) for the
     // s3_upload and media_download tools.
     s3AccessKeyId: '',
@@ -2802,11 +2811,20 @@
         await chrome.storage.local.set({ enabledGroups: state.settings.enabledGroups });
       }
     }
+    try {
+      window.KyotoWorkspace?.setFromSettings({
+        workspaceFolder: state.settings.workspaceFolder,
+        workspaceLocation: state.settings.workspaceLocation
+      });
+    } catch {}
     return state.settings;
   }
   async function saveSettings(patch) {
     Object.assign(state.settings, patch);
     await chrome.storage.local.set(patch);
+    if (patch && ('workspaceFolder' in patch || 'workspaceLocation' in patch)) {
+      try { window.KyotoWorkspace?.setFromSettings(patch); } catch {}
+    }
   }
   function keyFor(provider) { return state.settings.apiKeys?.[provider] || ''; }
   function currentApiKey() { return keyFor(state.settings.provider); }
@@ -4407,6 +4425,9 @@
     if (els.hideReasoning) els.hideReasoning.checked = !!state.settings.hideReasoning;
     if (els.testConnStatus) els.testConnStatus.textContent = '';
     if (els.backupStatus) els.backupStatus.textContent = '';
+    if (els.workspaceFolder) els.workspaceFolder.value = state.settings.workspaceFolder || 'Kyoto';
+    if (els.workspaceLocation) els.workspaceLocation.value = state.settings.workspaceLocation === 'documents' ? 'documents' : 'downloads';
+    if (els.workspaceProbeStatus) els.workspaceProbeStatus.textContent = '';
     if (els.s3AccessKeyId) els.s3AccessKeyId.value = state.settings.s3AccessKeyId || '';
     if (els.s3SecretAccessKey) els.s3SecretAccessKey.value = state.settings.s3SecretAccessKey || '';
     if (els.s3Region) els.s3Region.value = state.settings.s3Region || 'us-east-1';
@@ -5107,6 +5128,40 @@
       await window.KyotoVFS.clear();
       updateWorkspaceUI();
     });
+    if (els.workspaceProbeBtn) els.workspaceProbeBtn.addEventListener('click', async () => {
+      if (!els.workspaceProbeStatus) return;
+      els.workspaceProbeStatus.textContent = 'Probing…';
+      els.workspaceProbeStatus.className = 'status';
+      // Save the current form values before probing so describe() sees them.
+      const folder = window.KyotoWorkspace?._safeFolder?.((els.workspaceFolder?.value || '').trim()) || 'Kyoto';
+      const location = els.workspaceLocation?.value === 'documents' ? 'documents' : 'downloads';
+      try {
+        window.KyotoWorkspace?.setFromSettings({ workspaceFolder: folder, workspaceLocation: location });
+        const info = await window.KyotoWorkspace.describe();
+        if (info.location === 'documents' && info.documentsPath) {
+          els.workspaceProbeStatus.textContent = `Documents → ${info.documentsPath}`;
+          els.workspaceProbeStatus.className = 'status ok';
+        } else if (info.location === 'documents') {
+          els.workspaceProbeStatus.textContent = info.note || 'shell bridge unavailable — will fall back to Downloads';
+          els.workspaceProbeStatus.className = 'status err';
+        } else {
+          els.workspaceProbeStatus.textContent = `Downloads → ${info.downloadsPath}`;
+          els.workspaceProbeStatus.className = 'status ok';
+        }
+      } catch (e) {
+        els.workspaceProbeStatus.textContent = `Probe failed: ${e.message || e}`;
+        els.workspaceProbeStatus.className = 'status err';
+      } finally {
+        // Restore whatever the actually-persisted settings were so the probe
+        // doesn't silently change behaviour for in-flight tools.
+        try {
+          window.KyotoWorkspace?.setFromSettings({
+            workspaceFolder: state.settings.workspaceFolder,
+            workspaceLocation: state.settings.workspaceLocation
+          });
+        } catch {}
+      }
+    });
 
     const copyToClipboard = (text, btn) => {
       const flash = (msg) => {
@@ -5582,6 +5637,10 @@
       const s3KeyPrefix       = (els.s3KeyPrefix?.value       || '').trim();
       const s3Endpoint        = (els.s3Endpoint?.value        || '').trim();
 
+      const workspaceFolderRaw = (els.workspaceFolder?.value || '').trim();
+      const workspaceFolder    = window.KyotoWorkspace?._safeFolder?.(workspaceFolderRaw) || (workspaceFolderRaw || 'Kyoto');
+      const workspaceLocation  = els.workspaceLocation?.value === 'documents' ? 'documents' : 'downloads';
+
       const customTools = Array.from(els.customToolsList?.querySelectorAll('.ct-row') || []).map(row => ({
         name: row.querySelector('.ct-name').value.trim(),
         description: row.querySelector('.ct-desc').value.trim(),
@@ -5630,8 +5689,10 @@
         apiKeys, mcpServers, customProviders, customSlashCommands, customTools,
         redactSensitive, auditEnabled, hideReasoning, theme, density,
         s3AccessKeyId, s3SecretAccessKey, s3Region, s3Bucket, s3KeyPrefix, s3Endpoint,
+        workspaceFolder, workspaceLocation,
         skillsHubUrl, skillsHubKey, skillsAutoSave,
       });
+      try { window.KyotoWorkspace?.setFromSettings({ workspaceFolder, workspaceLocation }); } catch {}
       applyAppearance();
       compileCustomTools();
       if (els.customToolStatus) {

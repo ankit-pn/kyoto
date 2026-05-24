@@ -290,6 +290,15 @@
         };
       }
 
+      if (window.KyotoWorkspace) {
+        const r = await window.KyotoWorkspace.downloadUrl({ url, filename: fname, saveAs });
+        return {
+          ok: true, target: 'local',
+          downloadId: r.downloadId, suggestedFilename: fname,
+          savedTo: r.path, location: r.location, folder: r.folder,
+          ...(r.note ? { note: r.note } : {})
+        };
+      }
       const downloadId = await chrome.downloads.download({ url, filename: fname, saveAs });
       return { ok: true, target: 'local', downloadId, suggestedFilename: fname };
     }
@@ -453,9 +462,21 @@
         scope === 'all' ? { title: 'all-sessions' } : (sessionId ? { id: sessionId } : window.KyotoSession.active()),
         ext
       );
-      const downloadId = await chrome.downloads.download({ url, filename: suggested, saveAs: true });
-      setTimeout(() => URL.revokeObjectURL(url), 120000);
-      return { ok: true, filename: suggested, bytes: blob.size, downloadId, format: fmt, scope };
+      try {
+        if (window.KyotoWorkspace) {
+          const r = await window.KyotoWorkspace.downloadUrl({ url, filename: suggested, saveAs: true });
+          return {
+            ok: true, filename: suggested, bytes: blob.size,
+            downloadId: r.downloadId, format: fmt, scope,
+            savedTo: r.path, location: r.location, folder: r.folder,
+            ...(r.note ? { note: r.note } : {})
+          };
+        }
+        const downloadId = await chrome.downloads.download({ url, filename: suggested, saveAs: true });
+        return { ok: true, filename: suggested, bytes: blob.size, downloadId, format: fmt, scope };
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 120000);
+      }
     }
   });
 })();

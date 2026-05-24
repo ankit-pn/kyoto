@@ -60,7 +60,7 @@ function loadToolsHarness() {
   vm.createContext(sandbox);
 
   const files = [
-    'core','browser','cookies','network','python','fs','media',
+    'core','workspace','browser','cookies','network','python','fs','media',
     'shell','youtube','data','skills','subagent','finalize'
   ].map(n => path.join(__dirname, '..', 'sidepanel', 'tools', `${n}.js`));
 
@@ -145,4 +145,35 @@ test('KyotoShell is exposed by tools/shell.js (so youtube.js can reuse it)', () 
   const win = loadToolsHarness();
   assert.ok(win.KyotoShell);
   assert.equal(typeof win.KyotoShell.shell, 'function');
+});
+
+test('KyotoWorkspace exposes folder/location and prefixes download paths', () => {
+  const win = loadToolsHarness();
+  assert.ok(win.KyotoWorkspace, 'KyotoWorkspace should be exposed');
+  // Default folder is "Kyoto", location "downloads".
+  assert.equal(win.KyotoWorkspace.name(), 'Kyoto');
+  assert.equal(win.KyotoWorkspace.location(), 'downloads');
+  // Path prefixing for chrome.downloads.
+  assert.equal(win.KyotoWorkspace.relativePath('foo.zip'), 'Kyoto/foo.zip');
+  assert.equal(win.KyotoWorkspace.relativePath('/leading-slash.txt'), 'Kyoto/leading-slash.txt');
+  // Unsafe characters in the folder name get sanitised.
+  win.KyotoWorkspace.setFromSettings({ workspaceFolder: 'My/Bad:Name?' });
+  assert.equal(win.KyotoWorkspace.name(), 'My_Bad_Name_');
+  // Location switching is validated, fallback is downloads.
+  win.KyotoWorkspace.setFromSettings({ workspaceLocation: 'documents' });
+  assert.equal(win.KyotoWorkspace.location(), 'documents');
+  win.KyotoWorkspace.setFromSettings({ workspaceLocation: 'bogus' });
+  assert.equal(win.KyotoWorkspace.location(), 'downloads');
+});
+
+test('workspace_info + workspace_save tools are registered', () => {
+  const win = loadToolsHarness();
+  const names = new Set(win.KyotoTools.list().map(t => t.name));
+  assert.ok(names.has('workspace_info'));
+  assert.ok(names.has('workspace_save'));
+  const save = win.KyotoTools.schemas().find(s => s.function.name === 'workspace_save');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(save.function.parameters.required)),
+    ['filename']
+  );
 });
