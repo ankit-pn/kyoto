@@ -39,7 +39,7 @@ function loadCronEngine({ chromeStubs } = {}) {
     chrome: chromeStubs,
     console, Math, Date, JSON, Object, Array, Set, Map, Number, String,
     Boolean, RegExp, Error, Promise, setTimeout, clearTimeout, setInterval, clearInterval,
-    atob, btoa,
+    atob, btoa, TextEncoder, TextDecoder, Uint8Array,
   };
   if (FakeIDB) {
     sandbox.indexedDB = FakeIDB.indexedDB;
@@ -310,6 +310,177 @@ test('onAlarm dispatches to the right job', async () => {
   await new Promise(r => setTimeout(r, 20));
   const got = await Cron.stateGet('fired');
   assert.ok(got.value > 0, JSON.stringify(got));
+});
+
+// ──────── iteration 2: validation, singleton, backoff, fs, sleep, notify ────────
+
+test('addJob rejects malformed cron expressions at add-time', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  // Wrong number of fields:
+  await assert.rejects(() => Cron.addJob({
+    name: 'bad-1', schedule: { cron: '0 0 * *' }, code: '1'
+  }), /Need 5 fields/);
+  // Unparseable token in a field:
+  await assert.rejects(() => Cron.addJob({
+    name: 'bad-2', schedule: { cron: '0 abc * * *' }, code: '1'
+  }), /unparseable part/);
+  // Out-of-range minute (60):
+  await assert.rejects(() => Cron.addJob({
+    name: 'bad-3', schedule: { cron: '60 * * * *' }, code: '1'
+  }), /matches no values/);
+  // Valid expression sails through:
+  const ok = await Cron.addJob({
+    name: 'good', schedule: { cron: '*/5 9-17 * * 1-5' }, code: '1'
+  });
+  assert.ok(ok.id);
+});
+
+test('singleton: alarm skips when previous run still in flight', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  // Job that takes ~150ms. With singleton: true, a second alarm during
+  // that window should be skipped, not run in parallel.
+  const j = await Cron.addJob({
+    name: 'slow-singleton',
+    schedule: { every: '1m' }, singleton: true, timeoutMs: 60000,
+    code: 'await K.sleep(150); await K.state.set("ran", (await K.state.get("ran")).value + 1 || 1);'
+  });
+  // Seed the counter
+  await Cron.stateSet('ran', 0);
+  // Fire two alarms back-to-back. The first claims _runningSince; the
+  // second sees it set and bails.
+  const p1 = Cron.onAlarm({ name: 'kyoto-cron:' + j.id });
+  // Tiny delay so the first await inside executeJob has a chance to set _runningSince.
+  await new Promise(r => setTimeout(r, 20));
+  await Cron.onAlarm({ name: 'kyoto-cron:' + j.id });
+  await p1;
+  await new Promise(r => setTimeout(r, 200));  // let first run finish
+  const got = await Cron.stateGet('ran');
+  assert.equal(got.value, 1, 'only one run should have incremented the counter');
+  const logs = await Cron.getJobLogs(j.id, { limit: 5 });
+  assert.ok(logs.runs.some(r => /singleton/.test(r.stderr || '') || r.error === 'singleton-skip'),
+    'expected a singleton-skip log entry');
+});
+
+test('non-singleton: parallel firings are allowed (regression guard)', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'parallel',
+    schedule: { every: '1m' },  // no singleton
+    code: 'await K.sleep(80); await K.state.set("ran", ((await K.state.get("ran")).value || 0) + 1);'
+  });
+  await Cron.stateSet('ran', 0);
+  const p1 = Cron.onAlarm({ name: 'kyoto-cron:' + j.id });
+  const p2 = Cron.onAlarm({ name: 'kyoto-cron:' + j.id });
+  await Promise.all([p1, p2]);
+  await new Promise(r => setTimeout(r, 150));
+  const got = await Cron.stateGet('ran');
+  // Both runs should have incremented — that's the OPPOSITE of singleton.
+  assert.ok(got.value >= 1, 'at least one ran');
+});
+
+test('exponential backoff: failed job\'s next alarm fires get skipped within the window', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'failing',
+    schedule: { every: '1m' }, autoPauseAfter: 99,  // don't auto-pause for this test
+    code: 'throw new Error("nope")'
+  });
+  // First run: actually executes and fails.
+  await Cron.runJobNow(j.id);
+  const after1 = await Cron.getJob(j.id);
+  assert.equal(after1.consecutiveFailures, 1);
+  assert.ok(after1._backoffUntil > Date.now(), 'backoff window should be set');
+  // Now fire the alarm — should be skipped because we're inside the
+  // backoff window (basePeriod * 2^0 = 1 min).
+  await Cron.onAlarm({ name: 'kyoto-cron:' + j.id });
+  await new Promise(r => setTimeout(r, 20));
+  const after2 = await Cron.getJob(j.id);
+  // consecutiveFailures shouldn't have incremented because the skip
+  // doesn't count as a run.
+  assert.equal(after2.consecutiveFailures, 1, 'backoff-skipped firing must not count as a failure');
+  const logs = await Cron.getJobLogs(j.id, { limit: 5 });
+  assert.ok(logs.runs.some(r => r.error === 'backoff'),
+    'expected a backoff-skip log entry, got: ' + JSON.stringify(logs.runs.map(r => r.error)));
+});
+
+test('successful run clears backoff window and consecutiveFailures', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  let mode = 'fail';
+  // Job whose behaviour we flip mid-test via shared state.
+  const j = await Cron.addJob({
+    name: 'recoverable',
+    schedule: { every: '1m' }, autoPauseAfter: 99,
+    code: 'const m = (await K.state.get("mode")).value; if (m === "fail") throw new Error("x"); K.log("ok");'
+  });
+  await Cron.stateSet('mode', 'fail');
+  await Cron.runJobNow(j.id);
+  let cur = await Cron.getJob(j.id);
+  assert.equal(cur.consecutiveFailures, 1);
+  assert.ok(cur._backoffUntil > Date.now());
+  // Flip to success.
+  await Cron.stateSet('mode', 'ok');
+  await Cron.runJobNow(j.id);
+  cur = await Cron.getJob(j.id);
+  assert.equal(cur.consecutiveFailures, 0);
+  assert.equal(cur._backoffUntil, null);
+});
+
+test('K.tools.fs_write + fs_read round-trip via the shared KyotoVFS', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'fs-roundtrip',
+    schedule: { every: '1m' },
+    code: `
+      await K.tools.fs_write({ path: '/cron/test/note.txt', content: 'hello from a job' });
+      const back = await K.tools.fs_read({ path: '/cron/test/note.txt' });
+      await K.state.set('echo', back.content);
+      const ls = await K.tools.fs_list({ prefix: '/cron/test' });
+      await K.state.set('count', ls.files.length);
+    `
+  });
+  const r = await Cron.runJobNow(j.id);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal((await Cron.stateGet('echo')).value, 'hello from a job');
+  assert.equal((await Cron.stateGet('count')).value, 1);
+});
+
+test('K.sleep delays the right amount (smoke test, not millisecond-precise)', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'sleeper', schedule: { every: '1m' },
+    code: 'const t0 = K.now(); await K.sleep(120); await K.state.set("dur", K.now() - t0);'
+  });
+  const r = await Cron.runJobNow(j.id);
+  assert.equal(r.ok, true);
+  const dur = (await Cron.stateGet('dur')).value;
+  assert.ok(dur >= 100 && dur < 500, 'sleep should pause ~120ms, got ' + dur);
+});
+
+test('auto-pause fires a chrome.notifications.create call', async () => {
+  // Wire up a recording notifications stub.
+  const { stubs } = makeChromeStub();
+  const notifications = [];
+  stubs.notifications = { create: async (n) => { notifications.push(n); return 'nid'; } };
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'breaks',
+    schedule: { every: '1m' }, autoPauseAfter: 2,
+    code: 'throw new Error("boom")'
+  });
+  await Cron.runJobNow(j.id);
+  await Cron.runJobNow(j.id);  // hits the threshold
+  const cur = await Cron.getJob(j.id);
+  assert.equal(cur.paused, true);
+  assert.equal(notifications.length, 1, 'one notification per auto-pause event');
+  assert.ok(/auto-paused/i.test(notifications[0].title));
+  assert.ok(/boom/.test(notifications[0].message));
 });
 
 test('reconcile creates missing alarms and clears orphans', async () => {

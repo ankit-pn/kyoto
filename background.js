@@ -786,6 +786,28 @@ const Cron = (() => {
     if (spec.schedule.every && parseEvery(spec.schedule.every) < 30000) {
       throw new Error(`schedule.every minimum is 30s (chrome.alarms limit). Got ${spec.schedule.every}.`);
     }
+    if (spec.schedule.cron) {
+      const expr = String(spec.schedule.cron).trim();
+      const parts = expr.split(/\s+/);
+      if (parts.length !== 5) {
+        throw new Error(`invalid schedule.cron: "${expr}". Need 5 fields (minute hour day-of-month month day-of-week).`);
+      }
+      // Each field is comma-separated; each part is *, N, N-M, optionally /S.
+      const partRe = /^(\*|\d+(-\d+)?)(\/\d+)?$/;
+      const limits = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+      for (let i = 0; i < 5; i++) {
+        for (const sub of parts[i].split(',')) {
+          if (!partRe.test(sub)) {
+            throw new Error(`invalid schedule.cron: "${expr}" — field ${i + 1} ("${parts[i]}") has unparseable part "${sub}".`);
+          }
+        }
+        // Sanity-check the parsed range produces at least one value.
+        const set = parseField(parts[i], limits[i][0], limits[i][1]);
+        if (set.size === 0) {
+          throw new Error(`invalid schedule.cron: "${expr}" — field ${i + 1} ("${parts[i]}") matches no values in [${limits[i][0]},${limits[i][1]}].`);
+        }
+      }
+    }
     if (!spec.code || typeof spec.code !== 'string') throw new Error('code required (JS string)');
   }
 
@@ -804,6 +826,7 @@ const Cron = (() => {
       schedule: spec.schedule,
       code: spec.code,
       paused: !!spec.paused,
+      singleton: !!spec.singleton,
       notes: spec.notes || '',
       timeoutMs: spec.timeoutMs || DEFAULT_TIMEOUT_MS,
       autoPauseAfter: spec.autoPauseAfter || DEFAULT_AUTO_PAUSE,
@@ -811,6 +834,8 @@ const Cron = (() => {
       lastRunAt: null, lastError: null,
       nextRunAt: null,
       consecutiveFailures: 0,
+      _runningSince: null,    // set on execute start, cleared on finish
+      _backoffUntil: null,    // set on failure, cleared on success/resume
       _schemaVersion: SCHEMA_VERSION,
     };
     jobs[id] = job;
@@ -848,7 +873,7 @@ const Cron = (() => {
     const j = jobs[id];
     if (!j) throw new Error(`no job with id ${id}`);
     // Only allow safe fields to be patched.
-    const allow = ['name', 'schedule', 'code', 'notes', 'paused', 'timeoutMs', 'autoPauseAfter'];
+    const allow = ['name', 'schedule', 'code', 'notes', 'paused', 'singleton', 'timeoutMs', 'autoPauseAfter'];
     for (const k of allow) if (k in patch) j[k] = patch[k];
     if ('schedule' in patch) validateSpec({ name: j.name, schedule: j.schedule, code: j.code });
     jobs[id] = j;
@@ -880,6 +905,7 @@ const Cron = (() => {
     const j = await getJob(id);
     j.paused = false;
     j.consecutiveFailures = 0;  // give it a clean slate
+    j._backoffUntil = null;     // and reset the backoff window
     await saveObj(STORAGE_JOBS, { ...(await loadObj(STORAGE_JOBS)), [id]: j });
     await scheduleAlarm(j);
     return j;
@@ -957,6 +983,107 @@ const Cron = (() => {
     return null;
   }
 
+  // ── Same KyotoVFS database the sidepanel uses ──
+  // Letting jobs persist data to /cron/<id>/... is much friendlier
+  // than capping them at 50KB of state + 4KB of stdout. Files written
+  // here are visible to chat's existing fs_read tool.
+  const VFS_DB = 'kyoto_vfs';
+  const VFS_STORE = 'files';
+  let _vfsPromise = null;
+  function openVfs() {
+    if (_vfsPromise) return _vfsPromise;
+    _vfsPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(VFS_DB, 1);
+      req.onupgradeneeded = () => {
+        const d = req.result;
+        if (!d.objectStoreNames.contains(VFS_STORE)) {
+          d.createObjectStore(VFS_STORE, { keyPath: 'path' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return _vfsPromise;
+  }
+  function _vfsNormalise(p) {
+    if (!p || typeof p !== 'string') throw new Error('path required');
+    let n = p.replace(/\\/g, '/').replace(/\/+/g, '/');
+    if (!n.startsWith('/')) n = '/' + n;
+    const parts = [];
+    for (const seg of n.split('/')) {
+      if (!seg || seg === '.') continue;
+      if (seg === '..') { parts.pop(); continue; }
+      parts.push(seg);
+    }
+    return '/' + parts.join('/');
+  }
+  function _vfsBytes(c) {
+    if (c instanceof Uint8Array) return c;
+    if (typeof c === 'string') return new TextEncoder().encode(c);
+    if (c && typeof c === 'object') return new TextEncoder().encode(JSON.stringify(c));
+    return new TextEncoder().encode(String(c ?? ''));
+  }
+  async function vfsWrite(path, content, { mime } = {}) {
+    const p = _vfsNormalise(path);
+    const bytes = _vfsBytes(content);
+    const db = await openVfs();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(VFS_STORE, 'readwrite');
+      tx.objectStore(VFS_STORE).put({
+        path: p, content: bytes,
+        mime: mime || 'application/octet-stream',
+        size: bytes.byteLength, mtime: Date.now(),
+      });
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    return { path: p, size: bytes.byteLength };
+  }
+  async function vfsRead(path, { encoding = 'utf-8' } = {}) {
+    const p = _vfsNormalise(path);
+    const db = await openVfs();
+    const rec = await new Promise((resolve, reject) => {
+      const req = db.transaction(VFS_STORE, 'readonly').objectStore(VFS_STORE).get(p);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    if (!rec) throw new Error('no such file: ' + p);
+    if (encoding === 'binary') {
+      // base64
+      let bin = ''; for (let i = 0; i < rec.content.length; i++) bin += String.fromCharCode(rec.content[i]);
+      return { path: p, base64: btoa(bin), bytes: rec.size, mime: rec.mime };
+    }
+    return { path: p, content: new TextDecoder(encoding).decode(rec.content), bytes: rec.size, mime: rec.mime };
+  }
+  async function vfsList(prefix = '/') {
+    const p = _vfsNormalise(prefix);
+    const db = await openVfs();
+    return new Promise((resolve, reject) => {
+      const out = [];
+      const req = db.transaction(VFS_STORE, 'readonly').objectStore(VFS_STORE).openCursor();
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return resolve({ prefix: p, files: out });
+        if (c.value.path.startsWith(p)) {
+          out.push({ path: c.value.path, size: c.value.size, mime: c.value.mime, mtime: c.value.mtime });
+        }
+        c.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function vfsDelete(path) {
+    const p = _vfsNormalise(path);
+    const db = await openVfs();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(VFS_STORE, 'readwrite');
+      tx.objectStore(VFS_STORE).delete(p);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    return { deleted: true, path: p };
+  }
+
   // ── K sandbox: what job code can call ──
   function buildSandbox(job, runBuffer) {
     const log = (...args) => runBuffer.stdout.push(args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '));
@@ -1004,10 +1131,18 @@ const Cron = (() => {
       downloads_download: (args) => chrome.downloads.download(args),
       notification: ({ title, message } = {}) =>
         chrome.notifications.create({ type: 'basic', iconUrl: 'icons/icon128.png', title: title || 'Kyoto', message: message || '' }),
+      // KyotoVFS — same IndexedDB the sidepanel's fs_* tools use, so a
+      // job can write a big result and chat can fs_read it (or vice
+      // versa). Bypasses the 50KB state cap for bulk data.
+      fs_write: (args) => vfsWrite(args.path, args.content, { mime: args.mime }),
+      fs_read:  (args) => vfsRead(args.path, { encoding: args.encoding }),
+      fs_list:  (args = {}) => vfsList(args.prefix || '/'),
+      fs_delete:(args) => vfsDelete(args.path),
     };
     return {
       job: { id: job.id, name: job.name, lastRunAt: job.lastRunAt },
       now: () => Date.now(),
+      sleep: (ms) => new Promise(r => setTimeout(r, Math.max(0, ms || 0))),
       log, stderr,
       state: {
         get: stateGet,
@@ -1024,6 +1159,36 @@ const Cron = (() => {
   // ── Execute one job ──
   async function executeJob(job, { triggeredBy = 'alarm' } = {}) {
     const start = Date.now();
+    // Singleton + backoff skip checks. Re-read the job spec so we see
+    // _runningSince that another concurrent firing wrote. (We pass `job`
+    // by value into onAlarm so the cached copy can be stale.)
+    if (triggeredBy === 'alarm' || triggeredBy === 'cron') {
+      const cur = (await loadObj(STORAGE_JOBS))[job.id];
+      if (!cur) return { ok: false, error: 'job vanished mid-fire' };
+      if (cur._backoffUntil && start < cur._backoffUntil) {
+        const remainingMs = cur._backoffUntil - start;
+        appendRun(job.id, {
+          ts: start, ok: false, ms: 0, stdout: '',
+          stderr: `skipped: in backoff, ~${Math.round(remainingMs / 1000)}s remaining`,
+          error: 'backoff', triggeredBy,
+        }).catch(() => {});
+        return { ok: false, skipped: true, reason: 'backoff', remainingMs };
+      }
+      if (cur.singleton && cur._runningSince
+          && (start - cur._runningSince) < (cur.timeoutMs || DEFAULT_TIMEOUT_MS)) {
+        const elapsedMs = start - cur._runningSince;
+        appendRun(job.id, {
+          ts: start, ok: false, ms: 0, stdout: '',
+          stderr: `skipped: singleton, previous run still in flight (${Math.round(elapsedMs / 1000)}s elapsed)`,
+          error: 'singleton-skip', triggeredBy,
+        }).catch(() => {});
+        return { ok: false, skipped: true, reason: 'singleton', elapsedMs };
+      }
+      // Claim the run. Writing _runningSince here closes the race.
+      cur._runningSince = start;
+      await persistJob(cur);
+    }
+
     const runBuf = { stdout: [], stderr: [] };
     let ok = false; let err = null;
     let timerId;
@@ -1062,20 +1227,36 @@ const Cron = (() => {
     const cur = jobs[job.id];
     if (cur) {
       cur.lastRunAt = start;
+      cur._runningSince = null;   // release the singleton claim
       if (ok) {
         cur.consecutiveFailures = 0;
         cur.lastError = null;
+        cur._backoffUntil = null;
       } else {
         cur.consecutiveFailures = (cur.consecutiveFailures || 0) + 1;
         cur.lastError = { ts: start, message: err };
+        // Exponential backoff: skip future runs until basePeriod *
+        // 2^(failures-1), capped at 32x. Cron jobs use 1 minute as base.
+        const basePeriod = cur.schedule?.every ? parseEvery(cur.schedule.every) : 60000;
+        const factor = Math.min(32, Math.pow(2, cur.consecutiveFailures - 1));
+        cur._backoffUntil = Date.now() + (basePeriod * factor);
         if (cur.consecutiveFailures >= (cur.autoPauseAfter || DEFAULT_AUTO_PAUSE)) {
           cur.paused = true;
+          cur._backoffUntil = null;  // pause is the terminal state; no more retries
           await clearAlarm(cur.id);
           runBuf.stderr.push(`[auto-paused after ${cur.consecutiveFailures} consecutive failures]`);
-          // also append a sentinel run record so the agent sees why.
           appendRun(cur.id, { ts: Date.now(), ok: false, ms: 0,
             stdout: '', stderr: `auto-paused after ${cur.consecutiveFailures} failures`,
             error: 'auto-paused', triggeredBy: 'auto-pause' }).catch(() => {});
+          // Tell the user. Notifications API may not be granted; ignore failure.
+          try {
+            chrome.notifications.create({
+              type: 'basic',
+              iconUrl: 'icons/icon128.png',
+              title: 'Kyoto: cron job auto-paused',
+              message: `"${cur.name}" failed ${cur.consecutiveFailures}x in a row. Last error: ${(err || '').slice(0, 140)}`,
+            });
+          } catch {}
         }
       }
       // Update nextRunAt.
