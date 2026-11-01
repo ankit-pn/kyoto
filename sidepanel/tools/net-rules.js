@@ -151,6 +151,17 @@
     return s.slice(0, max) + `… [${s.length - max} more chars]`;
   }
 
+  // Host a urlFilter is scoped to, when it names one. `||api.example.com/x` and
+  // `|https://api.example.com/x` both yield "api.example.com". Patterns that name
+  // no concrete host (wildcards, ^-anchored regex-ish filters) yield null.
+  function hostFromFilter(filter) {
+    if (typeof filter !== 'string') return null;
+    const m = filter.match(/^\|{0,2}(?:https?:\/\/)?\.?([^/^|*?]+)/i);
+    if (!m) return null;
+    const host = String(m[1] || '').trim().toLowerCase().replace(/^\./, '');
+    return host.includes('.') && !host.includes('*') ? host : null;
+  }
+
   function validFilter(raw) {
     if (typeof raw !== 'string') throw new Error('urlFilter is required and must be a string');
     const filter = raw.trim();
@@ -441,14 +452,15 @@
   T({
     name: 'net_rule_redirect',
     group: 'intercept',
-    description: 'Redirect requests matching a urlFilter to another URL (declarativeNetRequest action "redirect"). Main use: point a frontend API at a localhost mock — e.g. urlFilter "||api.example.com/" redirectUrl "http://localhost:3000/" — so the page talks to a server you control, including its real status codes. Target must be an absolute http(s) or data: URL; resourceTypes defaults to xmlhttprequest, script, image, stylesheet, main_frame and sub_frame. Applied BROWSER-WIDE and persists across restarts until removed; a filter that matches everything requires confirmBroad: true.',
+    description: 'Redirect requests matching a urlFilter to another URL (declarativeNetRequest action "redirect"). Main use: point a frontend API at a localhost mock — e.g. urlFilter "||api.example.com/" redirectUrl "http://localhost:3000/" — so the page talks to a server you control, including its real status codes. Target must be an absolute http(s) or data: URL; resourceTypes defaults to xmlhttprequest, script, image, stylesheet, main_frame and sub_frame. Applied BROWSER-WIDE and persists across restarts until removed; a filter that matches everything requires confirmBroad: true, and a redirect to a DIFFERENT host than the filter requires confirmCrossOrigin: true (cross-origin redirects can forward the original request headers).',
     parameters: OBJ({
       urlFilter: STR,
       redirectUrl: STR,
       resourceTypes: { type: 'array', items: STR },
       note: STR,
       priority: NUM,
-      confirmBroad: BOOL
+      confirmBroad: BOOL,
+      confirmCrossOrigin: BOOL
     }, ['urlFilter', 'redirectUrl']),
     handler: async (args = {}) => {
       try {
@@ -456,6 +468,22 @@
         const filter = validFilter(urlFilter);
         assertFilterIsScoped('net_rule_redirect', filter, confirmBroad);
         const target = validRedirectUrl(redirectUrl);
+        // AUDIT H2: a cross-origin redirect can forward the original request's
+        // headers (Authorization, Cookie, CSRF tokens) to a host the user never
+        // meant to talk to, and the rule is BROWSER-WIDE and PERSISTS. Requiring
+        // an explicit flag makes an exfiltration vector a deliberate choice
+        // rather than a one-word tool call.
+        const filterHost = hostFromFilter(filter);
+        const targetHost = target.protocol === 'data:' ? null : new URL(target.url).hostname.toLowerCase();
+        if (filterHost && targetHost && filterHost !== targetHost) {
+          if (args.confirmCrossOrigin !== true) {
+            return {
+              error: `cross-origin redirect refused: filter is scoped to "${filterHost}" but the target is "${targetHost}". ` +
+                `A cross-origin redirect can forward the original request's headers (Authorization/Cookies) to that host. ` +
+                `Pass confirmCrossOrigin: true if that is genuinely intended.`
+            };
+          }
+        }
         const types = validResourceTypes(resourceTypes);
         const prio = validPriority(priority);
         const noteText = validNote(note);

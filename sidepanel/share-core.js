@@ -142,11 +142,20 @@ code.tool { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
    * @param {string} text
    * @returns {string}
    */
+  // A key copy-pasted out of a wrapped terminal/email can arrive split across
+  // lines: the per-line patterns above would redact the first fragment and leave
+  // the tail of the key in the export. Require >=10 chars per segment so normal
+  // prose that happens to start with a prefix is not swallowed.
+  const WRAPPED_SECRET_RE = /\b(?:sk-or-v1-|sk-|oc_sk_|gh[pousr]_)[A-Za-z0-9_-]{10,}(?:\s*\n\s*[A-Za-z0-9_-]{10,})+/g;
+
   function redactSecrets(text) {
     let out = typeof text === 'string' ? text : (text == null ? '' : String(text));
     try {
       out = out.replace(PEM_PRIVATE_KEY_RE, REDACTED);
       out = out.replace(BEARER_RE, `$1${REDACTED}`);
+      // Line-wrapped keys FIRST: the single-line patterns would redact the first
+      // fragment and leave the tail of the key in the export.
+      out = out.replace(WRAPPED_SECRET_RE, REDACTED);
       for (const re of SECRET_PATTERNS) out = out.replace(re, REDACTED);
     } catch {
       // The patterns are static, so this is unreachable; if it ever did fire,
@@ -194,12 +203,34 @@ code.tool { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
    * escape, so markdown that a model wrote stays literal text instead of
    * becoming live HTML.
    */
+  // AUDIT M3: caller-supplied markdown output was embedded verbatim, and the
+  // panel's renderer (marked) happily emits <a href="javascript:...">. An export
+  // is opened by someone else, so a model-written link could run script in their
+  // browser. Strip the dangerous constructs rather than trusting the caller.
+  function sanitiseHtml(html) {
+    return String(html)
+      // Executable/embedded content.
+      .replace(/<\s*(script|iframe|object|embed|link|meta|base|form)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+      .replace(/<\s*(script|iframe|object|embed|link|meta|base|form)\b[^>]*\/?>/gi, '')
+      // Inline event handlers (onclick, onerror, …).
+      .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      // javascript:/vbscript:/data:text-html URLs in any attribute. Rewrite the
+      // whole attribute so the result stays valid HTML (no orphaned quote).
+      .replace(/\b(href|src|action|formaction|xlink:href)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi,
+        (m, name, val) => {
+          const bare = String(val).replace(/^["']|["']$/g, '').trim();
+          return /^\s*(javascript|vbscript|data\s*:\s*text\/html)\s*:/i.test(bare) ? `${name}="#"` : m;
+        })
+      // style="…expression(…)" / behavior:url(…) era payloads.
+      .replace(/\bstyle\s*=\s*("|')[^"']*(expression|behavior|javascript)[^"']*\1/gi, '');
+  }
+
   function renderText(text, renderMarkdown) {
     const redacted = redactSecrets(text);
     if (typeof renderMarkdown === 'function') {
       try {
         const html = renderMarkdown(redacted);
-        if (typeof html === 'string') return html;
+        if (typeof html === 'string') return sanitiseHtml(html);
       } catch {
         // A broken markdown renderer must not cost the reader the message.
       }
@@ -354,6 +385,10 @@ code.tool { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
       '<meta charset="utf-8">',
       '<meta name="viewport" content="width=device-width, initial-scale=1">',
       '<meta name="color-scheme" content="light dark">',
+      // Defence in depth: even if markup smuggling slips through, this export can
+      // never run script or make a network request. It is opened as a file://
+      // document by someone else, so it must be inert by construction.
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; font-src data:">',
       `<title>${safeTitle}</title>`,
       `<style>${STYLE}</style>`,
       '</head>',
@@ -380,6 +415,7 @@ code.tool { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 
   window.KyotoShare = {
     redactSecrets,
-    buildShareHtml
+    buildShareHtml,
+    sanitiseHtml
   };
 })();

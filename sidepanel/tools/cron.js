@@ -51,7 +51,14 @@
       timeoutMs: NUM,
       autoPauseAfter: NUM,
     }, ['name', 'schedule', 'code']),
-    handler: async (args) => bg('CRON_ADD', args || {}),
+    handler: async (args = {}) => {
+      const a = args || {};
+      const code = typeof a.code === 'string' ? a.code.trim() : '';
+      const hasSchedule = !!(a.schedule && (a.schedule.every || a.schedule.cron));
+      if (!code) return { error: 'code is required (the job body to run)' };
+      if (!hasSchedule) return { error: 'schedule is required, e.g. { every: "30m" } or { cron: "0 * * * *" }' };
+      return bg('CRON_ADD', a);
+    },
   });
 
   T({
@@ -146,7 +153,10 @@
     group: 'cron',
     description: 'Delete a job and cancel its alarm. Logs for the job are also cleared.',
     parameters: OBJ({ id: STR }, ['id']),
-    handler: async ({ id }) => bg('CRON_REMOVE', { id }),
+    handler: async ({ id } = {}) => {
+      if (typeof id !== 'string' || !id.trim()) return { error: 'id is required' };
+      return bg('CRON_REMOVE', { id: id.trim() });
+    },
   });
 
   T({

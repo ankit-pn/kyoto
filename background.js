@@ -151,7 +151,10 @@ async function hydrateCaptureState() {
     }
   } catch { /* no session storage — capture stays volatile */ }
 }
-hydrateCaptureState();
+// Handlers await this: hydration is async (storage.session read), and without
+// ordering the first capture call after a worker restart could observe the
+// pre-hydration state and report `capturing:false` for a live capture.
+const captureHydrated = hydrateCaptureState();
 
 chrome.webRequest.onBeforeRequest.addListener((d) => {
   if (!shouldRecord(d)) return;
@@ -243,6 +246,7 @@ const HANDLERS = {
 
   // ── network capture ──────────────────
   async NET_CAPTURE_START({ tabId, scope = 'all' } = {}) {
+    await captureHydrated;
     capture.active = true;
     capture.filterTabId = scope === 'tab' ? (tabId ?? await activeTabId()) : null;
     capture.restoredAfterRestart = false;
@@ -250,17 +254,20 @@ const HANDLERS = {
     return { capturing: true, scope, tabId: capture.filterTabId, persistent: true };
   },
   async NET_CAPTURE_STOP() {
+    await captureHydrated;
     capture.active = false;
     await persistCaptureState();
     return { capturing: false, kept: capture.events.length };
   },
-  NET_CAPTURE_CLEAR() {
+  async NET_CAPTURE_CLEAR() {
+    await captureHydrated;
     capture.events = [];
     capture.inflight.clear();
     capture.restoredAfterRestart = false;
     return { cleared: true };
   },
-  NET_CAPTURE_LIST({ filter, limit = 100, sinceMs } = {}) {
+  async NET_CAPTURE_LIST({ filter, limit = 100, sinceMs } = {}) {
+    await captureHydrated;
     let out = capture.events;
     if (sinceMs) out = out.filter(r => r.started >= sinceMs);
     if (filter) {

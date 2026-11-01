@@ -64,7 +64,17 @@
       sameSite: { type: 'string', enum: ['no_restriction', 'lax', 'strict', 'unspecified'] },
       expirationDate: NUM
     }, ['url', 'name', 'value']),
-    handler: async (args) => chrome.cookies.set(args)
+    handler: async (args = {}) => {
+      try {
+        if (!args || !args.url || !args.name || args.value === undefined) {
+          return { error: 'url, name and value are required' };
+        }
+        // Return a stable object: the raw chrome result is undefined on success,
+        // which a tool result must never be (the model needs something to read).
+        const r = await chrome.cookies.set(args);
+        return { set: true, name: args.name, url: args.url, cookie: r ?? null };
+      } catch (e) { return { error: e?.message || String(e) }; }
+    }
   });
 
   T({
@@ -72,7 +82,13 @@
     group: 'cookies',
     description: 'Remove a cookie by url + name. WRITE operation.',
     parameters: OBJ({ url: STR, name: STR }, ['url', 'name']),
-    handler: async ({ url, name }) => chrome.cookies.remove({ url, name })
+    handler: async ({ url, name } = {}) => {
+      try {
+        if (!url || !name) return { error: 'url and name are required' };
+        const r = await chrome.cookies.remove({ url, name });
+        return { removed: !!r, url, name, detail: r ?? null };
+      } catch (e) { return { error: e?.message || String(e) }; }
+    }
   });
 
   T({

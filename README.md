@@ -345,16 +345,16 @@ Required (in `permissions`):
 - `tabs` — list / switch tabs, page-context awareness.
 - `cookies` — the cookie tools.
 - `webRequest` — passive observation for `network_capture_*` (MV3-compatible, no blocking).
-- `webNavigation` — refresh page context on navigation.
 - `history`, `bookmarks`, `downloads` — the `browser-data` tools + audit-log download.
 - `notifications`, `clipboardWrite`, `alarms` — utilities.
 - `contextMenus` — right-click integration.
 - `debugger` — CDP attach for response-body capture, full DevTools control, dispatch input events. Yellow banner shows when attached.
+- `nativeMessaging` — the local shell/daemon bridge (`shell_*` tools).
+- `tabGroups`, `sessions`, `power`, `pageCapture`, `browsingData`, `readingList`, `idle`, `omnibox` — the `platform` tools (tab groups, recently-closed restore, keep-awake, MHTML capture, site-data clearing, reading list, idle state, address-bar entry).
+- `declarativeNetRequest`, `declarativeNetRequestWithHostAccess` — the `intercept` tools (block / redirect / stub requests). Rules are browser-wide and persist until removed; a match-everything filter needs `confirmBroad`, and a cross-origin redirect needs `confirmCrossOrigin`.
 - `<all_urls>` host permission — required for the agent to read any tab you point it at.
 
-Optional (requested via the model's `permission_request` tool):
-
-- `clipboardRead`, `management`, `topSites`.
+No optional permissions are declared: every capability the extension ships is in the list above, and `test/audit.test.js` fails the build if a permission is declared but unused, or used but not declared.
 
 ## Privacy
 

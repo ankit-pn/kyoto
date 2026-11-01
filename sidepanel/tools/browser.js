@@ -41,7 +41,8 @@
     group: 'browser',
     description: 'Open a new tab. Optionally make it the active tab. The new tab automatically inherits the calling agent\'s conversation — switching to it shows the same chat continued, not a fresh session. Set `freshSession: true` to opt out (the new tab becomes a brand-new session, useful when forking unrelated tasks).',
     parameters: OBJ({ url: STR, active: BOOL, freshSession: BOOL }, ['url']),
-    handler: async ({ url, active = true, freshSession = false }) => {
+    handler: async ({ url, active = true, freshSession = false } = {}) => {
+      if (typeof url !== 'string' || !url.trim()) return { error: 'url is required' };
       if (!freshSession && window.__kyotoMarkPendingTabBind) {
         window.__kyotoMarkPendingTabBind();
       }
@@ -89,9 +90,15 @@
     group: 'browser',
     description: 'Close one or more tabs by id.',
     parameters: OBJ({ tabIds: { type: 'array', items: NUM } }, ['tabIds']),
-    handler: async ({ tabIds }) => {
-      await chrome.tabs.remove(tabIds);
-      return { closed: tabIds };
+    handler: async ({ tabIds } = {}) => {
+      try {
+        // chrome.tabs.remove(undefined) THROWS in a real browser, so guard the
+        // shape before crossing into the API — a thrown tool error kills the turn.
+        const ids = Array.isArray(tabIds) ? tabIds.filter(n => Number.isInteger(n)) : [];
+        if (!ids.length) return { error: 'tabIds must be a non-empty array of tab ids' };
+        await chrome.tabs.remove(ids);
+        return { closed: ids };
+      } catch (e) { return { error: e?.message || String(e) }; }
     }
   });
 

@@ -11,7 +11,7 @@
 
 (() => {
   'use strict';
-  const { T, STR, OBJ } = window.KyotoTR;
+  const { T, STR, OBJ, BOOL } = window.KyotoTR;
 
   function api() {
     const a = window.KyotoRoutineApi;
@@ -52,15 +52,18 @@
       'Use it for repetitive workflows that were recorded earlier — it makes NO model calls, so it is fast and free. ' +
       'Steps whose value was masked during recording (password / email / card / OTP) cannot be replayed: ' +
       'pass their values in `values` (keyed by the placeholder hint, e.g. {"password":"…"}), ' +
-      'or the tool will report which steps need input. It stops at the first failing step and reports it.',
+      'or the tool will report which steps need input. It stops at the first failing step and reports it. ' +
+      'IMPORTANT: if the routine contains destructive-looking steps (Delete / Pay / Submit / Send …) it is REFUSED ' +
+      'unless you pass confirm: true — re-running with confirm means you have decided the action is intended.',
     parameters: OBJ({
       name: STR,
-      values: { type: 'object', additionalProperties: true }
+      values: { type: 'object', additionalProperties: true },
+      confirm: BOOL
     }, ['name']),
-    handler: async ({ name, values } = {}) => {
+    handler: async ({ name, values, confirm } = {}) => {
       try {
         if (!name || typeof name !== 'string') return { error: 'name is required (routine name or id)' };
-        return await api().run(name, { values: values || undefined });
+        return await api().run(name, { values: values || undefined, confirm: confirm === true });
       } catch (e) { return { error: e?.message || String(e) }; }
     }
   });

@@ -39,8 +39,15 @@
     parameters: OBJ({
       title: STR, content: STR, tags: { type: 'array', items: STR }
     }, ['title', 'content']),
-    handler: async ({ title, content, tags = [] }) => {
+    handler: async ({ title, content, tags = [] } = {}) => {
+      // An empty memory is pure storage garbage and will resurface in future
+      // sessions' memory listings — refuse it instead of writing it.
+      if (typeof content !== 'string' || !content.trim()) {
+        return { error: 'content is required (a memory with no content is not saveable)' };
+      }
+      const safeTitle = (typeof title === 'string' && title.trim()) ? title.trim() : content.trim().slice(0, 60);
       const id = memNewId();
+      title = safeTitle;
       const now = Date.now();
       const record = { id, title, content, tags, createdAt: now, updatedAt: now };
       await chrome.storage.local.set({ [MEM_KEY(id)]: record });

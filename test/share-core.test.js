@@ -515,3 +515,43 @@ test('a rich hostile session still exports an inert self-contained document', ()
   assert.ok(!html.includes('111'), 'usage tokens leaked');
   assert.ok(!html.includes('hidden'), 'reasoning leaked');
 });
+
+// ══════════════════════════════════════════════════════
+// Regressions for the v14.24.0 independent audit
+// ══════════════════════════════════════════════════════
+
+// AUDIT M3: renderMarkdown output was embedded verbatim. The panel's renderer
+// (marked) emits live javascript: hrefs, so an export opened by someone else
+// could run script on click. The export must be inert.
+test('sanitiseHtml neutralises script, handlers and javascript: URLs', () => {
+  const out = S.sanitiseHtml(
+    '<p><a href="javascript:alert(1)">x</a><img src=x onerror="alert(1)">' +
+    '<script>alert(1)</script><a href="https://ok.test/page">ok</a></p>'
+  );
+  assert.ok(!/javascript:/i.test(out), 'javascript: URL survived sanitising');
+  assert.ok(!/onerror/i.test(out), 'inline handler survived sanitising');
+  assert.ok(!/<script/i.test(out), 'script element survived sanitising');
+  assert.match(out, /https:\/\/ok\.test\/page/, 'legitimate links must survive');
+  assert.ok(!/""/.test(out), `sanitiser produced malformed attributes: ${out}`);
+});
+
+test('a markdown renderer that emits script cannot make the export executable', () => {
+  const html = S.buildShareHtml(
+    { title: 'x', history: [{ role: 'user', content: 'hello' }] },
+    { renderMarkdown: (t) => `<a href="javascript:alert(1)">${t}</a><script>alert(2)</script>` }
+  );
+  assert.ok(!/javascript:/i.test(html), 'javascript: href leaked into the export');
+  assert.ok(!/<script>alert/i.test(html), 'script leaked into the export');
+  assert.match(html, /Content-Security-Policy/, 'the export should carry a CSP as defence in depth');
+});
+
+// AUDIT M4: a credential wrapped across a line was only partially redacted,
+// leaving the tail of the key in the export.
+test('redacts a credential split across a line boundary', () => {
+  const wrapped = 'token sk-or-v1-' + 'a'.repeat(20) + '\n' + 'b'.repeat(20) + ' end';
+  const out = S.redactSecrets(wrapped);
+  assert.ok(!/a{20}/.test(out), 'first fragment leaked');
+  assert.ok(!/b{20}/.test(out), 'wrapped tail leaked');
+  assert.match(out, /\[REDACTED\]/);
+  assert.match(out, /end$/, 'surrounding prose must be preserved');
+});

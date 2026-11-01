@@ -252,7 +252,6 @@
     sessionsPopover: $('sessionsPopover'),
     sessionsList: $('sessionsList'),
     sessionsSearch: $('sessionsSearch'),
-    pinSessionBtn: $('pinSessionBtn'),
     mcpServersList: $('mcpServersList'),
     mcpAddBtn: $('mcpAddBtn'),
     mcpStatus: $('mcpStatus'),
@@ -3004,7 +3003,9 @@
   }
   async function recordSpend(session, costUsd) {
     if (!(costUsd > 0)) return;
-    session._spend = +((Number(session?._spend || 0) || 0) + costUsd).toFixed(6);
+    // The money is already spent by the time this runs; a missing session must
+    // not throw and lose the all-time ledger update too.
+    if (session) session._spend = +((Number(session?._spend || 0) || 0) + costUsd).toFixed(6);
     try {
       // If the boot-time read failed, re-read before writing so the all-time
       // total is not reset to just this turn's cost.
@@ -6834,7 +6835,12 @@
   function runPaletteIndex(i) {
     const item = paletteState.filtered[i];
     if (!item || typeof item.run !== 'function') return;
-    try { item.run(); } catch (e) { console.warn('[Kyoto] palette action failed:', e); }
+    try {
+      const out = item.run();
+      // Actions that hit the network/storage return promises; an unhandled
+      // rejection would surface as an uncaught error in the panel.
+      if (out && typeof out.then === 'function') out.catch((e) => console.warn('[Kyoto] palette action failed:', e));
+    } catch (e) { console.warn('[Kyoto] palette action failed:', e); }
   }
   function wirePalette() {
     if (!paletteEl.overlay) return;
@@ -6860,6 +6866,8 @@
   const voiceAutoSpeakEl = document.getElementById('voiceAutoSpeak');
   let speechRec = null;
   let speechState = KSPEECH.initialState ? KSPEECH.initialState() : { finalText: '', interim: '', listening: false, error: null };
+  // Monotonic token: events from a superseded recognition session are ignored.
+  let speechToken = 0;
 
   function wireVoice() {
     if (micBtn) {
@@ -6892,12 +6900,21 @@
   function startSpeech() {
     const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Ctor) return;
+    // AUDIT M2: capture what the user already typed, so dictation appends
+    // instead of overwriting it.
+    composerPristine = els.input.value.trim();
+    // AUDIT M1: start from a clean slate. Without a reset the previous
+    // dictation's transcript is still in speechState.finalText and gets
+    // prepended to this session's text.
+    applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'reset' }));
+    const sessionToken = ++speechToken;
     try {
       speechRec = new Ctor();
       speechRec.lang = state.settings.voiceLang || navigator.language || 'en-US';
       speechRec.interimResults = true;
       speechRec.continuous = true;
       speechRec.onresult = (ev) => {
+        if (sessionToken !== speechToken) return;
         // Feed ONLY the final results as 'final' and the trailing hypothesis as
         // 'interim': reduceSpeech owns the replace/append semantics.
         let interim = '';
@@ -6913,12 +6930,15 @@
         if (draft) elseSetComposerDraft(draft);
       };
       speechRec.onerror = (ev) => {
+        if (sessionToken !== speechToken) return;
         const msg = ev.error === 'not-allowed' ? 'microphone permission denied'
           : ev.error === 'no-speech' ? 'no speech detected'
           : (ev.error || 'unknown error');
         applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'error', message: msg }));
       };
       speechRec.onend = () => {
+        // AUDIT L3: a stale recognition's onend must not null a newer session.
+        if (sessionToken !== speechToken) return;
         applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'end' }));
         speechRec = null;
       };
@@ -6934,6 +6954,9 @@
   let composerPristine = '';
   function elseSetComposerDraft(text) {
     els.input.value = (composerPristine ? composerPristine + ' ' : '') + text;
+    // Programmatic writes don't fire `input`; listeners (autosize, slash
+    // palette, draft persistence) would otherwise miss the dictation.
+    try { els.input.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
     els.input.focus();
   }
 
@@ -7246,7 +7269,7 @@
     return { results, failed: false };
   }
 
-  async function runRoutine(idOrName, { values } = {}) {
+  async function runRoutine(idOrName, { values, confirm = false } = {}) {
     if (!KROUTINE.buildReplayPlan) { addMessage('assistant', '_Routine module failed to load._', { error: true }); return; }
     const list = await loadRoutines();
     const rec = list.find(r => r.id === idOrName) || list.find(r => r.name.toLowerCase() === String(idOrName || '').toLowerCase());
@@ -7261,6 +7284,25 @@
     let plan;
     try { plan = KROUTINE.buildReplayPlan({ ...rec, steps }); }
     catch (e) { addMessage('assistant', `**Invalid routine:** ${e.message}`, { error: true }); return; }
+    // AUDIT H1: isDestructiveStep() was computed but nothing ever consulted it —
+    // the ⚠ in describeRoutine was decorative, so `/routine run` would happily
+    // replay a recorded Delete/Pay/Submit click with no confirmation. Replay is
+    // now gated on an explicit confirm.
+    const destructive = plan.steps
+      .map((st, i) => ({ st, i }))
+      .filter(({ st }) => KROUTINE.isDestructiveStep ? KROUTINE.isDestructiveStep(st) : false);
+    if (destructive.length && !confirm) {
+      const list = destructive
+        .map(({ st, i }) => `${i + 1}. ${st.action} ${st.selector || ''}${st.note ? ` ("${st.note}")` : ''}`)
+        .join('\n');
+      addMessage('assistant',
+        `**"${rec.name}" contains ${destructive.length} destructive-looking step${destructive.length === 1 ? '' : 's'}** ` +
+        `— replay would click/press them immediately:\n\n${list}\n\n` +
+        `_Nothing was run. To proceed: \`/routine run ${rec.name} --confirm\`, or call \`routine_run\` with \`confirm: true\`._`,
+        { error: true });
+      return { error: 'confirmation required', destructiveSteps: destructive.map(d => d.i) };
+    }
+
     if (plan.needsValues?.length) {
       addMessage('assistant',
         `_This routine needs values the recorder masked (password/email/card/OTP) for step` +
@@ -7327,9 +7369,12 @@
       } else if (sub === 'run') {
         let values;
         const jsonStart = rest.indexOf('{');
-        const name = jsonStart === -1 ? rest : rest.slice(0, jsonStart).trim();
+        let name = jsonStart === -1 ? rest : rest.slice(0, jsonStart).trim();
         if (jsonStart !== -1) { try { values = JSON.parse(rest.slice(jsonStart)); } catch { /* ignore */ } }
-        await runRoutine(name, { values });
+        // `--confirm` acknowledges destructive steps (see runRoutine's gate).
+        const confirm = /(^|\s)--confirm\b/.test(name);
+        name = name.replace(/(^|\s)--confirm\b/g, ' ').trim();
+        await runRoutine(name, { values, confirm });
       } else {
         await listRoutines();
       }
