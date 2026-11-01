@@ -42,6 +42,12 @@ function makeChrome() {
     onChanged: { addListener: record('storage', 'onChanged.addListener'), removeListener() {} }
   };
 
+  const tabEvents = { onCreated: [], onUpdated: [], onRemoved: [], onActivated: [] };
+  const removeFrom = (arr, fn) => {
+    const i = arr.indexOf(fn);
+    if (i !== -1) arr.splice(i, 1);
+  };
+
   // ── tabs: one plausible tab, ids 1..n ──
   const tab = (id, extra = {}) => ({
     id, windowId: 1, active: id === 1, status: 'complete',
@@ -76,10 +82,12 @@ function makeChrome() {
     },
     async group(opts) { calls.push({ ns: 'tabs', method: 'group', args: [opts] }); return 7; },
     async ungroup(ids) { calls.push({ ns: 'tabs', method: 'ungroup', args: [ids] }); },
-    onCreated: { addListener: record('tabs', 'onCreated') },
-    onUpdated: { addListener: record('tabs', 'onUpdated'), removeListener() {} },
-    onRemoved: { addListener: record('tabs', 'onRemoved') },
-    onActivated: { addListener: record('tabs', 'onActivated') }
+    // Tab events keep their listeners so tests can fire them (rapid tab
+    // switching is a real user pattern and its ordering matters).
+    onCreated: { addListener: (f) => { calls.push({ ns: 'tabs', method: 'onCreated.addListener', args: [] }); tabEvents.onCreated.push(f); } },
+    onUpdated: { addListener: (f) => { calls.push({ ns: 'tabs', method: 'onUpdated.addListener', args: [] }); tabEvents.onUpdated.push(f); }, removeListener(f) { removeFrom(tabEvents.onUpdated, f); } },
+    onRemoved: { addListener: (f) => { calls.push({ ns: 'tabs', method: 'onRemoved.addListener', args: [] }); tabEvents.onRemoved.push(f); } },
+    onActivated: { addListener: (f) => { calls.push({ ns: 'tabs', method: 'onActivated.addListener', args: [] }); tabEvents.onActivated.push(f); } }
   };
 
   // ── windows ──
@@ -138,6 +146,7 @@ function makeChrome() {
   const chromeStub = {
     __calls: calls,
     __listeners: listeners,
+    __tabEvents: tabEvents,
     __store: store,
     runtime,
     storage: { local: storageArea, session: { ...storageArea, get: storageArea.get, set: storageArea.set }, sync: storageArea, onChanged: storageArea.onChanged },

@@ -3612,6 +3612,7 @@
   // looking at A. A monotonic token makes the newest intent authoritative and
   // lets superseded loads be discarded.
   let _sessionOpenToken = 0;
+  let _tabSwitchToken = 0;   // newest tabs.onActivated wins
 
   async function openSessionById(id, { closePopover = false } = {}) {
     const token = ++_sessionOpenToken;
@@ -7611,14 +7612,24 @@
 
     chrome.tabs.onActivated.addListener(async ({ tabId }) => {
       if (state.pinnedToSession) { refreshPageContext(); return; }
+      // Rapid tab switching raced here: the handler awaits the session load, so
+      // whichever load finished LAST won, not the tab you ended up on — the panel
+      // then showed a different tab's conversation, which is exactly the "tab
+      // drift" this panel exists to avoid. Newest activation is authoritative.
+      const token = ++_tabSwitchToken;
       const sid = state.tabToSession[tabId];
       let session;
       if (sid) {
         session = await loadFullSession(sid);
+        if (token !== _tabSwitchToken) return;
         if (!session) session = await createSession(await getTab(tabId));
       } else {
         session = await createSession(await getTab(tabId));
       }
+      // Superseded while we were loading, or the user pinned the panel in the
+      // meantime — either way this switch must not be applied.
+      if (token !== _tabSwitchToken) return;
+      if (state.pinnedToSession) return;
       await switchToSession(session);
     });
     // Refresh page context when the user-visible tab navigates. The

@@ -2282,3 +2282,71 @@ test('a single click still opens that conversation', async () => {
   await settle(900);
   assert.match(doc.getElementById('chat').textContent, /SLOW CONTENT/);
 });
+
+// ══════════════════════════════════════════════════════
+// Rapid tab switching: the tab you end up on wins
+// ══════════════════════════════════════════════════════
+// The tabs.onActivated handler awaited a session load before switching and had
+// no ordering guard, so switching tabs quickly left the panel showing the FIRST
+// tab's conversation — the "tab drift" this panel exists to prevent.
+
+async function bootSessionsOnTabs() {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('kyoto_sessions_index', [
+    { id: 's_t1', title: 'TAB1SESSION', lastActive: Date.now(), tabId: 1 },
+    { id: 's_t2', title: 'TAB2SESSION', lastActive: Date.now() - 1000, tabId: 2 }
+  ]);
+  chrome.__store.set('kyoto_session_s_t1', { id: 's_t1', title: 'TAB1SESSION', lastActive: Date.now(), tabId: 1, history: [{ role: 'user', content: 'TAB1 CONTENT', _ts: Date.now() }] });
+  chrome.__store.set('kyoto_session_s_t2', { id: 's_t2', title: 'TAB2SESSION', lastActive: Date.now(), tabId: 2, history: [{ role: 'user', content: 'TAB2 CONTENT', _ts: Date.now() }] });
+  const realGet = chrome.storage.local.get;
+  chrome.storage.local.get = async (keys) => {
+    const k = Array.isArray(keys) ? keys : [keys];
+    if (k.some(x => String(x) === 'kyoto_session_s_t1')) await new Promise(r => setTimeout(r, 400));
+    return realGet.call(chrome.storage.local, keys);
+  };
+  const p = await bootPanel({ chrome });
+  await settle(1200);
+  const activate = (tabId) => chrome.__tabEvents.onActivated.forEach(fn => fn({ tabId }));
+  return { p, doc: p.window.document, chrome, activate };
+}
+
+test('switching tabs quickly lands on the tab you ended on', async () => {
+  const { doc, activate } = await bootSessionsOnTabs();
+  activate(1);                 // slow load
+  await settle(30);
+  activate(2);                 // user ends up here
+  await settle(1200);
+
+  const chat = doc.getElementById('chat').textContent;
+  assert.match(chat, /TAB2 CONTENT/, 'the last-activated tab must win');
+  assert.ok(!/TAB1 CONTENT/.test(chat), 'the superseded activation must not overwrite it');
+});
+
+test('a single tab switch still opens that tab\'s conversation', async () => {
+  const { doc, activate } = await bootSessionsOnTabs();
+  activate(2);
+  await settle(600);
+  assert.match(doc.getElementById('chat').textContent, /TAB2 CONTENT/);
+});
+
+test('pinning the panel during a slow load cancels the pending switch', async () => {
+  // If the user pins the conversation while a load is in flight, applying that
+  // load would defeat the pin — they asked the panel to stop following tabs.
+  const { doc, activate } = await bootSessionsOnTabs();
+  activate(1);                     // slow load against tab 1
+  await settle(30);
+  // Picking a conversation from the list pins the panel (that is what "pinned"
+  // means to the user: stop following tabs). No reaching into internals needed.
+  doc.getElementById('sessionsBtn').click();
+  await settle(150);
+  const row = [...doc.querySelectorAll('#sessionsList .sess-item')]
+    .find(el => (el.textContent || '').includes('TAB2SESSION'));
+  assert.ok(row, 'the other conversation should be listed');
+  row.click();
+  await settle(900);
+
+  // Whatever is displayed, it must not be tab 1's conversation following the tab.
+  assert.ok(!/TAB1 CONTENT/.test(doc.getElementById('chat').textContent),
+    'a pinned panel must not be switched by a load that was in flight');
+});
