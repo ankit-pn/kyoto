@@ -1791,3 +1791,48 @@ kbd {
   line-height: 1;
   padding: 0 2px;
 }
+
+/* ══════════════════════════════════════════════════════
+   Minimum click/tap targets (WCAG 2.5.8, AA — 24x24 CSS px)
+   ══════════════════════════════════════════════════════
+   Several controls are deliberately small to keep the transcript calm: the
+   per-message pin/edit/copy glyphs, the session row actions, the queue cancel,
+   the code-block copy, the context reload and the warning dismiss. Measured from
+   their font-size and padding they land between 16 and 18px tall — below the AA
+   minimum, which penalises touch, trackpads and anyone with a motor impairment.
+
+   Rather than growing them visually (which would change a layout I cannot see),
+   each gets a transparent pseudo-element that extends its *hit area* to at least
+   24x24. The glyph stays the same size; only the region that responds to a click
+   grows. */
+.pin-btn, .edit-btn, .copy-msg-btn, .sess-act,
+.q-cancel, .copy-btn, .ctx-reload, .pw-dismiss {
+  position: relative;
+}
+.pin-btn::after, .edit-btn::after, .copy-msg-btn::after,
+.q-cancel::after, .copy-btn::after, .ctx-reload::after, .pw-dismiss::after {
+  content: '';
+  position: absolute;
+  /* Centre a >=24x24 hit box on the control regardless of its visual size. */
+  top: 50%;
+  left: 50%;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
+  /* Purely a hit target: transparent and non-interactive itself. */
+  background: transparent;
+}
+/* The session row actions sit side by side with only a few px between them, so a
+   centred 24px box would overlap its neighbours and make a click near an edge
+   trigger the WRONG action — worse than a small target. These grow vertically
+   only: full height, no horizontal spill. */
+.sess-act::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 24px;
+  transform: translateY(-50%);
+  background: transparent;
+}

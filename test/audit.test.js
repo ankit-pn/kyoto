@@ -512,3 +512,54 @@ test('the visual hierarchy of text tokens is preserved', () => {
     assert.ok(dFaint > 0.01, `${selector}: --text-faint must remain visible against the background`);
   }
 });
+
+// ── Minimum click/tap targets (WCAG 2.5.8, AA) ────────
+// Several controls are intentionally small glyphs (16-18px tall measured from
+// font-size + padding). They now carry a transparent pseudo-element that expands
+// the hit area to >=24x24 without changing the visual design.
+
+const SMALL_CONTROLS = [
+  '.pin-btn', '.edit-btn', '.copy-msg-btn', '.sess-act',
+  '.q-cancel', '.copy-btn', '.ctx-reload', '.pw-dismiss'
+];
+
+function cssRuleBody(selector) {
+  const css = read('sidepanel/sidepanel.css');
+  const head = selector + '::after';
+  const start = css.indexOf(head);
+  if (start === -1) return '';
+  let depth = 0;
+  for (let i = css.indexOf('{', start); i < css.length; i++) {
+    if (css[i] === '{') depth++;
+    else if (css[i] === '}') { depth--; if (depth === 0) return css.slice(start, i + 1); }
+  }
+  return '';
+}
+
+test('every small control has a >=24px hit area', () => {
+  const missing = [];
+  for (const sel of SMALL_CONTROLS) {
+    const body = cssRuleBody(sel);
+    if (!body) { missing.push(`${sel}: no ::after hit-area rule`); continue; }
+    if (!/position:\s*absolute/.test(body)) missing.push(`${sel}: hit area not positioned`);
+    if (!/height:\s*24px/.test(body)) missing.push(`${sel}: hit area is not 24px tall`);
+    // Adjacent siblings must not spill horizontally over each other.
+    if (sel === '.sess-act') {
+      if (/width:\s*24px/.test(body) || /left:\s*50%/.test(body)) {
+        missing.push('.sess-act: horizontal spill would overlap its neighbours');
+      }
+    } else if (!/width:\s*24px/.test(body)) {
+      missing.push(`${sel}: hit area is not 24px wide`);
+    }
+  }
+  assert.deepEqual(missing, [], `click-target problems:\n${missing.join('\n')}`);
+});
+
+test('hit areas are invisible and do not paint', () => {
+  for (const sel of SMALL_CONTROLS) {
+    const body = cssRuleBody(sel);
+    if (!body) continue;
+    assert.match(body, /content:\s*''/, `${sel}: pseudo-element needs empty content`);
+    assert.match(body, /background:\s*transparent/, `${sel}: hit area must not paint`);
+  }
+});
