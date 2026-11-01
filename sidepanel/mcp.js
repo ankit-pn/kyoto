@@ -143,10 +143,20 @@
 
     const results = await Promise.all(servers.map(initServer));
     const allTools = [];
+    const errors = [];
     let connected = 0;
     for (const r of results) {
       if (!r) continue;
-      if (r.error) continue;
+      if (r.error) {
+        // Keep the failure: a server the user configured but that will not
+        // connect silently reduced the tool set with no explanation.
+        errors.push({
+          name: r.server?.name || r.server?.url || '(unnamed)',
+          url: r.server?.url || '',
+          error: r.error
+        });
+        continue;
+      }
       connected++;
       connectedServers.push(r);
       for (const t of r.tools) {
@@ -156,7 +166,12 @@
         allTools.push(publicTool);
       }
     }
-    return { connected, total: servers.filter(s => s.enabled && s.url).length, tools: allTools };
+    return {
+      connected,
+      total: servers.filter(s => s.enabled && s.url).length,
+      tools: allTools,
+      errors
+    };
   }
 
   async function probe(url, auth) {

@@ -3453,6 +3453,29 @@
   }
 
   // ── Switch / render whole session ────────────────────
+  // ── MCP connection health ────────────────────────────
+  // A configured MCP server that cannot be reached used to vanish silently: its
+  // tools were simply absent from the tool set, and nothing in the panel said
+  // why. The model cannot call what it cannot see, so the user was left
+  // wondering why their server "didn't work".
+  let _mcpErrorsReported = null;
+
+  function surfaceMcpErrors(res) {
+    const errors = Array.isArray(res?.errors) ? res.errors : [];
+    if (!errors.length) { _mcpErrorsReported = null; return; }
+    // De-duplicate across the boot path and the settings-save path.
+    const key = errors.map(e => `${e.name}:${e.error}`).join('|');
+    if (key === _mcpErrorsReported) return;
+    _mcpErrorsReported = key;
+
+    const names = errors.slice(0, 3).map(e => `**${e.name}**`).join(', ');
+    const more = errors.length > 3 ? ` and ${errors.length - 3} more` : '';
+    addMessage('assistant',
+      `⚠ **${errors.length} MCP server${errors.length === 1 ? '' : 's'} could not be reached** — ${names}${more}.\n\n` +
+      `_Their tools are unavailable, so the agent cannot use them. Check the URL and credentials in Settings → MCP servers._`);
+    announce(`${errors.length} MCP server${errors.length === 1 ? '' : 's'} could not be reached.`);
+  }
+
   // ── Background-job health ────────────────────────────
   // Failing jobs were only visible inside the Settings drawer, in the Background
   // jobs section — which is collapsed by default. A job that has been failing, or
@@ -7368,6 +7391,7 @@
       els.mcpStatus.textContent = 'Reconnecting MCP servers…';
       const mcpRes = await window.KyotoMCP.init(mcpServers);
       state.mcpTools = mcpRes.tools;
+      surfaceMcpErrors(mcpRes);
       els.mcpStatus.textContent = `MCP: ${mcpRes.connected}/${mcpRes.total} servers, ${state.mcpTools.length} tools`;
       els.mcpStatus.className = `status ${mcpRes.connected ? 'ok' : ''}`;
 
@@ -8571,6 +8595,7 @@
     if (window.KyotoMCP && (state.settings.mcpServers || []).length) {
       const mcpRes = await window.KyotoMCP.init(state.settings.mcpServers);
       state.mcpTools = mcpRes.tools;
+      surfaceMcpErrors(mcpRes);
     }
 
     // Preload models for every provider that has a key — so the header

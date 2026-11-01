@@ -2094,3 +2094,70 @@ test('an unresponsive background does not raise a job alarm', async () => {
   assert.ok(!/background job/i.test(doc.getElementById('chat').textContent));
   assert.deepEqual(p.errors.filter(e => /^uncaught|unhandled/i.test(e)), [], 'and it must not throw');
 });
+
+// ══════════════════════════════════════════════════════
+// Unreachable MCP servers are surfaced
+// ══════════════════════════════════════════════════════
+// MCP init dropped per-server failures on the floor (`if (r.error) continue`), so
+// a server the user had configured but that would not connect simply reduced the
+// tool set. The model cannot call what it cannot see, and nothing said why.
+
+async function bootWithMcp(servers, mcpFetch) {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('mcpServers', servers);
+  const p = await bootPanel({
+    chrome,
+    beforeBoot: (w) => {
+      w.fetch = async (url, init) => {
+        if (String(url).includes('mcp.example')) return mcpFetch(url, init);
+        throw new Error('offline in tests');
+      };
+    }
+  });
+  await settle(400);
+  return { p, doc: p.window.document };
+}
+
+test('an unreachable MCP server is reported by name', async () => {
+  const { doc } = await bootWithMcp(
+    [{ name: 'my-tools', url: 'https://mcp.example/sse', enabled: true, auth: '' }],
+    async () => { throw new Error('ECONNREFUSED'); }
+  );
+
+  const msgs = [...doc.querySelectorAll('.msg')].map(m => m.textContent).filter(t => /MCP/.test(t));
+  assert.equal(msgs.length, 1, 'one notice for one broken server');
+  assert.match(msgs[0], /could not be reached/i);
+  assert.match(msgs[0], /my-tools/, 'the server must be named');
+  assert.match(msgs[0], /unavailable/i, 'and the consequence explained');
+  assert.match(msgs[0], /Settings/, 'with a pointer to where to fix it');
+});
+
+test('several broken servers are summarised with a count', async () => {
+  const { doc } = await bootWithMcp(
+    [
+      { name: 'alpha', url: 'https://mcp.example/a', enabled: true, auth: '' },
+      { name: 'beta', url: 'https://mcp.example/b', enabled: true, auth: '' }
+    ],
+    async () => { throw new Error('HTTP 401: unauthorized'); }
+  );
+  const msgs = [...doc.querySelectorAll('.msg')].map(m => m.textContent).filter(t => /MCP/.test(t));
+  assert.equal(msgs.length, 1, 'summarised, not one message per server');
+  assert.match(msgs[0], /2 MCP servers/i);
+  assert.match(msgs[0], /alpha/);
+  assert.match(msgs[0], /beta/);
+});
+
+test('a working MCP server produces no warning', async () => {
+  const { doc } = await bootWithMcp(
+    [{ name: 'good', url: 'https://mcp.example/sse', enabled: true, auth: '' }],
+    async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ jsonrpc: '2.0', result: { tools: [], serverInfo: { name: 'good' } } }),
+      text: async () => ''
+    })
+  );
+  const msgs = [...doc.querySelectorAll('.msg')].map(m => m.textContent).filter(t => /MCP/.test(t));
+  assert.deepEqual(msgs, [], 'no false alarm when the server connects');
+});
