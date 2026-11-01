@@ -791,3 +791,75 @@ test('no token is defined without being used', () => {
   const dead = [...defined].filter(t => !used.has(t)).sort();
   assert.deepEqual(dead, [], `these tokens are defined but never used: ${dead.join(', ')}`);
 });
+
+// ── Markup integrity ──────────────────────────────────
+// Four invariants that were verified clean by inspection; pinned here so they
+// cannot regress silently. A typo'd id yields null and kills the control with no
+// error, which is exactly the kind of breakage that never shows up in a test of
+// the feature itself.
+
+function allKnownIds() {
+  const html = read('sidepanel/sidepanel.html');
+  const js = read('sidepanel/sidepanel.js');
+  const fromHtml = [...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
+  // Ids the JS creates at runtime (template strings and direct assignment).
+  const fromJs = [
+    ...[...js.matchAll(/id=\\?['"]([A-Za-z0-9_-]+)\\?['"]/g)].map(m => m[1]),
+    ...[...js.matchAll(/\.id\s*=\s*'([^']+)'/g)].map(m => m[1])
+  ];
+  return new Set([...fromHtml, ...fromJs]);
+}
+
+test('every id the panel looks up actually exists', () => {
+  const js = read('sidepanel/sidepanel.js');
+  const known = allKnownIds();
+  const refs = new Set([
+    ...[...js.matchAll(/\$\('([A-Za-z0-9_-]+)'\)/g)].map(m => m[1]),
+    ...[...js.matchAll(/getElementById\('([A-Za-z0-9_-]+)'\)/g)].map(m => m[1])
+  ]);
+  const missing = [...refs].filter(id => !known.has(id)).sort();
+  assert.deepEqual(missing, [],
+    `these ids are looked up but never exist, so the control silently dies: ${missing.join(', ')}`);
+});
+
+test('every aria reference and label target resolves', () => {
+  const html = read('sidepanel/sidepanel.html');
+  const known = allKnownIds();
+  const dangling = [];
+  for (const attr of ['aria-labelledby', 'aria-describedby', 'aria-controls']) {
+    for (const m of html.matchAll(new RegExp(attr + '="([^"]+)"', 'g'))) {
+      for (const ref of m[1].split(/\s+/).filter(Boolean)) {
+        if (!known.has(ref)) dangling.push(`${attr}="${ref}"`);
+      }
+    }
+  }
+  for (const m of html.matchAll(/<label[^>]*\bfor="([^"]+)"/g)) {
+    if (!known.has(m[1])) dangling.push(`label for="${m[1]}"`);
+  }
+  assert.deepEqual(dangling, [],
+    `these references point at nothing (an unlabelled dialog or field):\n${dangling.join('\n')}`);
+});
+
+test('no id is duplicated in the markup', () => {
+  // Duplicates break getElementById (only the first is returned) and can make an
+  // aria reference point at the wrong element.
+  const ids = [...read('sidepanel/sidepanel.html').matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
+  const seen = new Map();
+  for (const id of ids) seen.set(id, (seen.get(id) || 0) + 1);
+  const dups = [...seen].filter(([, n]) => n > 1).map(([id, n]) => `${id} x${n}`);
+  assert.deepEqual(dups, [], `duplicate ids: ${dups.join(', ')}`);
+});
+
+test('reduced motion neutralises every transition and animation', () => {
+  // Users who ask the OS for less motion must not still get 12 transitions and 5
+  // keyframe animations. The override must be scoped broadly and force-duration.
+  const css = read('sidepanel/sidepanel.css');
+  const i = css.indexOf('@media (prefers-reduced-motion: reduce)');
+  assert.ok(i > -1, 'a reduced-motion block should exist');
+  const block = css.slice(i, css.indexOf('\n}', i) + 2);
+  assert.match(block, /\*,\s*\*::before,\s*\*::after/, 'the override must cover all elements and pseudo-elements');
+  assert.match(block, /transition-duration:[^;]*!important/, 'transitions must be neutralised');
+  assert.match(block, /animation-duration:[^;]*!important/, 'animations must be neutralised');
+  assert.match(block, /animation-iteration-count:[^;]*!important/, 'and not left looping');
+  assert.match(block, /scroll-behavior:\s*auto/, 'smooth scrolling must be disabled too');
+});
