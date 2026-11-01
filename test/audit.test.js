@@ -376,3 +376,18 @@ test('semantic colours are themed for contrast on a light background', () => {
     }
   }
 });
+
+test('the shortcuts help dialog is a labelled modal', () => {
+  const tag = (HTML.match(/<div[^>]*id="shortcutsOverlay"[^>]*>/) || [''])[0];
+  assert.ok(tag, 'the shortcuts overlay must exist');
+  assert.match(tag, /role="dialog"/);
+  assert.match(tag, /aria-modal="true"/);
+  assert.match(tag, /aria-labelledby="shortcutsTitle"/);
+  assert.match(HTML, /id="shortcutsTitle"/, 'the aria-labelledby target must exist');
+  // Every shortcut row must use real <kbd> elements, not styled spans, so the
+  // keys are exposed as keys rather than prose.
+  const rows = (HTML.match(/class="shortcuts-list"[\s\S]*?<\/dl>/) || [''])[0];
+  assert.ok((rows.match(/<kbd>/g) || []).length >= 8, 'shortcuts should be marked up with <kbd>');
+  // And the empty state must advertise it, or nobody finds it.
+  assert.match(HTML, /empty-hint[\s\S]{0,120}kbd/, 'the empty state should point at the shortcut help');
+});

@@ -53,6 +53,7 @@
     <div class="empty" id="empty">
       <h2>Your browser, agent-controlled</h2>
       <p>Ask in natural language. Kyoto can read DOM, inspect network, dump cookies, run JS, click buttons, capture screenshots, search history, and call out to MCP servers.</p>
+      <p class="empty-hint">Press <kbd>?</kbd> for keyboard shortcuts · <kbd>Ctrl</kbd>+<kbd>K</kbd> for the command palette</p>
       <div class="chips">
         <button class="chip" data-prompt="Summarize this page in 5 bullet points.">Summarize page</button>
         <button class="chip" data-prompt="List all cookies for this site and tell me which ones look important for the session (likely auth/session tokens).">Analyze cookies</button>
@@ -616,6 +617,31 @@
   <script src="tools/finalize.js"></script>
   <script src="mcp.js"></script>
   <script src="sidepanel.js"></script>
+  <!-- Keyboard shortcuts. Every shortcut below is wired in sidepanel.js; this
+       exists because none of them were discoverable. -->
+  <div class="shortcuts hidden" id="shortcutsOverlay" role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle">
+    <div class="shortcuts-box">
+      <div class="shortcuts-hdr">
+        <h2 id="shortcutsTitle">Keyboard shortcuts</h2>
+        <button class="ibtn" id="closeShortcutsBtn" type="button" aria-label="Close keyboard shortcuts">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <dl class="shortcuts-list">
+        <div><dt><kbd>Ctrl</kbd><kbd>K</kbd></dt><dd>Command palette — actions, tools, sessions, models</dd></div>
+        <div><dt><kbd>?</kbd></dt><dd>This help</dd></div>
+        <div><dt><kbd>Enter</kbd></dt><dd>Send message</dd></div>
+        <div><dt><kbd>Shift</kbd><kbd>Enter</kbd></dt><dd>New line without sending</dd></div>
+        <div><dt><kbd>/</kbd></dt><dd>Slash commands (type at the start of the composer)</dd></div>
+        <div><dt><kbd>&uarr;</kbd><kbd>&darr;</kbd></dt><dd>Move through palettes, model and session pickers</dd></div>
+        <div><dt><kbd>Home</kbd><kbd>End</kbd></dt><dd>Jump to the first / last item in a picker</dd></div>
+        <div><dt><kbd>Tab</kbd></dt><dd>Complete the highlighted slash command</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>Close a dialog, popover or the palette</dd></div>
+      </dl>
+      <p class="shortcuts-foot">Press <kbd>?</kbd> any time. On macOS use <kbd>&#8984;</kbd> instead of <kbd>Ctrl</kbd>.</p>
+    </div>
+  </div>
+
   <!-- Command palette (Ctrl/Cmd+K). Fuzzy launcher over actions, tools,
        sessions, models and settings so 147 tools stay discoverable. -->
   <div class="palette hidden" id="paletteOverlay" role="dialog" aria-label="Command palette">

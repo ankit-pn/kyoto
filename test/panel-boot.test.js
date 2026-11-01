@@ -1101,3 +1101,78 @@ test('the timestamp never reaches the API payload', async () => {
   doc.getElementById('stopBtn').click();
   await settle(120);
 });
+
+// ══════════════════════════════════════════════════════
+// Keyboard shortcuts help
+// ══════════════════════════════════════════════════════
+// The panel had several shortcuts (palette, picker navigation, slash
+// completion) and advertised none of them.
+
+test('? opens the shortcuts dialog and Escape closes it', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const overlay = doc.getElementById('shortcutsOverlay');
+  assert.ok(overlay.classList.contains('hidden'), 'starts hidden');
+
+  doc.getElementById('sendBtn').focus();
+  doc.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+  await settle(40);
+  assert.ok(!overlay.classList.contains('hidden'), '? should open the dialog');
+  assert.ok(overlay.contains(doc.activeElement), 'focus must move into the dialog');
+
+  doc.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await settle(40);
+  assert.ok(overlay.classList.contains('hidden'), 'Escape must close it');
+  assert.equal(doc.activeElement, doc.getElementById('sendBtn'), 'focus returns to the opener');
+});
+
+test('typing ? in the composer does not open the dialog', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const input = doc.getElementById('input');
+  input.focus();
+  // This is the regression that matters: `?` is a normal character here.
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+  await settle(40);
+  assert.ok(doc.getElementById('shortcutsOverlay').classList.contains('hidden'),
+    'a question mark typed into the composer must go to the composer');
+});
+
+test('the dialog documents the shortcuts that actually exist', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+  await settle(40);
+
+  const rows = [...doc.querySelectorAll('.shortcuts-list > div')];
+  assert.ok(rows.length >= 8, `expected a full list, got ${rows.length}`);
+  const text = rows.map(r => r.textContent).join(' ');
+  for (const expected of ['K', 'Enter', 'Shift', '/', 'Esc', 'Home', 'End', 'Tab']) {
+    assert.ok(text.includes(expected), `shortcut ${expected} should be documented`);
+  }
+  // Machine-readable keys, not just styled text.
+  assert.ok(doc.querySelectorAll('.shortcuts-list kbd').length >= 8);
+});
+
+test('the palette can open the shortcuts dialog by name', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  key(p.window, 'k', { ctrlKey: true });
+  type(p.window, doc.getElementById('paletteInput'), 'keyboard');
+  await settle(15);
+  key(p.window, 'Enter');
+  await settle(60);
+  assert.ok(!doc.getElementById('shortcutsOverlay').classList.contains('hidden'),
+    'the palette entry should open the shortcuts dialog');
+});
+
+test('clicking the scrim closes the shortcuts dialog', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+  await settle(40);
+  const overlay = doc.getElementById('shortcutsOverlay');
+  overlay.click();                       // click on the backdrop itself
+  await settle(40);
+  assert.ok(overlay.classList.contains('hidden'), 'a scrim click should dismiss it');
+});

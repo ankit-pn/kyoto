@@ -7256,6 +7256,7 @@
     action('routine-save', 'Save recording as routine', 'replay without a model', () => { closePalette(); saveRoutineFromCapture(); });
     action('routine-list', 'List routines', '', () => { closePalette(); listRoutines(); });
     action('stop', 'Stop the running turn', '', () => { closePalette(); els.stopBtn?.click(); });
+    action('shortcuts', 'Keyboard shortcuts', 'press ? anywhere', () => { closePalette(); openShortcuts(); });
 
     // Slash commands (built-in + user-defined).
     for (const [cmd, tmpl] of Object.entries(BUILTIN_SLASH)) {
@@ -7402,12 +7403,70 @@
     paletteEl.overlay.addEventListener('click', (e) => { if (e.target === paletteEl.overlay) closePalette(); });
   }
 
+  // ── Keyboard shortcuts help ──────────────────────────
+  // The panel had shortcuts (palette, pickers, slash completion) and advertised
+  // none of them. `?` opens a list of the ones that actually exist.
+  let _focusBeforeShortcuts = null;
+
+  function shortcutsOpen() {
+    const el = document.getElementById('shortcutsOverlay');
+    return !!el && !el.classList.contains('hidden');
+  }
+
+  function openShortcuts() {
+    const el = document.getElementById('shortcutsOverlay');
+    if (!el || shortcutsOpen()) return;
+    _focusBeforeShortcuts = document.activeElement;
+    el.classList.remove('hidden');
+    // Move focus into the dialog, as with the settings drawer.
+    try { document.getElementById('closeShortcutsBtn')?.focus(); } catch { /* non-fatal */ }
+    announce('Keyboard shortcuts opened.');
+  }
+
+  function closeShortcuts() {
+    const el = document.getElementById('shortcutsOverlay');
+    if (!el || !shortcutsOpen()) return;
+    el.classList.add('hidden');
+    const prev = _focusBeforeShortcuts;
+    _focusBeforeShortcuts = null;
+    if (prev && typeof prev.focus === 'function' && document.contains(prev)) prev.focus();
+    else { try { els.input?.focus(); } catch { /* non-fatal */ } }
+  }
+
+  /** True when the keystroke belongs to a text field, not the panel. */
+  function isTypingTarget(target) {
+    if (!target) return false;
+    const tag = (target.tagName || '').toUpperCase();
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!target.isContentEditable;
+  }
+
+  function wireShortcutsHelp() {
+    const overlay = document.getElementById('shortcutsOverlay');
+    if (overlay) {
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) closeShortcuts(); });
+    }
+    const closeBtn = document.getElementById('closeShortcutsBtn');
+    if (closeBtn) closeBtn.addEventListener('click', closeShortcuts);
+
+    document.addEventListener('keydown', (e) => {
+      // `?` must not fire while the user is typing a question mark in the
+      // composer — that is the whole reason this guard exists.
+      if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingTarget(e.target)) {
+        e.preventDefault();
+        shortcutsOpen() ? closeShortcuts() : openShortcuts();
+        return;
+      }
+      if (e.key === 'Escape' && shortcutsOpen()) { e.preventDefault(); closeShortcuts(); }
+    });
+  }
+
   // ── Escape dismisses overlays ────────────────────────
   // The settings and skills drawers are modal (aria-modal) and previously could
   // only be closed with the mouse or by clicking the scrim.
   function wireOverlayDismissal() {
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || paletteState.open) return;   // palette handles its own Esc
+      if (shortcutsOpen()) return;                          // handled by wireShortcutsHelp
       if (els.skillsDrawer && !els.skillsDrawer.classList.contains('hidden')) {
         e.preventDefault();
         closeSkillsManager();
@@ -7955,6 +8014,7 @@
     wirePalette();
     wireVoice();
     wireOverlayDismissal();
+    wireShortcutsHelp();
     wireDrawerSections();
     wireDrawerDirtyTracking();
     refreshSectionCollapse();

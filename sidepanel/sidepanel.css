@@ -1679,3 +1679,75 @@ body {
   cursor: default;
 }
 .msg:hover .msg-time { opacity: 1; }
+
+
+/* ── Keyboard shortcuts overlay ──────────────────────
+   The panel has several shortcuts and advertised none of them. */
+.shortcuts {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 12px;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+.shortcuts-box {
+  width: min(460px, 96vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  background: var(--bg);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.4);
+}
+.shortcuts-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+}
+.shortcuts-hdr h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.shortcuts-list { margin: 0; padding: 8px 14px; }
+.shortcuts-list > div {
+  display: flex;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+.shortcuts-list > div:last-child { border-bottom: 0; }
+.shortcuts-list dt { flex: 0 0 96px; display: flex; gap: 3px; align-items: center; }
+.shortcuts-list dd { margin: 0; font-size: 12px; color: var(--text-dim); }
+.shortcuts-foot {
+  margin: 0;
+  padding: 10px 14px 14px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+/* Key caps. */
+kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text-dim);
+  background: var(--bg-elev2);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+}
+.empty-hint {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
