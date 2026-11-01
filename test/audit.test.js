@@ -1030,3 +1030,89 @@ test('the command palette is reachable without a keyboard shortcut', () => {
   // And the shortcut must still work, so both routes exist.
   assert.match(js, /mod && \(e\.key === 'k'/, 'Ctrl/Cmd+K should remain wired');
 });
+
+// ── Every chrome API used has its permission ──────────
+// A missing manifest permission is invisible in jsdom and in every unit test: the
+// call simply fails at runtime in the browser. Cross-check the namespaces the code
+// touches against what the manifest declares.
+
+// Namespace -> permission it requires (null = usable without declaring one).
+const API_PERMISSIONS = {
+  alarms: 'alarms', bookmarks: 'bookmarks', browsingData: 'browsingData',
+  contextMenus: 'contextMenus', cookies: 'cookies', debugger: 'debugger',
+  declarativeNetRequest: 'declarativeNetRequest', downloads: 'downloads',
+  history: 'history', identity: 'identity', idle: 'idle',
+  management: 'management', nativeMessaging: 'nativeMessaging',
+  notifications: 'notifications', omnibox: 'omnibox', pageCapture: 'pageCapture',
+  power: 'power', readingList: 'readingList', scripting: 'scripting',
+  sessions: 'sessions', sidePanel: 'sidePanel', tabGroups: 'tabGroups',
+  tabs: 'tabs', topSites: 'topSites', webRequest: 'webRequest',
+  // No permission needed (or part of the basic extension surface).
+  permissions: null, runtime: null, storage: null, windows: null, devtools: null,
+  extension: null, i18n: null
+};
+
+/** All first-party .js files (no node_modules, no tests). */
+function sourceFiles() {
+  const fs = require('node:fs');
+  const out = [];
+  for (const dir of ['sidepanel', 'sidepanel/tools', '.']) {
+    let entries = [];
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const f of entries) {
+      if (!f.endsWith('.js')) continue;
+      const rel = dir === '.' ? f : `${dir}/${f}`;
+      if (rel.startsWith('test/') || rel.startsWith('node_modules/')) continue;
+      out.push(rel);
+    }
+  }
+  return [...new Set(out)];
+}
+
+test('every chrome namespace used has the permission it needs', () => {
+  const manifest = JSON.parse(read('manifest.json'));
+  const declared = new Set([
+    ...(manifest.permissions || []),
+    ...(manifest.optional_permissions || [])
+  ]);
+
+  const used = new Map();   // namespace -> file that uses it
+  for (const file of sourceFiles()) {
+    // Strip comments: a commented-out call must not be read as usage.
+    const src = read(file)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    for (const m of src.matchAll(/chrome\.([a-zA-Z]+)\./g)) {
+      if (!used.has(m[1])) used.set(m[1], file);
+    }
+  }
+  assert.ok(used.size >= 10, `expected to find chrome usage, found ${used.size} namespaces`);
+
+  const missing = [];
+  const unknown = [];
+  for (const [ns, file] of used) {
+    if (!(ns in API_PERMISSIONS)) { unknown.push(`${ns} (${file})`); continue; }
+    const need = API_PERMISSIONS[ns];
+    if (need && !declared.has(need)) missing.push(`${ns} needs "${need}" (used in ${file})`);
+  }
+  assert.deepEqual(unknown, [],
+    `add these namespaces to API_PERMISSIONS so the check is complete:\n${unknown.join('\n')}`);
+  assert.deepEqual(missing, [],
+    `these APIs will fail at runtime because the permission is not declared:\n${missing.join('\n')}`);
+});
+
+test('a runtime permission request can only ask for declared optional permissions', () => {
+  // chrome.permissions.request() can only grant permissions listed in
+  // optional_permissions. This build declares none, so the request tool must never
+  // claim it can gain a new capability.
+  const manifest = JSON.parse(read('manifest.json'));
+  const optional = (manifest.optional_permissions || []).filter(p => p !== '<all_urls>');
+  const network = read('sidepanel/tools/network.js');
+
+  if (!optional.length) {
+    assert.ok(!/Request an optional permission at runtime/i.test(network),
+      'no optional permissions are declared, so no tool may advertise requesting one');
+    assert.match(network, /nothing can be granted at runtime/i,
+      'the tool description should say the capability is unavailable');
+  }
+});
