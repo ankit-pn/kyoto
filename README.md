@@ -12,6 +12,11 @@ Bring your own key for any OpenAI-compatible provider (OpenRouter, OpenCode Go, 
 
 - **Native Chrome side panel.** Toolbar icon or `Ctrl/Cmd+Shift+L`. Also opens inside DevTools (F12 → Kyoto tab) and as a pop-out window.
 - **Address-bar entry.** Type `ky <prompt>` in the omnibox from any tab — no panel round-trip. `ky summarize: …` / `ky explain: …` expand into page prompts.
+- **Command palette (`Ctrl/Cmd+K`).** One fuzzy launcher over every action, slash command, session, configured model, tool and settings pane — the fix for 150 tools being undiscoverable.
+- **Voice in and out.** 🎤 dictation into the composer (Web Speech, no permission) and optional read-aloud of replies. The mic hides itself on browsers without speech support rather than showing a dead button.
+- **Council mode.** `/council <question>` asks up to four configured models in parallel and shows the answers side by side with latency and cost — then adopt the winner with one click.
+- **Routines.** Record a workflow once, replay it **with no model calls**: fast, deterministic and free, runnable by the agent or by cron.
+- **Share a session as HTML.** `/share` exports a self-contained, secret-redacted page you can hand to someone else.
 - **Any OpenAI-compatible provider, multiple at once.** Four first-class (OpenRouter / OpenCode Go / DeepSeek / MiniMax) plus an unlimited "custom" slot for Ollama, LM Studio, Groq, Together, Cerebras, Gemini-OAI, Anthropic-via-LiteLLM, your-own-proxy, etc.
 - **Per-tab sessions.** Every tab owns its own conversation. Switching tabs swaps the visible session; in-flight streams keep running for the tabs you left.
 - **Streaming tool-call loop.** Up to 12 round-trips per turn. Captures the reasoning channel — OpenRouter's `reasoning_details` (replayed verbatim, in order, encrypted blocks included), plus `reasoning_content` / `reasoning` from DeepSeek thinking-mode and other reasoning models.
@@ -104,6 +109,9 @@ Type `/help` in the composer for the full list. Built-ins:
 |---|---|
 | `/help` `/clear` `/pin` `/sessions` `/settings` | Panel actions (don't go to the model) |
 | `/cost` `/compact` | Spend/usage report · force a context compaction |
+| `/council <q>` `/council-use provider:model` | Ask several models in parallel, then adopt one |
+| `/routine list\|save <name>\|run <name>` | Recorded workflows: replay deterministically |
+| `/share` | Export the session as standalone HTML |
 | `/summarize` `/explain` `/eli5` `/keypoints` | Quick page prompts |
 | `/cookies` `/clone-session` `/curl` `/diffcookies` | Cookie workflows |
 | `/network` `/api` `/har` `/postman` | Network inspection / export |
@@ -138,6 +146,7 @@ Toggle groups on/off in **Settings → Tool groups**.
 | **meta** | `ask_user` (interactive chat-card prompt — agent pauses and waits for the user) |
 | **fs** | Virtual workspace (IndexedDB, GB-scale): `fs_write`, `fs_append`, `fs_read` (offset/limit chunks), `fs_list`, `fs_stat`, `fs_delete`, `fs_move`, `fs_total`, `fs_zip` (download as ZIP), `fs_clear` |
 | **platform** | Chrome platform surfaces: `tabgroup_list` / `_create` / `_add` / `_ungroup`, `session_recent` + `session_restore` (undo a closed tab/window), `power_keep_awake` (stop the machine sleeping mid-run), `page_capture_mhtml` (offline page archive), `site_data_clear` (per-origin "log me out"), `windows_inspect`, `tab_move_to_window`, `reading_list_add` + `_query`, `idle_state` |
+| **routine** | `routine_list`, `routine_run`, `routine_save`, `routine_delete` — replay a recorded page workflow deterministically (no model calls). Pairs with cron for scheduled, free automation. |
 | **intercept** | Request interception via `declarativeNetRequest`: `net_rules_list`, `net_rule_block` (kill a request → simulate outage), `net_rule_redirect` (point an API at a localhost mock), `net_rule_stub` (replace a body), `net_rule_remove`, `net_rule_clear` (restore normal networking) |
 
 Plus any MCP-server tools (auto-namespaced `mcp__<server>__<tool>`) and custom JS tools you define.
@@ -155,6 +164,20 @@ Kyoto uses ~26 Chrome extension APIs. Beyond the tab/DOM/cookie basics, the newe
 - **Request interception** (`declarativeNetRequest`) — block requests to simulate an outage, or redirect an API at a localhost mock. Rules are browser-wide and persist until removed, so broad filters require an explicit `confirmBroad`: `net_rule_clear` is the reset. Note DNR cannot set a status code; `net_rule_stub` replaces a body and says so plainly.
 
 See [CHROME-API-ROADMAP.md](CHROME-API-ROADMAP.md) for the full coverage map — what's used, what's worth adding next (`tabCapture`, `offscreen`, `identity`, `userScripts`, `contentSettings`, `processes`, `tts`) and what is deliberately skipped.
+
+## Palette, voice, council, routines
+
+Five features aimed at how the agent is *used*, not at what it can call.
+
+**Command palette (`Ctrl/Cmd+K`).** A fuzzy launcher over actions, slash commands, sessions, configured models, all tools and settings. Results render grouped by source while `↑`/`↓` follow the rendered order (grouping the list but navigating by score makes the cursor appear to jump between sections).
+
+**Voice.** The 🎤 button dictates into the composer — `interim` results replace each other (browsers resend the whole hypothesis) while `final` results append once, so nothing is duplicated. Replies can be read aloud (`speechSynthesis`), sentence-chunked so long answers don't arrive as one utterance. Speech is cancelled when a new turn starts.
+
+**Council.** `/council <question>` fans out to up to four providers that actually have credentials, renders one block per model, and records the spend for each so the session cap and `/cost` stay truthful. A failing model becomes an error column, not a failed run.
+
+**Routines.** The recorder already captures structured page events (with sensitive values masked as `«password»`/`«card»`/…). A routine turns them into steps once, then replays them exactly: no model, no tokens, deterministic. Selector quality is the whole game — the planner prefers `data-testid` → `aria-label` → `name` → a *stable* `#id` (generated ids are rejected) → a shallow CSS path, and returns nothing rather than inventing a text selector. Masked values are never replayed: the routine reports which steps need input and the caller supplies them. Steps that look destructive (`Delete`, `Pay`, `Submit`, …) are flagged so the user can be asked first.
+
+**Share.** `/share` writes a single self-contained HTML file: inline CSS, no external requests, `_`-prefixed internals stripped, and API keys/Bearer tokens/JWTs/PEM blocks redacted before they can reach disk.
 
 ## Per-tab sessions
 

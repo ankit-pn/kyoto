@@ -72,6 +72,7 @@
           <input type="checkbox" id="useContext" checked />
           <span>Page context</span>
         </label>
+                <button id="micBtn" class="btn-mini hidden" type="button" title="Voice input (speech-to-text)">🎤</button>
         <button id="visionBtn" class="btn-mini btn-vision" type="button" title="Attach a screenshot of the current tab with the next message (requires a vision-capable model)">📸</button>
         <div class="composer-spacer"></div>
         <button id="stopBtn" class="btn-stop hidden" title="Stop generating">Stop</button>
@@ -266,6 +267,14 @@
           <span>Hide reasoning ("thinking") cards by default</span>
         </label>
         <p class="hint">When on, the reasoning channel from DeepSeek thinking-mode / OpenRouter reasoning providers is still captured (and echoed back as the API requires) but no card is rendered.</p>
+      </div>
+
+      <div class="field">
+        <label class="check-row">
+          <input type="checkbox" id="voiceAutoSpeak" />
+          <span>Read replies aloud</span>
+        </label>
+        <p class="hint">Speaks each completed assistant message with the system voices (<code>speechSynthesis</code>). Use the 🎤 button in the composer for speech-to-text input; it appears only when your browser supports Web Speech.</p>
       </div>
 
       <div class="field">
@@ -560,6 +569,11 @@
   <script src="providers.js"></script>
   <script src="context.js"></script>
   <script src="tab-target.js"></script>
+  <script src="palette-core.js"></script>
+  <script src="speech.js"></script>
+  <script src="council-core.js"></script>
+  <script src="routine.js"></script>
+  <script src="share-core.js"></script>
   <script src="tools/core.js"></script>
   <script src="tools/workspace.js"></script>
   <script src="tools/browser.js"></script>
@@ -576,8 +590,19 @@
   <script src="tools/cron.js"></script>
   <script src="tools/platform.js"></script>
   <script src="tools/net-rules.js"></script>
+  <script src="tools/routine.js"></script>
   <script src="tools/finalize.js"></script>
   <script src="mcp.js"></script>
   <script src="sidepanel.js"></script>
+  <!-- Command palette (Ctrl/Cmd+K). Fuzzy launcher over actions, tools,
+       sessions, models and settings so 147 tools stay discoverable. -->
+  <div class="palette hidden" id="paletteOverlay" role="dialog" aria-label="Command palette">
+    <div class="palette-box">
+      <input type="text" id="paletteInput" placeholder="Search actions, tools, sessions, models, settings…" autocomplete="off" spellcheck="false" />
+      <div class="palette-list" id="paletteList"></div>
+      <div class="palette-foot"><span>↑↓ navigate</span><span>↵ run</span><span>esc close</span></div>
+    </div>
+  </div>
+
 </body>
 </html>

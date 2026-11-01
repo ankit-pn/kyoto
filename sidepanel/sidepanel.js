@@ -1610,6 +1610,10 @@
     '/help':       '[CMD]:help',
     '/clear':      '[CMD]:clear',
     '/compact':    '[CMD]:compact',
+    '/share':      '[CMD]:share',
+    '/council':    '[CMD]:council',
+    '/council-use':'[CMD]:council_use',
+    '/routine':    '[CMD]:routine',
     '/cost':       '[CMD]:cost',
     '/pin':        '[CMD]:pin_last_assistant',
     '/sessions':   '[CMD]:open_sessions',
@@ -2257,8 +2261,15 @@
     } catch {}
   }
 
-  async function oneShotCompletion(prompt, { maxTokens = 800, temperature = 0.2 } = {}) {
-    const { provider, model } = state.settings;
+  // Optional per-call model override so non-chat features (compaction summaries,
+  // council fan-out) can target a specific provider/model without mutating the
+  // user's active settings.
+  // `returnMeta:true` yields { text, usage, cost } so non-chat callers (the
+  // council fan-out) can bill each response honestly instead of silently
+  // spending outside the session ledger.
+  async function oneShotCompletion(prompt, { maxTokens = 800, temperature = 0.2, provider: pOverride, model: mOverride, returnMeta = false } = {}) {
+    const provider = pOverride || state.settings.provider;
+    const model = mOverride || state.settings.model;
     const cfg = getProviderConfig(provider);
     if (!cfg) throw new Error(`unknown provider: ${provider}`);
     const apiKey = keyFor(provider);
@@ -2299,7 +2310,7 @@
           } catch {}
         }
       }
-      return acc;
+      return returnMeta ? { text: acc, usage: null, cost: null } : acc;
     }
 
     // Delegate header construction to the provider config so non-Bearer
@@ -2334,7 +2345,12 @@
       throw new Error(`HTTP ${res.status} (POST ${cfg.chatUrl}, Content-Type=${ct}): ${text.slice(0, 200)}`);
     }
     const data = await res.json();
-    return data?.choices?.[0]?.message?.content || '';
+    const text = data?.choices?.[0]?.message?.content || '';
+    if (!returnMeta) return text;
+    const usage = KP.normaliseUsage ? KP.normaliseUsage(data?.usage) : (data?.usage || null);
+    let cost = usage?.cost;
+    if (cost == null) cost = window.KyotoModels?.costFor(provider, model, usage);
+    return { text, usage, cost: cost == null ? null : cost };
   }
 
   function fmtBytes(n) {
@@ -2407,6 +2423,8 @@
   }
 
   async function handleInlineSlash(action, args) {
+    // Newer feature commands live in one place so the main switch stays small.
+    if (await handleFeatureSlash(action, args)) return;
     if (action === 'help') {
       const lines = Object.keys(BUILTIN_SLASH).sort().map(k => {
         const v = BUILTIN_SLASH[k];
@@ -2795,7 +2813,7 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta', 'skill', 'cron', 'platform', 'intercept', 'debugger'],
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta', 'skill', 'cron', 'platform', 'intercept', 'routine', 'debugger'],
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
@@ -2855,6 +2873,9 @@
     theme: 'system',           // 'system' | 'light' | 'dark'
     density: 'comfortable',    // 'comfortable' | 'compact'
     hideReasoning: false,
+    // Voice: speak completed assistant replies with the system voices.
+    // The mic itself needs no setting — it is a momentary control.
+    voiceAutoSpeak: false,
     // OpenRouter routing + reasoning. Empty string = "don't send the param",
     // because OpenRouter omits absent params upstream rather than applying
     // defaults — sending an explicit default would change cache keys.
@@ -4303,6 +4324,7 @@
       let autoContinues = 0;
       let goalContinues = 0;
       let stoppedReason = 'maxSteps'; // overwritten if we break naturally
+      let lastAssistantText = '';   // for optional read-aloud at turn end
 
       stepLoop:
       for (let step = 0; step < maxSteps; step++) {
@@ -4371,6 +4393,7 @@
           if (isActive(session.id)) renderUsageChip(usage, msg._cost);
         }
         if (finishReason) msg._finishReason = finishReason;
+        if (typeof msg.content === 'string' && msg.content) lastAssistantText = msg.content;
         session.history.push(msg);
         const asstIdx = session.history.length - 1;
         // Decorate the live-streamed assistant message with a pin button.
@@ -4532,6 +4555,9 @@
         if (isActive(session.id)) addMessage('assistant', note, { error: true });
         await persistSession(session);
       }
+      // Optional read-aloud. Fire-and-forget: speech must never delay or fail
+      // the turn, and the synthesizer is stopped if another turn starts.
+      try { maybeAutoSpeak(lastAssistantText); } catch { /* ignore */ }
     } catch (e) {
       // OpenAI-compat servers reject the next turn with "insufficient
       // tool messages following tool_calls" if any tool_call_id is
@@ -4570,6 +4596,13 @@
   if (!TT.injectToolTabId) {
     console.error('[Kyoto] sidepanel/tab-target.js failed to load — tab-scoped tools will follow the active tab.');
   }
+  // Optional feature modules. Each is a pure IIFE loaded before this file; a
+  // missing module disables exactly one feature instead of breaking the panel.
+  const KPAL = window.KyotoPalette || {};     // command palette
+  const KSPEECH = window.KyotoSpeech || {};   // voice input / read-aloud
+  const KCOUNCIL = window.KyotoCouncil || {}; // multi-model compare
+  const KROUTINE = window.KyotoRoutine || {}; // record → deterministic replay
+  const KSHARE = window.KyotoShare || {};     // standalone HTML export
 
   // A cached page snapshot may only be injected into the conversation whose tab
   // it was taken from. Keeps a pinned session from being fed another tab's page.
@@ -6640,10 +6673,677 @@
     try { return await chrome.tabs.get(tabId); } catch { return null; }
   }
 
+
+  // ════════════════════════════════════════════════════
+  // Feature modules: palette, voice, share, council, routines
+  // Each degrades independently if its module failed to load.
+  // ════════════════════════════════════════════════════
+
+  // ── Command palette (Ctrl/Cmd+K) ─────────────────────
+  // A launcher over actions, slash commands, tools, sessions, models and
+  // settings. The point is discoverability: the tool registry alone is ~150
+  // entries and nothing else surfaces them.
+  const paletteEl = {
+    overlay: document.getElementById('paletteOverlay'),
+    input: document.getElementById('paletteInput'),
+    list: document.getElementById('paletteList')
+  };
+  const paletteState = { open: false, filtered: [], index: 0 };
+
+  function paletteSourceItems() {
+    const items = [];
+    // Actions first: these are the things a palette is actually for.
+    const action = (id, label, hint, run) => items.push({ id: 'action:' + id, label, hint, source: 'action', run });
+    action('new-chat', 'New chat', 'start a fresh session', async () => {
+      closePalette();
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const s2 = await createSession(tab);
+      state.pinnedToSession = false;
+      await switchToSession(s2);
+      updateSessionsButton();
+    });
+    action('compact', 'Compact context', 'summarise older turns', () => { closePalette(); handleInlineSlash('compact', ''); });
+    action('cost', 'Show spend', 'session + all-time cost', () => { closePalette(); handleInlineSlash('cost', ''); });
+    action('settings', 'Open settings', 'provider, model, tools', () => { closePalette(); openDrawer(); });
+    action('sessions', 'Browse sessions', 'switch conversation', () => { closePalette(); toggleSessionsPopover?.(); });
+    action('share', 'Share session as HTML', 'self-contained export', () => { closePalette(); shareSessionHtml(); });
+    action('council', 'Ask several models', 'compare answers side by side', () => {
+      closePalette();
+      els.input.value = '/council ';
+      els.input.focus();
+    });
+    action('routine-save', 'Save recording as routine', 'replay without a model', () => { closePalette(); saveRoutineFromCapture(); });
+    action('routine-list', 'List routines', '', () => { closePalette(); listRoutines(); });
+    action('stop', 'Stop the running turn', '', () => { closePalette(); els.stopBtn?.click(); });
+
+    // Slash commands (built-in + user-defined).
+    for (const [cmd, tmpl] of Object.entries(BUILTIN_SLASH)) {
+      items.push({
+        id: 'slash:' + cmd, label: cmd,
+        hint: String(tmpl).startsWith('[CMD]:') ? 'panel action' : 'prompt',
+        source: 'slash', run: () => { closePalette(); els.input.value = cmd + ' '; els.input.focus(); }
+      });
+    }
+    for (const c of (state.settings?.customSlashCommands || [])) {
+      items.push({ id: 'slash:/' + c.name, label: '/' + c.name, hint: 'custom', source: 'slash',
+        run: () => { closePalette(); els.input.value = '/' + c.name + ' '; els.input.focus(); } });
+    }
+
+    // Sessions
+    for (const sess of (state.sessionsIndex || []).slice(0, 40)) {
+      items.push({
+        id: 'session:' + sess.id,
+        label: sess.title || 'Untitled session',
+        hint: sess.url || '', source: 'session',
+        run: async () => {
+          closePalette();
+          const full = await loadFullSession(sess.id);
+          if (full) switchToSession(full, { fromUser: true });
+        }
+      });
+    }
+
+    // Models: only providers that are usable (key present / oauth / keyless custom).
+    for (const [provider, list] of (state.modelsByProvider || new Map())) {
+      const cfg = getProviderConfig(provider);
+      const usable = !!cfg?.isCustom || !!keyFor(provider) || (provider === 'openai' && !!state.openaiOauth?.accessToken);
+      if (!usable) continue;
+      for (const m of (list || []).slice(0, 120)) {
+        items.push({
+          id: `model:${provider}:${m.id}`,
+          label: m.name || m.id,
+          hint: cfg?.label || provider,
+          source: 'model',
+          run: async () => {
+            closePalette();
+            await saveSettings({ provider, model: m.id });
+            updateModelLine();
+            addMessage('assistant', `_Model set to **${m.id}** via ${cfg?.label || provider}._`);
+          }
+        });
+      }
+    }
+
+    // Tools: listed so the user can see (and copy) what the agent can do.
+    for (const t of (window.KyotoTools?.list?.() || [])) {
+      const enabled = (state.settings?.enabledGroups || []).includes(t.group);
+      items.push({
+        id: 'tool:' + t.name, label: t.name, hint: t.group + (enabled ? '' : ' · disabled'),
+        source: 'tool',
+        run: () => {
+          closePalette();
+          els.input.value = `Use the \`${t.name}\` tool: `;
+          els.input.focus();
+        }
+      });
+    }
+    return items;
+  }
+
+  function openPalette() {
+    if (!paletteEl.overlay || !KPAL.rank) return;
+    paletteState.open = true;
+    paletteState.index = 0;
+    paletteEl.overlay.classList.remove('hidden');
+    paletteEl.input.value = '';
+    renderPalette();
+    paletteEl.input.focus();
+  }
+  function closePalette() {
+    if (!paletteEl.overlay) return;
+    paletteState.open = false;
+    paletteEl.overlay.classList.add('hidden');
+  }
+  function renderPalette() {
+    if (!paletteEl.list) return;
+    const q = paletteEl.input.value.trim();
+    const all = paletteSourceItems();
+    const ranked = KPAL.rank(all, q, { limit: 60 });
+    if (!ranked.length) {
+      paletteState.filtered = [];
+      paletteEl.list.innerHTML = '<div class="palette-empty">No matches.</div>';
+      return;
+    }
+    // The list is RENDERED grouped by source, so navigation must follow the
+    // rendered order — not the raw score order, or the cursor appears to jump
+    // between groups while arrowing down.
+    const groups = KPAL.groupBySource(ranked);
+    paletteState.filtered = groups.flatMap(g => g.items);
+    if (paletteState.index >= paletteState.filtered.length) {
+      paletteState.index = paletteState.filtered.length - 1;
+    }
+    const html = [];
+    let row = 0;
+    for (const g of groups) {
+      html.push(`<div class="palette-group">${esc(g.source)}</div>`);
+      for (const item of g.items) {
+        const idx = row++;
+        const active = idx === paletteState.index ? ' active' : '';
+        html.push(
+          `<div class="palette-item${active}" data-idx="${idx}">` +
+          `<span class="pi-label">${esc(item.label)}</span>` +
+          (item.hint ? `<span class="pi-hint">${esc(item.hint)}</span>` : '') +
+          `</div>`
+        );
+      }
+    }
+    paletteEl.list.innerHTML = html.join('');
+    const activeEl = paletteEl.list.querySelector('.palette-item.active');
+    if (activeEl && activeEl.scrollIntoView) activeEl.scrollIntoView({ block: 'nearest' });
+  }
+  function runPaletteIndex(i) {
+    const item = paletteState.filtered[i];
+    if (!item || typeof item.run !== 'function') return;
+    try { item.run(); } catch (e) { console.warn('[Kyoto] palette action failed:', e); }
+  }
+  function wirePalette() {
+    if (!paletteEl.overlay) return;
+    document.addEventListener('keydown', (e) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); paletteState.open ? closePalette() : openPalette(); return; }
+      if (!paletteState.open) return;
+      if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); paletteState.index = KPAL.moveIndex(paletteState.index, 1, paletteState.filtered.length); renderPalette(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); paletteState.index = KPAL.moveIndex(paletteState.index, -1, paletteState.filtered.length); renderPalette(); }
+      else if (e.key === 'Enter') { e.preventDefault(); runPaletteIndex(paletteState.index); }
+    });
+    paletteEl.input.addEventListener('input', () => { paletteState.index = 0; renderPalette(); });
+    paletteEl.list.addEventListener('click', (e) => {
+      const row = e.target.closest('.palette-item');
+      if (row) runPaletteIndex(Number(row.dataset.idx));
+    });
+    paletteEl.overlay.addEventListener('click', (e) => { if (e.target === paletteEl.overlay) closePalette(); });
+  }
+
+  // ── Voice: speech-to-text input + read-aloud ─────────
+  const micBtn = document.getElementById('micBtn');
+  const voiceAutoSpeakEl = document.getElementById('voiceAutoSpeak');
+  let speechRec = null;
+  let speechState = KSPEECH.initialState ? KSPEECH.initialState() : { finalText: '', interim: '', listening: false, error: null };
+
+  function wireVoice() {
+    if (micBtn) {
+      const supported = KSPEECH.supportsSpeech ? KSPEECH.supportsSpeech() : false;
+      if (!supported) {
+        // No dead button: Web Speech is absent (unsupported build / policy).
+        micBtn.classList.add('hidden');
+      } else {
+        micBtn.classList.remove('hidden');
+        micBtn.addEventListener('click', () => (speechState.listening ? stopSpeech() : startSpeech()));
+      }
+    }
+    if (voiceAutoSpeakEl) {
+      voiceAutoSpeakEl.checked = !!state.settings.voiceAutoSpeak;
+      voiceAutoSpeakEl.addEventListener('change', () => saveSettings({ voiceAutoSpeak: !!voiceAutoSpeakEl.checked }));
+    }
+    // Stop speech when the panel goes away, so a long reply doesn't keep talking.
+    window.addEventListener('pagehide', () => { try { window.speechSynthesis?.cancel?.(); } catch {} });
+  }
+
+  function applySpeechState(next) {
+    speechState = next;
+    if (micBtn) micBtn.classList.toggle('listening', !!next.listening);
+    if (micBtn) micBtn.title = next.listening ? 'Listening… click to stop' : 'Voice input (speech-to-text)';
+    if (next.error) {
+      addMessage('assistant', `_Voice input error: ${next.error}_`, { error: true });
+    }
+  }
+
+  function startSpeech() {
+    const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Ctor) return;
+    try {
+      speechRec = new Ctor();
+      speechRec.lang = state.settings.voiceLang || navigator.language || 'en-US';
+      speechRec.interimResults = true;
+      speechRec.continuous = true;
+      speechRec.onresult = (ev) => {
+        // Feed ONLY the final results as 'final' and the trailing hypothesis as
+        // 'interim': reduceSpeech owns the replace/append semantics.
+        let interim = '';
+        const finals = [];
+        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+          const r = ev.results[i];
+          if (r.isFinal) finals.push(r[0].transcript);
+          else interim += r[0].transcript;
+        }
+        if (finals.length) applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'final', text: finals.join(' ') }));
+        if (interim) applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'interim', text: interim }));
+        const draft = (speechState.finalText + ' ' + speechState.interim).trim();
+        if (draft) elseSetComposerDraft(draft);
+      };
+      speechRec.onerror = (ev) => {
+        const msg = ev.error === 'not-allowed' ? 'microphone permission denied'
+          : ev.error === 'no-speech' ? 'no speech detected'
+          : (ev.error || 'unknown error');
+        applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'error', message: msg }));
+      };
+      speechRec.onend = () => {
+        applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'end' }));
+        speechRec = null;
+      };
+      speechRec.start();
+      applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'start' }));
+    } catch (e) {
+      applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'error', message: e?.message || String(e) }));
+    }
+  }
+
+  // Put the live transcript in the composer without clobbering what the user
+  // already typed before starting the mic.
+  let composerPristine = '';
+  function elseSetComposerDraft(text) {
+    els.input.value = (composerPristine ? composerPristine + ' ' : '') + text;
+    els.input.focus();
+  }
+
+  function stopSpeech() {
+    try { speechRec?.stop?.(); } catch {}
+    applySpeechState(KSPEECH.reduceSpeech(speechState, { type: 'end' }));
+    composerPristine = '';
+  }
+
+  function speakText(text) {
+    const synth = window.speechSynthesis;
+    if (!synth || !KSPEECH.chunkForSpeech) return;
+    try {
+      synth.cancel();
+      const chunks = KSPEECH.chunkForSpeech(String(text || '').replace(/[*_`#>|]/g, ' '), 220);
+      for (const c of chunks) {
+        const u = new SpeechSynthesisUtterance(c);
+        u.lang = state.settings.voiceLang || navigator.language || 'en-US';
+        synth.speak(u);
+      }
+    } catch (e) { console.warn('[Kyoto] speak failed:', e); }
+  }
+
+  // Called at the end of a completed turn.
+  function maybeAutoSpeak(text) {
+    if (!state.settings.voiceAutoSpeak) return;
+    if (!text || text.length < 2) return;
+    speakText(text);
+  }
+
+  // ── Share session as a standalone HTML file ──────────
+  async function shareSessionHtml() {
+    const session = state.activeSession;
+    if (!session) return;
+    if (!KSHARE.buildShareHtml) { addMessage('assistant', '_Share module failed to load._', { error: true }); return; }
+    try {
+      const html = KSHARE.buildShareHtml(session, {
+        renderMarkdown: (t) => renderMarkdown(t)
+      });
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const safe = (session.title || 'session').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60);
+      const filename = `kyoto-${safe}-${new Date().toISOString().slice(0, 10)}.html`;
+      try {
+        const r = window.KyotoWorkspace
+          ? await window.KyotoWorkspace.downloadUrl({ url, filename })
+          : { downloadId: await chrome.downloads.download({ url, filename, saveAs: true }), path: filename };
+        // Keep the object URL alive until the download actually settles.
+        const revoke = window.KyotoWorkspace?._revokeBlobUrlWhenDownloaded;
+        if (revoke) revoke(url, r?.downloadId); else setTimeout(() => URL.revokeObjectURL(url), 120000);
+        addMessage('assistant', `_Shared this session as \`${filename}\` (${Math.round(html.length / 1024)} KB). Secrets are redacted and internal fields stripped._`);
+      } catch (e) {
+        try { URL.revokeObjectURL(url); } catch {}
+        throw e;
+      }
+    } catch (e) {
+      addMessage('assistant', `**Share failed:** ${e.message}`, { error: true });
+    }
+  }
+
+  // ── Council: ask several models the same question ────
+  async function runCouncil(prompt) {
+    if (!KCOUNCIL.buildState && !KCOUNCIL.sanitiseCandidates) {
+      addMessage('assistant', '_Council module failed to load._', { error: true });
+      return;
+    }
+    const text = String(prompt || '').trim();
+    if (!text) { addMessage('assistant', '_Usage: `/council <question>` — asks up to 4 configured models in parallel._'); return; }
+
+    // Candidates: one model per usable provider (the active model first).
+    const raw = [];
+    const push = (provider, model) => { if (provider && model) raw.push({ provider, model, label: `${getProviderConfig(provider)?.label || provider} · ${model}` }); };
+    push(state.settings.provider, state.settings.model);
+    for (const [provider, list] of (state.modelsByProvider || new Map())) {
+      if (provider === state.settings.provider) continue;
+      const cfg = getProviderConfig(provider);
+      const usable = !!cfg?.isCustom || !!keyFor(provider) || (provider === 'openai' && !!state.openaiOauth?.accessToken);
+      if (!usable || !list?.length) continue;
+      push(provider, list[0].id);
+    }
+    const candidates = KCOUNCIL.sanitiseCandidates(raw, { limit: 4 });
+    if (candidates.length < 2) {
+      addMessage('assistant', '_Council needs at least 2 configured providers with keys. Add another provider in Settings first._');
+      return;
+    }
+
+    // Respect the spend cap before fanning out.
+    const cap = Number(state.settings.budgetUsd) || 0;
+    if (cap > 0 && sessionSpend(state.activeSession) >= cap) {
+      addMessage('assistant', `_Spend cap (${fmtUsd(cap)}) already reached — raise or clear it before running a council poll._`, { error: true });
+      return;
+    }
+
+    addMessage('assistant', `_Polling ${candidates.length} models…_`);
+    const t0 = Date.now();
+    const settled = await Promise.allSettled(candidates.map(async (c) => {
+      const started = Date.now();
+      const r = await oneShotCompletion(text, {
+        provider: c.provider, model: c.model, maxTokens: 700, temperature: 0.4, returnMeta: true
+      });
+      return { text: r.text, usage: r.usage, cost: r.cost, ms: Date.now() - started };
+    }));
+
+    const merged = KCOUNCIL.mergeResults(candidates, settled);
+    // Attribute cost per model and keep the session ledger honest.
+    for (const r of merged) {
+      if (!r.ok) continue;
+      // Prefer the provider-reported cost; fall back to the price table.
+      let usd = r.cost;
+      if (usd == null) usd = window.KyotoModels?.costFor(r.provider, r.model, r.usage) ?? null;
+      if (usd != null) { r.cost = usd; await recordSpend(state.activeSession, usd); }
+    }
+    const ranked = KCOUNCIL.rank(merged);
+    const totalMs = Date.now() - t0;
+
+    addMessage('assistant', KCOUNCIL.formatSummary(ranked) +
+      `\n\n_Polled ${candidates.length} models in ${(totalMs / 1000).toFixed(1)}s._`);
+    for (const r of ranked) {
+      if (!r.ok) {
+        addMessage('assistant', `**${r.label}** — failed: ${r.error}`);
+        continue;
+      }
+      addMessage('assistant', `### ${r.label}\n\n${r.text}`);
+    }
+    // One-click adopt: switch the active model to a winner.
+    addMessage('assistant',
+      `_Continue with one of these? ` +
+      ranked.filter(r => r.ok).map(r => `\`/council-use ${r.provider}:${r.model}\``).join(' · ') +
+      ` — or just say which._`);
+  }
+
+  function setModelFromSpec(spec) {
+    const s = String(spec || '').trim();
+    const i = s.indexOf(':');
+    if (i <= 0) { addMessage('assistant', '_Usage: `/council-use provider:model`_'); return; }
+    const provider = s.slice(0, i);
+    const model = s.slice(i + 1);
+    if (!getProviderConfig(provider)) { addMessage('assistant', `_Unknown provider: ${provider}_`, { error: true }); return; }
+    saveSettings({ provider, model }).then(() => {
+      updateModelLine();
+      addMessage('assistant', `_Now using **${model}** via ${getProviderConfig(provider)?.label || provider}._`);
+    });
+  }
+
+
+  // ── Routines: record once, replay deterministically ──
+  // Zero model calls on replay. The capture buffer already holds structured
+  // page events; this turns them into steps once, then executes them exactly.
+  const ROUTINES_KEY = 'kyoto_routines';
+
+  async function loadRoutines() {
+    try { const g = await chrome.storage.local.get(ROUTINES_KEY); return g[ROUTINES_KEY] || []; }
+    catch { return []; }
+  }
+  async function persistRoutines(list) {
+    await chrome.storage.local.set({ [ROUTINES_KEY]: list });
+  }
+
+  /** Save the actions recorded since the last capture start. */
+  async function saveRoutineFromCapture(name) {
+    if (!KROUTINE.toSteps) { addMessage('assistant', '_Routine module failed to load._', { error: true }); return null; }
+    const events = (state.capture?.events || []).slice();
+    if (!events.length) {
+      addMessage('assistant', '_Nothing recorded. Click the ● button to record page actions first, do the workflow, then stop._');
+      return null;
+    }
+    const steps = KROUTINE.toSteps(events);
+    const v = KROUTINE.validateSteps(steps);
+    if (!v.ok) {
+      addMessage('assistant', `**Can't save this routine** — ${v.errors.join('; ')}`, { error: true });
+      return null;
+    }
+    const title = (name || state.activeSession?.title || 'routine').trim().slice(0, 60);
+    const list = await loadRoutines();
+    const rec = {
+      id: 'rt_' + Math.random().toString(36).slice(2, 10),
+      name: title,
+      steps,
+      url: state.capture?.lastUrl || state.page?.url || null,
+      createdAt: Date.now()
+    };
+    list.push(rec);
+    await persistRoutines(list);
+    addMessage('assistant',
+      `**Saved routine "${title}"** — ${steps.length} step${steps.length === 1 ? '' : 's'}, replays with no model calls.\n\n` +
+      KROUTINE.describeRoutine(steps));
+    return rec;
+  }
+
+  async function listRoutines() {
+    const list = await loadRoutines();
+    if (!list.length) { addMessage('assistant', '_No routines saved yet. Record a workflow with the ● button, then run `/routine save <name>`._'); return; }
+    const lines = list.map(r =>
+      `- **${r.name}** (\`${r.id}\`) — ${r.steps.length} steps${r.url ? ` · ${r.url}` : ''}`
+    );
+    addMessage('assistant', `**Routines**\n\n${lines.join('\n')}\n\nRun one with \`/routine run <name>\`.`);
+  }
+
+  async function waitForTabComplete(tabId, timeoutMs = 15000) {
+    const existing = await chrome.tabs.get(tabId).catch(() => null);
+    if (existing?.status === 'complete') return true;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        try { chrome.tabs.onUpdated.removeListener(onUpd); } catch {}
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const onUpd = (id, info) => { if (id === tabId && info.status === 'complete') finish(true); };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      chrome.tabs.onUpdated.addListener(onUpd);
+    });
+  }
+
+  /** Run a chunk of non-navigate steps in the page. Returns per-step results. */
+  async function runStepsInTab(tabId, steps, timeoutMs) {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      args: [steps, timeoutMs],
+      func: async (steps, timeoutMs) => {
+        // Injected: must be fully self-contained (no closure over the panel).
+        const waitFor = (selector, ms) => new Promise((resolve, reject) => {
+          const t0 = Date.now();
+          (function poll() {
+            let el = null;
+            try { el = document.querySelector(selector); } catch { /* invalid selector */ }
+            if (el) return resolve(el);
+            if (Date.now() - t0 > ms) return reject(new Error('element not found: ' + selector));
+            setTimeout(poll, 100);
+          })();
+        });
+        const fire = (el, type) => el.dispatchEvent(new Event(type, { bubbles: true }));
+        const out = [];
+        for (const st of steps) {
+          const idx = st._index;
+          try {
+            if (st.waitMs) await new Promise(r => setTimeout(r, Math.min(st.waitMs, 5000)));
+            // A `press` step may legitimately carry no selector (a submit with no
+            // stable form target): send the key to whatever has focus rather than
+            // waiting for `undefined` to appear in the DOM.
+            if (st.action === 'press' && !st.selector) {
+              const active = document.activeElement || document.body;
+              const kopts = { key: st.key || 'Enter', bubbles: true, cancelable: true };
+              active.dispatchEvent(new KeyboardEvent('keydown', kopts));
+              active.dispatchEvent(new KeyboardEvent('keyup', kopts));
+              out.push({ index: idx, ok: true, action: 'press' });
+              continue;
+            }
+            const el = await waitFor(st.selector, timeoutMs);
+            if (st.action === 'click') {
+              el.scrollIntoView?.({ block: 'center' });
+              el.click();
+            } else if (st.action === 'type') {
+              el.focus?.();
+              const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+              const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+              if (setter) setter.call(el, st.value); else el.value = st.value;
+              fire(el, 'input'); fire(el, 'change');
+            } else if (st.action === 'select') {
+              el.value = st.value;
+              fire(el, 'input'); fire(el, 'change');
+            } else if (st.action === 'press') {
+              el.focus?.();
+              const opts = { key: st.key || 'Enter', bubbles: true, cancelable: true };
+              el.dispatchEvent(new KeyboardEvent('keydown', opts));
+              el.dispatchEvent(new KeyboardEvent('keyup', opts));
+            }
+            out.push({ index: idx, ok: true, action: st.action });
+          } catch (e) {
+            out.push({ index: idx, ok: false, action: st.action, error: e?.message || String(e) });
+            break;
+          }
+        }
+        return out;
+      }
+    });
+    return res?.result || [];
+  }
+
+  /**
+   * Execute a plan. Navigations split the run: we cannot keep scripting a
+   * document that is being replaced, so the chunk before a navigate runs, the
+   * tab is navigated, we wait for load, then continue.
+   */
+  async function executeRoutinePlan(tabId, steps, timeoutMs) {
+    const results = [];
+    let i = 0;
+    while (i < steps.length) {
+      const chunk = [];
+      let nav = null;
+      let navIndex = -1;
+      for (; i < steps.length; i++) {
+        if (steps[i].action === 'navigate') { nav = steps[i]; navIndex = i; i++; break; }
+        chunk.push({ ...steps[i], _index: i });
+      }
+      if (chunk.length) {
+        const r = await runStepsInTab(tabId, chunk, timeoutMs);
+        results.push(...r);
+        if (r.some(x => !x.ok)) return { results, failed: true };
+      }
+      if (nav) {
+        await chrome.tabs.update(tabId, { url: nav.url });
+        await waitForTabComplete(tabId, timeoutMs);
+        results.push({ index: navIndex, ok: true, action: 'navigate', note: nav.url });
+      }
+    }
+    return { results, failed: false };
+  }
+
+  async function runRoutine(idOrName, { values } = {}) {
+    if (!KROUTINE.buildReplayPlan) { addMessage('assistant', '_Routine module failed to load._', { error: true }); return; }
+    const list = await loadRoutines();
+    const rec = list.find(r => r.id === idOrName) || list.find(r => r.name.toLowerCase() === String(idOrName || '').toLowerCase());
+    if (!rec) { addMessage('assistant', `_No routine named "${idOrName}". Try \`/routine list\`._`, { error: true }); return; }
+
+    // Supply captured-but-masked values (passwords etc.) from the caller.
+    const steps = rec.steps.map(s => {
+      if (!s.needsValue) return s;
+      const provided = values?.[s.valueHint] ?? values?.[String(s.value)];
+      return provided != null ? { ...s, value: String(provided), needsValue: false } : s;
+    });
+    let plan;
+    try { plan = KROUTINE.buildReplayPlan({ ...rec, steps }); }
+    catch (e) { addMessage('assistant', `**Invalid routine:** ${e.message}`, { error: true }); return; }
+    if (plan.needsValues?.length) {
+      addMessage('assistant',
+        `_This routine needs values the recorder masked (password/email/card/OTP) for step` +
+        `${plan.needsValues.length === 1 ? '' : 's'} ${plan.needsValues.map(i => i + 1).join(', ')}. ` +
+        `Routines never replay masked secrets — supply them when running, e.g. ` +
+        `\`/routine run ${rec.name} {"password":"…"}\`._`);
+      return;
+    }
+
+    // Tab binding: never follow the user's active tab (the v14.22.0 invariant).
+    const session = state.activeSession;
+    const tabId = session?.tabId;
+    if (tabId == null) { addMessage('assistant', '_This session is not bound to a tab, so replay has nowhere to run._', { error: true }); return; }
+
+    addMessage('assistant', `_Running routine "${rec.name}" (${plan.steps.length} steps, no model calls)…_`);
+    const t0 = Date.now();
+    try {
+      const out = await executeRoutinePlan(tabId, plan.steps, plan.timeoutMs);
+      const ms = Date.now() - t0;
+      const okCount = out.results.filter(r => r.ok).length;
+      if (out.failed) {
+        const bad = out.results.find(r => !r.ok);
+        addMessage('assistant',
+          `**Routine "${rec.name}" stopped at step ${(bad?.index ?? 0) + 1}** — ${bad?.error}\n\n` +
+          `_${okCount}/${plan.steps.length} steps completed in ${ms}ms._`, { error: true });
+      } else {
+        addMessage('assistant', `_Routine "${rec.name}" finished — ${okCount}/${plan.steps.length} steps in ${ms}ms, 0 model calls._`);
+      }
+      return out;
+    } catch (e) {
+      addMessage('assistant', `**Routine failed:** ${e.message}`, { error: true });
+    }
+  }
+
+  // Tools (group `routine`) delegate here; sidepanel.js owns storage + replay.
+  async function removeRoutine(idOrName) {
+    const list = await loadRoutines();
+    const idx = list.findIndex(r => r.id === idOrName || r.name.toLowerCase() === String(idOrName || '').toLowerCase());
+    if (idx === -1) return { removed: false };
+    const [gone] = list.splice(idx, 1);
+    await persistRoutines(list);
+    return { removed: true, id: gone.id, name: gone.name };
+  }
+
+  window.KyotoRoutineApi = {
+    list: loadRoutines,
+    save: saveRoutineFromCapture,
+    run: runRoutine,
+    remove: removeRoutine
+  };
+
+  // ── Slash handlers for the new features ─────────────
+  async function handleFeatureSlash(action, args) {
+    if (action === 'share') { await shareSessionHtml(); return true; }
+    if (action === 'council') { await runCouncil(args); return true; }
+    if (action === 'council_use') { setModelFromSpec(args); return true; }
+    if (action === 'routine') {
+      const m = String(args || '').trim().match(/^(\w+)\s*(.*)$/);
+      const sub = (m?.[1] || 'list').toLowerCase();
+      const rest = (m?.[2] || '').trim();
+      if (sub === 'save') {
+        const rec = await saveRoutineFromCapture(rest || null);
+        if (rec) { /* message already shown */ }
+      } else if (sub === 'run') {
+        let values;
+        const jsonStart = rest.indexOf('{');
+        const name = jsonStart === -1 ? rest : rest.slice(0, jsonStart).trim();
+        if (jsonStart !== -1) { try { values = JSON.parse(rest.slice(jsonStart)); } catch { /* ignore */ } }
+        await runRoutine(name, { values });
+      } else {
+        await listRoutines();
+      }
+      return true;
+    }
+    return false;
+  }
+
   // ── Boot ─────────────────────────────────────────────
   (async () => {
     await loadSettings();
     await loadSpendTotal();
+    wirePalette();
+    wireVoice();
     await openaiOauthLoad();
     applyAppearance();
     compileCustomTools();
