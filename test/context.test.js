@@ -137,19 +137,54 @@ test('buildCompactedHistory keeps the tail verbatim', () => {
   const plan = C.planCompaction(h, { contextTokens: 1500, threshold: 0.5, keepTurns: 2 });
   const next = C.buildCompactedHistory(h, plan, 'S');
   const tail = h.slice(plan.cutIndex);
-  assert.deepEqual(next.slice(next.length - tail.length), tail, 'recent turns must be untouched');
+  // The recap is merged into the first kept turn, so everything AFTER it is
+  // byte-identical to the original tail.
+  assert.deepEqual(next.slice(1), tail.slice(1), 'subsequent turns must be untouched');
+  assert.ok(String(next[0].content).includes(String(tail[0].content)),
+    'the first kept turn must survive inside the merged turn');
+});
+
+// A standalone recap turn would sit next to the tail's first user message,
+// producing two consecutive `user` messages — legal in the schema but merged or
+// rejected inconsistently by gateways. The recap is merged instead.
+test('recap is merged into the first kept user turn, not added as a second one', () => {
+  const h = transcript(8, { big: 3000 });
+  const plan = C.planCompaction(h, { contextTokens: 1500, threshold: 0.5, keepTurns: 2 });
+  const next = C.buildCompactedHistory(h, plan, 'RECAP');
+  eq(next[0].role, 'user');
+  assert.ok(String(next[0].content).startsWith('[Earlier conversation compacted'));
+  for (let i = 1; i < next.length; i++) {
+    assert.ok(!(next[i].role === 'user' && next[i - 1].role === 'user'),
+      `two consecutive user turns at index ${i}`);
+  }
+  assertNoOrphanTools(next, 'merged');
+});
+
+test('a pinned assistant turn carrying tool_calls is NOT re-inserted (would orphan its results)', () => {
+  const h = transcript(8, { big: 3000 });
+  // Pin an assistant message that has tool_calls — its tool results are in the
+  // dropped range, so keeping it would produce an invalid transcript.
+  h[1]._pinned = true;
+  const plan = C.planCompaction(h, { contextTokens: 1500, threshold: 0.5, keepTurns: 2 });
+  assert.ok(plan && plan.pinned.length === 1);
+  const next = C.buildCompactedHistory(h, plan, 'S');
+  assertNoOrphanTools(next, 'pinned-toolcalls');
+  assert.ok(!next.some(m => m._pinned && Array.isArray(m.tool_calls)),
+    'a pinned tool-calling assistant turn must be dropped rather than orphaned');
 });
 
 // ── Pinned messages ──────────────────────────────────
 test('pinned messages from the dropped range survive compaction', () => {
   const h = transcript(8, { big: 3000 });
-  h[1]._pinned = true;                     // pinned assistant message, early
+  // h[3] is the first turn's final assistant message (no tool_calls), so it is
+  // safe to re-insert on its own.
+  h[3]._pinned = true;
   const plan = C.planCompaction(h, { contextTokens: 1500, threshold: 0.5, keepTurns: 2 });
   assert.ok(plan, 'expected a plan');
   eq(plan.pinned.length, 1);
   const next = C.buildCompactedHistory(h, plan, 'S');
   assert.ok(next.some(m => m._pinned === true), 'pinned message must still be present');
-  // and it must be near the front, right after the recap
+  // recap is merged into the first kept turn, so the pinned turn follows it
   eq(next[1]._pinned, true);
 });
 

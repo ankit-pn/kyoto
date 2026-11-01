@@ -139,13 +139,26 @@
     };
   }
 
+  /** Prepend text to a message's content, handling string and multimodal forms. */
+  function prependToMessage(m, prefix) {
+    const c = m?.content;
+    if (Array.isArray(c)) return { ...m, content: [{ type: 'text', text: prefix }, ...c] };
+    const body = typeof c === 'string' ? c : '';
+    return { ...m, content: prefix + body };
+  }
+
   /**
-   * Build the new transcript: a single "compacted" user turn carrying the
-   * summary, then any pinned messages that were dropped, then the verbatim
-   * recent turns.
+   * Build the new transcript: the recap is MERGED INTO the first kept user turn
+   * rather than inserted as its own turn.
    *
-   * The summary is inserted as a USER message rather than a system message:
-   * providers disagree about system messages appearing mid-conversation.
+   * That matters: a standalone recap turn would sit directly next to the tail's
+   * first user message, producing two consecutive `user` messages. That is
+   * legal in the OpenAI schema but gateways differ on it (some merge, some
+   * reject), and the merged form keeps role alternation exactly as it was.
+   *
+   * Pinned messages are re-inserted after the recap. They are filtered to
+   * messages that cannot orphan anything: never a `tool` result, and never an
+   * assistant turn carrying `tool_calls` (whose results were dropped).
    */
   function buildCompactedHistory(history, plan, summaryText) {
     if (!plan || plan.cutIndex <= 0) return history;
@@ -154,10 +167,14 @@
       `[Earlier conversation compacted: ${plan.droppedCount} messages summarised ` +
       `to stay inside the model's context window. This summary is authoritative ` +
       `for what happened before this point.]`;
-    const recap = { role: 'user', content: `${header}\n\n${summary}` };
-    const pinned = (plan.pinned || []).filter(m => m && m.role !== 'user');
+    const recapText = `${header}\n\n${summary}\n\n---\n\n`;
+
     const tail = history.slice(plan.cutIndex);
-    return [recap, ...pinned, ...tail];
+    const pinned = (plan.pinned || []).filter(
+      m => m && m.role !== 'user' && m.role !== 'tool' && !hasToolCalls(m)
+    );
+    const mergedFirst = prependToMessage(tail[0], recapText);
+    return [mergedFirst, ...pinned, ...tail.slice(1)];
   }
 
   /**
