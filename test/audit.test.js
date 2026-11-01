@@ -563,3 +563,47 @@ test('hit areas are invisible and do not paint', () => {
     assert.match(body, /background:\s*transparent/, `${sel}: hit area must not paint`);
   }
 });
+
+// ── Minimum readable text size ────────────────────────
+// 20 rules used 9-10.5px. Some are deliberate micro-typography (uppercase badge
+// tags, glyph indicators) where small caps are the intended style, but others
+// carried real content — timestamps, tool state, token/cost numbers, session
+// metadata — and were hard to read at 10px. Those were raised to 11px; this guard
+// keeps new content text from creeping below it, while documenting the exceptions.
+
+// Decorative or micro-typographic rules that are deliberately small.
+const SMALL_TEXT_ALLOWED = new Set([
+  '.hit-tag',                     // uppercase badge on skill hits
+  '.slash-tag',                   // "action"/"custom" badge
+  '.slash-palette .slash-tag',    // same badge, scoped inside the palette
+  '.skill-tag',                   // uppercase tag chip
+  '.queue-chip .q-label',         // uppercase "QUEUED" badge
+  '.msg-role',                    // "YOU" / "ASSISTANT" caps label
+  '.code-bar',                    // code block language header
+  '.popover-group',               // section header in the model picker
+  '.drawer-body .drawer-section.toggle::before',  // the ▸ disclosure glyph
+  '.btn-vision.active::after'     // the "attached" dot indicator
+]);
+
+test('content text is at least 11px (decorative micro-type excepted)', () => {
+  const css = read('sidepanel/sidepanel.css');
+  const lines = css.split('\n');
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/font-size:\s*(9|9\.5|10|10\.5)px/);
+    if (!m) continue;
+    // Find the owning selector by scanning back for the block opener.
+    let owner = '?';
+    for (let j = i; j >= Math.max(0, i - 6); j--) {
+      if (lines[j].includes('{')) {
+        owner = (lines[j].split('{')[0].trim() || (lines[j - 1] || '').trim()).trim();
+        break;
+      }
+    }
+    const bare = owner.replace(/\s*\/\*.*$/, '').trim();
+    if (SMALL_TEXT_ALLOWED.has(bare)) continue;
+    offenders.push(`${bare || '(unknown)'} -> ${m[1]}px`);
+  }
+  assert.deepEqual(offenders, [],
+    `raise these to >=11px, or add them to SMALL_TEXT_ALLOWED with a reason:\n${offenders.join('\n')}`);
+});
