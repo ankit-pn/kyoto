@@ -678,3 +678,47 @@ test('the focus trap ordering matches the stylesheet', () => {
     assert.ok(zIndexOf(above) > zIndexOf(below), `${above} must stack above ${below}`);
   }
 });
+
+// ── Focus indicator coverage ──────────────────────────
+// The focus ring selector was written by hand in round 1 and missed `summary`,
+// so every tool card and reasoning card — both <details><summary> — was
+// keyboard-focusable with no visible focus at all.
+
+test('every natively focusable element type gets a focus ring', () => {
+  const css = read('sidepanel/sidepanel.css');
+  const rule = (css.match(/:where\([^)]*\):focus-visible[^{]*\{[^}]*\}/g) || []).join('\n');
+  assert.ok(rule, 'a :focus-visible rule should exist');
+  assert.match(rule, /outline:\s*2px solid/);
+  assert.match(rule, /outline-offset:/, 'the ring needs an offset so it does not sit on the border');
+
+  // Element types that are focusable without any tabindex attribute.
+  const nativelyFocusable = ['button', 'a', 'input', 'select', 'textarea', 'summary'];
+  const missing = nativelyFocusable.filter(el => !new RegExp(`\\b${el}\\b`).test(rule));
+  assert.deepEqual(missing, [], `these are keyboard focusable but not ringed: ${missing.join(', ')}`);
+});
+
+test('mouse clicks do not leave a focus ring behind', () => {
+  const css = read('sidepanel/sidepanel.css');
+  assert.match(css, /:focus:not\(:focus-visible\)\s*\{[^}]*outline:\s*none/,
+    'buttons/summaries should not ring on plain mouse clicks');
+});
+
+test('the focus ring contrasts with every surface it can appear on', () => {
+  // WCAG 1.4.11 wants >=3:1 for the indicator against the adjacent colour. The
+  // ring uses --accent, so verify it against all three background tokens.
+  const scopes = {
+    dark: hexTokens(':root'),
+    light: hexTokens('body.theme-light'),
+    'system-light': hexTokens('@media (prefers-color-scheme: light)')
+  };
+  const failures = [];
+  for (const [name, t] of Object.entries(scopes)) {
+    if (!t.accent) continue;
+    for (const surface of ['bg', 'bg-elev', 'bg-elev2']) {
+      if (!t[surface]) continue;
+      const r = contrastRatio(t.accent, t[surface]);
+      if (r < 3) failures.push(`${name}: focus ring on --${surface} = ${r.toFixed(2)}:1 (need 3)`);
+    }
+  }
+  assert.deepEqual(failures, [], `focus indicator contrast failures:\n${failures.join('\n')}`);
+});

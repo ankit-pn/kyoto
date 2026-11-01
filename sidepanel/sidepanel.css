@@ -1418,14 +1418,18 @@ body {
    nothing at all — the panel was unusable without a mouse for anyone who needs
    a visible cursor. `:focus-visible` keeps the ring for keyboard users without
    drawing it on every mouse click. */
-:where(button, a, select, textarea, input, [tabindex]):focus-visible {
+/* Every natively keyboard-focusable control. `summary` was missing: tool cards
+   and reasoning cards are <details><summary>, so a keyboard user could Tab onto
+   them and get no visible focus at all. */
+:where(button, a, select, textarea, input, summary, [tabindex]):focus-visible,
+:where(audio, video, [contenteditable]):focus-visible {
   outline: 2px solid var(--accent, #4c8bf5);
   outline-offset: 2px;
   border-radius: 4px;
 }
 /* Safari/older Chromium quirk: an element that receives programmatic focus
    while a mouse is down would otherwise keep a ring. */
-:where(button, a, [tabindex]):focus:not(:focus-visible) {
+:where(button, a, summary, [tabindex]):focus:not(:focus-visible) {
   outline: none;
 }
 /* The composer already lifts on focus-within; don't double-ring the textarea. */
