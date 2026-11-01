@@ -5896,6 +5896,10 @@
   }
 
   function openDrawer() {
+    // A transient composer autocomplete must not outlive a modal: it used to
+    // stay on screen (and, with a higher z-index than the drawer, float OVER the
+    // settings form) if the user typed "/" and then opened Settings.
+    dismissComposerOverlays();
     // Remember what had focus so closing the dialog puts the user back where
     // they were instead of dumping focus at the top of the document.
     _focusBeforeDrawer = document.activeElement;
@@ -6050,6 +6054,7 @@
       addMessage('assistant', '_Skills hub not configured. Open Settings → Skills hub to paste your URL + API key._', { error: true });
       return;
     }
+    dismissComposerOverlays();
     els.skillsDrawer.classList.remove('hidden');
     els.skillsOverlay.classList.remove('hidden');
     els.skillsFilterInput.value = '';
@@ -7813,6 +7818,7 @@
     if (!paletteEl.overlay || !KPAL.rank) return;
     paletteState.open = true;
     paletteState.index = 0;
+    dismissComposerOverlays();
     paletteEl.overlay.classList.remove('hidden');
     refreshModalInert();
     setComboboxExpanded(paletteEl.input, true);
@@ -7915,6 +7921,15 @@
     input.setAttribute('aria-activedescendant', el.id);
   }
 
+  /** Close transient things that hang off the composer (slash autocomplete). */
+  function dismissComposerOverlays() {
+    try {
+      els.slashPalette?.classList.add('hidden');
+      els.input?.setAttribute('aria-expanded', 'false');
+      els.input?.removeAttribute('aria-activedescendant');
+    } catch { /* non-fatal */ }
+  }
+
   // ── Modal focus containment ──────────────────────────
   // The drawers and dialogs declare aria-modal="true", but without trapping
   // focus Tab walks straight out into the panel behind the scrim: a keyboard
@@ -8007,6 +8022,7 @@
     const el = document.getElementById('shortcutsOverlay');
     if (!el || shortcutsOpen()) return;
     _focusBeforeShortcuts = document.activeElement;
+    dismissComposerOverlays();
     el.classList.remove('hidden');
     refreshModalInert();
     // Move focus into the dialog, as with the settings drawer.

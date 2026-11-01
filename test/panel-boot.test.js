@@ -2406,3 +2406,31 @@ test('a failed pop-out says so instead of doing nothing', async () => {
   assert.match(text, /could not open the pop-out/i, 'a failure must be visible');
   assert.match(text, /blocked by policy/, 'and carry the reason');
 });
+
+test('opening a dialog dismisses the composer autocomplete', async () => {
+  // Typing "/" leaves an autocomplete hanging off the composer. It used to stay
+  // on screen when a dialog opened, and with a higher z-index than the drawer it
+  // rendered ON TOP of the settings form.
+  const p = await bootPanel();
+  const doc = p.window.document;
+  await settle(250);
+
+  const input = doc.getElementById('input');
+  type(p.window, input, '/');
+  await settle(120);
+  const slash = doc.getElementById('slashPalette');
+  assert.ok(!slash.classList.contains('hidden'), 'typing / should open the autocomplete');
+
+  doc.getElementById('settingsBtn').click();
+  await settle(150);
+  assert.ok(slash.classList.contains('hidden'), 'a dialog must dismiss the autocomplete');
+
+  // It must also not survive into the other overlays.
+  doc.getElementById('closeDrawerBtn').click();
+  await settle(80);
+  type(p.window, input, '/');
+  await settle(120);
+  key(p.window, 'k', { ctrlKey: true });
+  await settle(120);
+  assert.ok(slash.classList.contains('hidden'), 'the command palette must dismiss it too');
+});
