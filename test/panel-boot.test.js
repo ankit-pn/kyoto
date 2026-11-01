@@ -2651,3 +2651,55 @@ test('the palette can find an entry from every category it advertises', async ()
   assert.ok((await search('/help')).some(t => /help/i.test(t)),
     'slash commands should be searchable in the palette');
 });
+
+test('custom tools that cannot compile are explained, not silently dropped', async () => {
+  // MV3 forbids 'unsafe-eval' for extension pages (Chrome enforces a minimum CSP
+  // and rejects the manifest at install if you relax it), so new Function() throws
+  // in the real browser. jsdom permits it, so the test suite happily compiled the
+  // user's code while every real user's tool was dropped without a word.
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('customTools', [
+    { name: 'blocked_tool', description: 'x', code: 'return 1', parameters: '' }
+  ]);
+  const p = await bootPanel({
+    chrome,
+    beforeBoot: (w) => {
+      // Reproduce the browser's CSP refusal in the harness.
+      const RealFunction = w.Function;
+      const blocked = function () {
+        throw new EvalError(
+          "Refused to evaluate a string as JavaScript because 'unsafe-eval' is not an allowed source of script");
+      };
+      blocked.prototype = RealFunction.prototype;
+      w.Function = blocked;
+    }
+  });
+  await settle(600);
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(300);
+
+  const list = doc.getElementById('customToolsList').textContent;
+  assert.match(list, /cannot run/i, 'the user must be told the tool cannot run');
+  assert.match(list, /content-security policy/i, 'and why — MV3 forbids eval in extension pages');
+  assert.match(list, /Did not compile/i, 'the specific failing tool should say so');
+  assert.ok(!/No custom tools yet/.test(list), 'and it must not look like no tool exists');
+});
+
+test('working custom tools show no error', async () => {
+  // Guard against a blanket warning: when compilation succeeds there is nothing
+  // to report.
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('customTools', [
+    { name: 'fine_tool', description: 'x', code: 'return { ok: true }', parameters: '' }
+  ]);
+  const p = await bootPanel({ chrome });
+  await settle(600);
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(300);
+  assert.ok(!/cannot run/i.test(doc.getElementById('customToolsList').textContent),
+    'no warning when the tools compile');
+});

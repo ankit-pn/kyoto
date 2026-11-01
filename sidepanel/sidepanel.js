@@ -5241,6 +5241,7 @@
   function compileCustomTools() {
     state.customToolHandlers = new Map();
     state.customToolSchemas = [];
+    state.customToolErrors = new Map();
     for (const t of (state.settings?.customTools || [])) {
       if (!t.name || !t.code) continue;
       let params;
@@ -5248,11 +5249,16 @@
       catch { params = { type: 'object', properties: {}, additionalProperties: false }; }
       let fn;
       try {
-        // The function body runs in the side-panel context with full chrome.*
-        // and fetch access. The user wrote it; the user trusts it.
+        // NOTE: MV3 forbids 'unsafe-eval' for extension pages — Chrome enforces a
+        // minimum CSP and rejects the manifest at install if you try to relax it —
+        // so new Function() throws here in the real browser. It only works under
+        // the test harness (jsdom), which is exactly why this went unnoticed: every
+        // user-defined tool was silently dropped. Record the reason so the UI can
+        // say so instead of leaving an empty list and a console line.
         fn = new Function('args', `return (async () => { ${t.code} })();`);
       } catch (e) {
         console.warn('[Kyoto] custom tool compile failed:', t.name, e.message);
+        (state.customToolErrors ||= new Map()).set(t.name || '(unnamed)', e.message || String(e));
         continue;
       }
       const name = t.name.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 60);
@@ -6519,7 +6525,14 @@
       els.customToolsList.innerHTML = '<p class="hint">No custom tools yet. Click + to define one. Example body: <code>return { ok: true, ts: Date.now() };</code></p>';
       return;
     }
-    els.customToolsList.innerHTML = list.map((t, i) => `
+    const errors = state.customToolErrors || new Map();
+    const anyFailed = list.some(t => errors.has(t.name));
+    const banner = anyFailed
+      ? `<p class="status err">These tools cannot run: Manifest V3 content-security policy forbids
+         <code>eval</code> in extension pages, so the code body cannot be compiled. Chrome rejects any
+         attempt to relax that policy, so this is not a setting you can change.</p>`
+      : '';
+    els.customToolsList.innerHTML = banner + list.map((t, i) => `
       <div class="ct-row" data-idx="${i}">
         <div class="ct-head">
           <input type="text" class="ct-name" placeholder="tool_name (snake_case)" value="${esc(t.name || '')}" />
@@ -6528,6 +6541,7 @@
         <input type="text" class="ct-desc" placeholder="What does this tool do? (model sees this)" value="${esc(t.description || '')}" />
         <textarea class="ct-params" rows="2" placeholder='JSON schema for args, e.g. { "type":"object", "properties":{ "q":{"type":"string"} }, "required":["q"] }'>${esc(t.parameters || '')}</textarea>
         <textarea class="ct-code" rows="5" placeholder="// Body of an async function. Receives args. Return a JSON-serialisable value.">${esc(t.code || '')}</textarea>
+        ${errors.has(t.name) ? `<p class="status err">Did not compile: ${esc(errors.get(t.name))}</p>` : ''}
       </div>
     `).join('');
   }
