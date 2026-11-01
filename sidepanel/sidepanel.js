@@ -3489,6 +3489,16 @@
     } else {
       body.textContent = content;
     }
+    // Per-message copy. Copying a reply used to mean selecting text by hand;
+    // code blocks had a Copy button but prose did not.
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'copy-msg-btn';
+    copyBtn.type = 'button';
+    copyBtn.title = 'Copy this message';
+    copyBtn.setAttribute('aria-label', 'Copy this message');
+    copyBtn.textContent = '⧉';
+    label.appendChild(copyBtn);
+
     wrap.appendChild(label);
     wrap.appendChild(body);
     els.chat.appendChild(wrap);
@@ -4235,11 +4245,15 @@
         `No API key for **${sessCfg?.label || session.provider}**. Open Settings, choose that provider, and add a key.`,
         { error: true }
       );
+      // Focus jumps into the drawer here, so a screen-reader user needs to be
+      // told why the context changed.
+      announce('Cannot send: no API key configured. Settings opened.');
       openDrawer();
       return;
     }
     if (!session.model) {
       addMessage('assistant', 'No model selected. Pick one from the header (or Settings).', { error: true });
+      announce('Cannot send: no model selected. Settings opened.');
       openDrawer(); return;
     }
     // Bind to current tab if floating. If another session was previously
@@ -4342,6 +4356,7 @@
       const maxAutoContinues = Math.max(0, Math.min(10, Number(state.settings.maxAutoContinues) || 2));
       let autoContinues = 0;
       let goalContinues = 0;
+      announce('Working on it.');
       let stoppedReason = 'maxSteps'; // overwritten if we break naturally
       let lastAssistantText = '';   // for optional read-aloud at turn end
 
@@ -4577,6 +4592,7 @@
       // Optional read-aloud. Fire-and-forget: speech must never delay or fail
       // the turn, and the synthesizer is stopped if another turn starts.
       try { maybeAutoSpeak(lastAssistantText); } catch { /* ignore */ }
+      announce('Reply ready.');
     } catch (e) {
       // OpenAI-compat servers reject the next turn with "insufficient
       // tool messages following tool_calls" if any tool_call_id is
@@ -5099,7 +5115,28 @@
   }
 
   // ── Drawer / settings ────────────────────────────────
+  // ── Screen-reader announcements ──────────────────────
+  // Deliberately coarse: one sentence per turn transition. The chat log is not a
+  // live region because streaming would re-announce on every token.
+  let _focusBeforeDrawer = null;
+  let _lastAnnounce = '';
+  let _announceTimer = null;
+  function announce(message) {
+    const el = document.getElementById('srStatus');
+    if (!el || !message) return;
+    if (message === _lastAnnounce) return;
+    _lastAnnounce = message;
+    // Clear then set on the next tick so a repeated identical phrase in a later
+    // turn is still spoken (assistive tech ignores an unchanged text node).
+    el.textContent = '';
+    clearTimeout(_announceTimer);
+    _announceTimer = setTimeout(() => { el.textContent = message; }, 30);
+  }
+
   function openDrawer() {
+    // Remember what had focus so closing the dialog puts the user back where
+    // they were instead of dumping focus at the top of the document.
+    _focusBeforeDrawer = document.activeElement;
     els.drawer.classList.remove('hidden');
     els.overlay.classList.remove('hidden');
     els.provider.value = state.settings.provider;
@@ -5198,10 +5235,24 @@
     if (currentApiKey() || getProviderConfig(state.settings.provider)?.isCustom) {
       fetchModels(state.settings.provider, currentApiKey());
     }
+    // Move focus into the dialog so keyboard users are not left behind the
+    // overlay. The provider select is the first meaningful control.
+    try { (els.provider || els.drawer).focus?.(); } catch { /* non-fatal */ }
   }
   function closeDrawer() {
     els.drawer.classList.add('hidden');
     els.overlay.classList.add('hidden');
+    restoreFocusAfterDrawer();
+  }
+
+  function restoreFocusAfterDrawer() {
+    const prev = _focusBeforeDrawer;
+    _focusBeforeDrawer = null;
+    if (prev && typeof prev.focus === 'function' && document.contains(prev)) {
+      prev.focus();
+    } else if (els.input) {
+      els.input.focus();
+    }
   }
 
   // ── Skills manager ───────────────────────────────────
@@ -6553,6 +6604,29 @@
         });
         return;
       }
+      const msgCopy = e.target.closest('.copy-msg-btn');
+      if (msgCopy) {
+        const wrap = msgCopy.closest('.msg');
+        // innerText needs layout (and is absent in non-browser DOMs); textContent
+        // always works, so prefer the former but never depend on it.
+        const bodyEl = wrap?.querySelector('.msg-body');
+        const text = String(bodyEl?.innerText ?? bodyEl?.textContent ?? '').trim();
+        if (text) {
+          try {
+            await navigator.clipboard.writeText(text);
+            const orig = msgCopy.textContent;
+            msgCopy.textContent = '✓';
+            msgCopy.classList.add('copied');
+            announce('Message copied.');
+            setTimeout(() => { msgCopy.textContent = orig; msgCopy.classList.remove('copied'); }, 1200);
+          } catch (err) {
+            announce('Copy failed.');
+            msgCopy.textContent = '✕';
+            setTimeout(() => { msgCopy.textContent = '⧉'; }, 1200);
+          }
+        }
+        return;
+      }
       const editBtn = e.target.closest('.edit-btn');
       if (editBtn) {
         const idx = Number(editBtn.dataset.idx);
@@ -6816,10 +6890,11 @@
     renderPalette();
     paletteEl.input.focus();
   }
-  function closePalette() {
+  function closePalette({ restoreFocus = false } = {}) {
     if (!paletteEl.overlay) return;
     paletteState.open = false;
     paletteEl.overlay.classList.add('hidden');
+    if (restoreFocus) { try { els.input?.focus(); } catch { /* non-fatal */ } }
   }
   function renderPalette() {
     if (!paletteEl.list) return;
@@ -6874,7 +6949,7 @@
       const mod = e.ctrlKey || e.metaKey;
       if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); paletteState.open ? closePalette() : openPalette(); return; }
       if (!paletteState.open) return;
-      if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+      if (e.key === 'Escape') { e.preventDefault(); closePalette({ restoreFocus: true }); }
       else if (e.key === 'ArrowDown') { e.preventDefault(); paletteState.index = KPAL.moveIndex(paletteState.index, 1, paletteState.filtered.length); renderPalette(); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); paletteState.index = KPAL.moveIndex(paletteState.index, -1, paletteState.filtered.length); renderPalette(); }
       else if (e.key === 'Enter') { e.preventDefault(); runPaletteIndex(paletteState.index); }
@@ -6885,6 +6960,30 @@
       if (row) runPaletteIndex(Number(row.dataset.idx));
     });
     paletteEl.overlay.addEventListener('click', (e) => { if (e.target === paletteEl.overlay) closePalette(); });
+  }
+
+  // ── Escape dismisses overlays ────────────────────────
+  // The settings and skills drawers are modal (aria-modal) and previously could
+  // only be closed with the mouse or by clicking the scrim.
+  function wireOverlayDismissal() {
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || paletteState.open) return;   // palette handles its own Esc
+      if (els.skillsDrawer && !els.skillsDrawer.classList.contains('hidden')) {
+        e.preventDefault();
+        closeSkillsManager();
+        return;
+      }
+      if (els.drawer && !els.drawer.classList.contains('hidden')) {
+        e.preventDefault();
+        closeDrawer();
+        return;
+      }
+      if (els.modelPopover && !els.modelPopover.classList.contains('hidden')) {
+        e.preventDefault();
+        els.modelPopover.classList.add('hidden');
+        els.modelBtn?.focus?.();
+      }
+    });
   }
 
   // ── Voice: speech-to-text input + read-aloud ─────────
@@ -7415,6 +7514,7 @@
     await loadSpendTotal();
     wirePalette();
     wireVoice();
+    wireOverlayDismissal();
     await openaiOauthLoad();
     applyAppearance();
     compileCustomTools();

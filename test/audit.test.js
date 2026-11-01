@@ -228,3 +228,59 @@ test('README documents the current version', () => {
   }
   assert.ok(readme.includes('Ctrl/Cmd+K') || readme.includes('Ctrl/Cmd+K'), 'palette shortcut should be documented');
 });
+
+// ── Accessibility invariants ─────────────────────────
+// These exist because the panel shipped with 10 icon-only buttons whose only
+// accessible name was `title` (unreliable for screen readers, useless on touch),
+// zero visible keyboard focus on buttons, and four infinite animations with no
+// reduced-motion escape.
+
+test('every icon-only button has an accessible name', () => {
+  const offenders = [];
+  for (const m of HTML.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)) {
+    const attrs = m[1];
+    const inner = m[2].replace(/<[^>]+>/g, '').trim();
+    if (inner) continue;                       // has visible text
+    if (/aria-label\s*=/.test(attrs)) continue; // named
+    const id = (attrs.match(/id="([^"]+)"/) || [])[1]
+      || (attrs.match(/class="([^"]+)"/) || [])[1] || 'unnamed';
+    offenders.push(id);
+  }
+  assert.deepEqual(offenders, [],
+    `icon-only buttons need aria-label (title alone is not an accessible name): ${offenders.join(', ')}`);
+});
+
+test('keyboard focus is visible', () => {
+  const css = read('sidepanel/sidepanel.css');
+  assert.match(css, /:focus-visible/, 'buttons need a visible focus indicator for keyboard users');
+  assert.match(css, /outline:\s*2px solid/, 'the focus ring should be an outline (does not shift layout)');
+});
+
+test('animations respect prefers-reduced-motion', () => {
+  const css = read('sidepanel/sidepanel.css');
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/,
+    'infinite animations must be disabled when the OS asks for reduced motion');
+  assert.match(css, /animation-iteration-count:\s*1/, 'reduced motion should stop looping animations');
+});
+
+test('the panel exposes a live region for announcements', () => {
+  assert.match(HTML, /id="srStatus"[^>]*aria-live="polite"/, 'a polite live region is required for turn announcements');
+  // The conversation itself must not be a live region: streaming would flood a
+  // screen reader with every token.
+  const chatTag = (HTML.match(/<main class="chat"[^>]*>/) || [''])[0];
+  assert.ok(!/aria-live/.test(chatTag), 'the chat log must not be aria-live (streaming would spam the reader)');
+});
+
+test('the settings drawer is a labelled modal dialog', () => {
+  const tag = (HTML.match(/<aside[^>]*id="drawer"[^>]*>/) || [''])[0];
+  assert.match(tag, /role="dialog"/);
+  assert.match(tag, /aria-modal="true"/);
+  assert.match(tag, /aria-labelledby="drawerTitle"/);
+  assert.match(HTML, /id="drawerTitle"/, 'the aria-labelledby target must exist');
+});
+
+test('the layout adapts to a narrow side panel', () => {
+  const css = read('sidepanel/sidepanel.css');
+  assert.match(css, /@media\s*\(max-width:\s*380px\)/,
+    'a side panel is routinely dragged narrow; the layout needs a narrow breakpoint');
+});

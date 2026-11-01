@@ -16,20 +16,20 @@
       </button>
     </div>
     <div class="hdr-r">
-      <button class="ibtn capture-btn" id="captureBtn" title="Record a skill — capture user actions on this page and save them as a reusable playbook">
+      <button class="ibtn capture-btn" id="captureBtn" title="Record a skill — capture user actions on this page and save them as a reusable playbook" aria-label="Record page actions">
         <span class="capture-dot"></span>
         <span class="capture-count" id="captureCount"></span>
       </button>
-      <button class="ibtn" id="sessionsBtn" title="Sessions">
+      <button class="ibtn" id="sessionsBtn" title="Sessions" aria-label="Conversation history">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
       </button>
-      <button class="ibtn" id="popOutBtn" title="Open in a standalone window">
+      <button class="ibtn" id="popOutBtn" title="Open in a standalone window" aria-label="Open in a separate window">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
       </button>
-      <button class="ibtn" id="newChatBtn" title="New chat">
+      <button class="ibtn" id="newChatBtn" title="New chat" aria-label="New chat">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
       </button>
-      <button class="ibtn" id="settingsBtn" title="Settings">
+      <button class="ibtn" id="settingsBtn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
     </div>
@@ -38,14 +38,18 @@
   <div class="ctxbar">
     <span class="dot" id="ctxDot"></span>
     <span class="ctx-txt" id="ctxTxt">No page</span>
-    <button class="ctx-reload" id="reloadCtxBtn" title="Re-read page">
+    <button class="ctx-reload" id="reloadCtxBtn" title="Re-read page" aria-label="Re-read the current page">
       <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
     </button>
   </div>
 
   <div id="goalBar" class="goal-bar hidden" aria-live="polite"></div>
 
-  <main class="chat" id="chat">
+  <!-- Screen-reader announcements (turn started/finished, errors). Visually
+       hidden; deliberately coarse so streaming does not flood the reader. -->
+  <div id="srStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <main class="chat" id="chat" aria-label="Conversation">
     <div class="empty" id="empty">
       <h2>Your browser, agent-controlled</h2>
       <p>Ask in natural language. Kyoto can read DOM, inspect network, dump cookies, run JS, click buttons, capture screenshots, search history, and call out to MCP servers.</p>
@@ -76,7 +80,7 @@
         <button id="visionBtn" class="btn-mini btn-vision" type="button" title="Attach a screenshot of the current tab with the next message (requires a vision-capable model)">📸</button>
         <div class="composer-spacer"></div>
         <button id="stopBtn" class="btn-stop hidden" title="Stop generating">Stop</button>
-        <button id="sendBtn" class="btn-send" title="Send (Enter)">
+        <button id="sendBtn" class="btn-send" title="Send (Enter)" aria-label="Send message">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
         </button>
       </div>
@@ -105,10 +109,10 @@
 
   <!-- Settings drawer -->
   <div class="overlay hidden" id="overlay"></div>
-  <aside class="drawer hidden" id="drawer">
+  <aside class="drawer hidden" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
     <header class="drawer-hdr">
-      <h2>Settings</h2>
-      <button class="ibtn" id="closeDrawerBtn" title="Close">
+      <h2 id="drawerTitle">Settings</h2>
+      <button class="ibtn" id="closeDrawerBtn" title="Close" aria-label="Close settings">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </header>
@@ -129,7 +133,7 @@
         <label id="keyLabel">OpenRouter API key</label>
         <div class="input-wrap">
           <input type="password" id="apiKey" placeholder="sk-or-v1-…" autocomplete="off" />
-          <button class="reveal" id="revealBtn" type="button" title="Show/hide">
+          <button class="reveal" id="revealBtn" type="button" title="Show/hide" aria-label="Show or hide the API key">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
         </div>
@@ -542,7 +546,7 @@
       <h2>Skills hub</h2>
       <div class="skills-hdr-actions">
         <button class="btn-mini" id="skillsRefreshBtn" type="button" title="Refresh from hub">Refresh</button>
-        <button class="ibtn" id="closeSkillsDrawerBtn" title="Close">
+        <button class="ibtn" id="closeSkillsDrawerBtn" title="Close" aria-label="Close skill manager">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>

@@ -333,3 +333,103 @@ test('dictation appends to text the user already typed', async () => {
   assert.match(input.value, /typed first/, 'typed text must survive dictation');
   assert.match(input.value, /dictated words/);
 });
+
+// ══════════════════════════════════════════════════════
+// Accessibility & interaction (keyboard paths)
+// ══════════════════════════════════════════════════════
+
+test('opening settings moves focus into the dialog', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const drawer = doc.getElementById('drawer');
+  assert.ok(drawer.classList.contains('hidden'), 'drawer starts hidden');
+
+  doc.getElementById('settingsBtn').click();
+  await settle(40);
+  assert.equal(drawer.classList.contains('hidden'), false, 'settings button must open the drawer');
+
+  const active = doc.activeElement;
+  assert.ok(active && drawer.contains(active),
+    `focus must move into the dialog, got ${active ? active.tagName + '#' + active.id : 'null'}`);
+});
+
+test('Escape closes the settings dialog and restores focus to the opener', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const drawer = doc.getElementById('drawer');
+  const opener = doc.getElementById('settingsBtn');
+
+  opener.focus();
+  opener.click();
+  await settle(40);
+  assert.equal(drawer.classList.contains('hidden'), false);
+
+  // A modal dialog must be dismissable from the keyboard.
+  doc.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle(40);
+  assert.ok(drawer.classList.contains('hidden'), 'Escape must close the drawer');
+  assert.equal(doc.activeElement, opener, 'focus must return to the control that opened the dialog');
+});
+
+test('the live region receives coarse turn announcements', async () => {
+  const p = await bootPanel();
+  const status = p.window.document.getElementById('srStatus');
+  assert.ok(status, 'live region must exist');
+  assert.equal(status.getAttribute('aria-live'), 'polite');
+
+  // Drive a real turn: the stub has no API key, so this exercises the submit
+  // path (and its announcement) without any network.
+  const doc = p.window.document;
+  const input = doc.getElementById('input');
+  input.value = 'hello there';
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(120);
+
+  // A keyless panel cannot start a turn: it explains, opens Settings and
+  // announces — so a screen-reader user is not silently teleported into a dialog.
+  assert.match(status.textContent, /Cannot send|API key/i,
+    `expected a failure announcement, got ${JSON.stringify(status.textContent)}`);
+});
+
+test('Escape in the palette returns focus to the composer', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  key(p.window, 'k', { ctrlKey: true });
+  await settle(20);
+  assert.ok(doc.getElementById('paletteInput'), 'palette input exists');
+
+  key(p.window, 'Escape');
+  await settle(20);
+  assert.ok(doc.getElementById('paletteOverlay').classList.contains('hidden'));
+  assert.equal(doc.activeElement, doc.getElementById('input'),
+    'focus should return to the composer so typing can continue');
+});
+
+test('messages expose a one-click copy that writes the message text', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+
+  // /cost appends an assistant message with no network involved.
+  key(p.window, 'k', { ctrlKey: true });
+  type(p.window, doc.getElementById('paletteInput'), 'spend');
+  await settle(10);
+  key(p.window, 'Enter');
+  await settle(80);
+
+  const msgs = [...doc.querySelectorAll('.msg.assistant')];
+  assert.ok(msgs.length > 0, 'a message should have been rendered');
+
+  const last = msgs[msgs.length - 1];
+  const btn = last.querySelector('.copy-msg-btn');
+  assert.ok(btn, 'every message should carry a copy button');
+  assert.equal(btn.getAttribute('aria-label'), 'Copy this message', 'icon-only control needs a name');
+
+  const written = [];
+  p.window.navigator.clipboard.writeText = async (t) => { written.push(t); };
+
+  btn.click();
+  await settle(40);
+  assert.equal(written.length, 1, 'clicking copy must write to the clipboard');
+  assert.ok(written[0].length > 0, 'the copied text must not be empty');
+  assert.match(written[0], /spend|cost|\\$/i, `copied the wrong content: ${JSON.stringify(written[0].slice(0, 80))}`);
+});
