@@ -2745,3 +2745,89 @@ test('opening settings works even if the usage readout fails', async () => {
   assert.match(doc.getElementById('storageSummary').textContent, /unavailable/i,
     'and the readout should say so rather than sitting on a placeholder');
 });
+
+// ══════════════════════════════════════════════════════
+// No raw JavaScript values reach the UI
+// ══════════════════════════════════════════════════════
+// Rendering a record with missing or malformed fields is the classic way to leak
+// "undefined", "NaN" or "[object Object]" into a user-facing string. The surfaces
+// below were all checked and currently degrade gracefully (the usage chip renders a
+// deliberate "—"), so this pins that property rather than fixing anything.
+
+const RAW_VALUE = /\b(?:undefined|NaN|\[object Object\]|Invalid Date)\b/;
+
+function leaksIn(text) {
+  const m = text.match(RAW_VALUE);
+  if (!m) return null;
+  const i = Math.max(0, m.index - 60);
+  return `"${m[0]}" in …${text.slice(i, m.index + 60).replace(/\s+/g, ' ')}…`;
+}
+
+test('surfaces render partial records without leaking raw values', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  // A partially-restored or older-version record: no timestamps, no url, no title.
+  chrome.__store.set('kyoto_sessions_index', [
+    { id: 's_nodate', title: 'NoDate' },
+    { id: 's_partial', title: '', lastActive: null, url: null }
+  ]);
+  chrome.__store.set('kyoto_session_s_nodate', { id: 's_nodate', history: [{ role: 'user', content: 'hi' }] });
+  chrome.__store.set('kyoto_session_s_partial', {
+    id: 's_partial',
+    history: [
+      { role: 'assistant', content: 'a', _ts: null, _usage: { prompt_tokens: 10, completion_tokens: null, cost: null } },
+      { role: 'assistant', content: 'b', _usage: { prompt_tokens: 'x', completion_tokens: undefined } }
+    ]
+  });
+
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  await settle(600);
+
+  assert.equal(leaksIn(doc.body.textContent), null,
+    `the main panel leaked a raw value: ${leaksIn(doc.body.textContent)}`);
+
+  doc.getElementById('settingsBtn').click();
+  await settle(500);
+  assert.equal(leaksIn(doc.getElementById('drawer').textContent), null,
+    `the settings drawer leaked: ${leaksIn(doc.getElementById('drawer').textContent)}`);
+  doc.getElementById('closeDrawerBtn').click();
+  await settle(150);
+
+  doc.getElementById('sessionsBtn').click();
+  await settle(400);
+  const list = doc.getElementById('sessionsList');
+  assert.equal(leaksIn(list.textContent), null,
+    `the session list leaked: ${leaksIn(list.textContent)}`);
+
+  // Open the malformed conversation and check the rendered transcript.
+  const row = [...list.querySelectorAll('.sess-item')].find(el => /NoDate|partial/i.test(el.textContent));
+  assert.ok(row, 'the partial records should still be listed');
+  row.click();
+  await settle(500);
+  assert.equal(leaksIn(doc.getElementById('chat').textContent), null,
+    `the transcript leaked: ${leaksIn(doc.getElementById('chat').textContent)}`);
+});
+
+test('missing settings render placeholders, not "undefined"', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  // Settings stored as empty strings / nulls rather than absent.
+  chrome.__store.set('provider', '');
+  chrome.__store.set('model', '');
+  chrome.__store.set('systemPrompt', '');
+  chrome.__store.set('temperature', null);
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  await settle(400);
+  doc.getElementById('settingsBtn').click();
+  await settle(400);
+
+  const drawer = doc.getElementById('drawer').textContent;
+  assert.equal(leaksIn(drawer), null, `settings leaked: ${leaksIn(drawer)}`);
+  // Input *values* are not part of textContent, so check the fields directly.
+  for (const el of doc.querySelectorAll('#drawer input, #drawer textarea, #drawer select')) {
+    assert.ok(!RAW_VALUE.test(String(el.value || '')),
+      `#${el.id || el.className} holds the raw value "${el.value}"`);
+  }
+});

@@ -1626,9 +1626,16 @@
     if (state.auditLog.length > 1000) state.auditLog.splice(0, state.auditLog.length - 1000);
   }
   function fmtTime(ts) {
-    const d = new Date(ts);
+    // A conversation without lastActive (an older or partially-restored record)
+    // used to render the literal string "Invalid Date" in the session list, because
+    // new Date(undefined) makes every comparison below false and falls through to
+    // toLocaleDateString(). Same class as the export crash fixed earlier, in a
+    // different code path — this is the shared formatter, so guard it here.
+    const t = Number(ts);
+    if (!Number.isFinite(t)) return '—';
+    const d = new Date(t);
     const now = Date.now();
-    const diff = (now - ts) / 1000;
+    const diff = (now - t) / 1000;
     if (diff < 60) return 'just now';
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
