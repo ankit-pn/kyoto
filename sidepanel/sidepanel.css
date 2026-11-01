@@ -1478,7 +1478,8 @@ body {
   padding: 0 4px;
   font-size: 12px;
   line-height: 1;
-  color: var(--fg-dim, #888);
+  color: var(--text-dim);   /* was var(--fg-dim, #888) — a token that never existed, so it was
+                              not theme-aware and sat below contrast in light mode */
   opacity: 0;
   transition: opacity 0.12s ease;
 }

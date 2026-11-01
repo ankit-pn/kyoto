@@ -765,3 +765,29 @@ test('disclosure toggles expose their expanded state', () => {
     assert.ok(html.includes(`id="${controls}"`), `aria-controls="${controls}" must resolve to a real element`);
   }
 });
+
+// ── Every CSS token used must be defined ──────────────
+// var(--fg-dim, #888) was used in the per-message copy button against a token
+// that never existed. The fallback masked it in dark mode, but it was not
+// theme-aware: light mode got #888 instead of --text-dim, which is both off
+// palette and below contrast. Undefined tokens fail silently, so enumerate.
+
+test('every CSS custom property that is used is defined', () => {
+  // Comments quote token names (including the old broken one), so strip them
+  // first — otherwise the guard reports phantom references in its own docs.
+  const css = read('sidepanel/sidepanel.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const defined = new Set([...css.matchAll(/^\s*--([a-z0-9-]+)\s*:/gm)].map(m => m[1]));
+  const used = new Set([...css.matchAll(/var\(--([a-z0-9-]+)/g)].map(m => m[1]));
+  const missing = [...used].filter(t => !defined.has(t)).sort();
+  assert.deepEqual(missing, [],
+    `these tokens are referenced but never defined (they fall back to nothing): ${missing.join(', ')}`);
+});
+
+test('no token is defined without being used', () => {
+  // Dead tokens are drift: they suggest a palette entry that does not exist.
+  const css = read('sidepanel/sidepanel.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const defined = new Set([...css.matchAll(/^\s*--([a-z0-9-]+)\s*:/gm)].map(m => m[1]));
+  const used = new Set([...css.matchAll(/var\(--([a-z0-9-]+)/g)].map(m => m[1]));
+  const dead = [...defined].filter(t => !used.has(t)).sort();
+  assert.deepEqual(dead, [], `these tokens are defined but never used: ${dead.join(', ')}`);
+});
