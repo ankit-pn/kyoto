@@ -158,6 +158,9 @@
         </div>
         <select id="model" size="8"></select>
         <p class="hint" id="modelHint">Enter an API key to load models.</p>
+        <!-- Shown only after a failed catalogue fetch: previously the only way
+             to retry was to switch provider back and forth. -->
+        <button class="btn-mini hidden" id="modelRetryBtn" type="button">Retry loading models</button>
       </div>
 
       <div class="field">

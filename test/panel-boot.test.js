@@ -981,3 +981,61 @@ test('the queue drains once the running turn finishes', async () => {
   assert.ok(userBubbles.some(t => t.includes('second')),
     `the queued message should be sent after the turn ends; saw: ${JSON.stringify(userBubbles)}`);
 });
+
+// ══════════════════════════════════════════════════════
+// Retry a failed model-catalogue fetch
+// ══════════════════════════════════════════════════════
+// The hint said "Failed: …" with no action available: the only way to retry was
+// to switch provider back and forth or reopen the panel.
+
+async function bootDrawerWithFetch(fetchImpl) {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('provider', 'openrouter');
+  chrome.__store.set('apiKeys', { openrouter: 'test-key' });
+  const p = await bootPanel({ chrome, beforeBoot: (w) => { w.fetch = fetchImpl; } });
+  p.window.document.getElementById('settingsBtn').click();
+  await settle(250);
+  return p;
+}
+
+test('the retry control is hidden until a fetch fails', async () => {
+  const p = await bootDrawerWithFetch(async () => ({ ok: true, json: async () => ({ data: [{ id: 'a/one', name: 'One' }] }) }));
+  const doc = p.window.document;
+  assert.ok(doc.getElementById('modelRetryBtn').classList.contains('hidden'),
+    'a successful fetch should not offer retry');
+});
+
+test('a failed catalogue fetch offers retry, and retrying refetches', async () => {
+  let calls = 0;
+  const p = await bootDrawerWithFetch(async () => { calls++; throw new Error('endpoint down'); });
+  const doc = p.window.document;
+  const retry = doc.getElementById('modelRetryBtn');
+
+  assert.ok(!retry.classList.contains('hidden'), 'a failure must offer a retry');
+  assert.match(doc.getElementById('modelHint').textContent, /unreachable|Failed/i);
+
+  const before = calls;
+  retry.click();
+  await settle(250);
+  assert.ok(calls > before, 'clicking retry must attempt the fetch again');
+  assert.ok(!retry.classList.contains('hidden'), 'still failing, so retry stays available');
+});
+
+test('retry disappears once the fetch succeeds', async () => {
+  // The panel fetches once at boot and again when the drawer opens, so counting
+  // attempts is unreliable — drive the outcome with an explicit flag instead.
+  let failing = true;
+  const p = await bootDrawerWithFetch(async () => {
+    if (failing) throw new Error('transient');
+    return { ok: true, json: async () => ({ data: [{ id: 'a/one', name: 'One' }] }) };
+  });
+  const doc = p.window.document;
+  const retry = doc.getElementById('modelRetryBtn');
+  assert.ok(!retry.classList.contains('hidden'), 'first attempt fails');
+
+  failing = false;
+  retry.click();
+  await settle(300);
+  assert.ok(retry.classList.contains('hidden'), 'after success there is nothing to retry');
+});

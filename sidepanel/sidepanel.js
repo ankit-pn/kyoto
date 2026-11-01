@@ -155,6 +155,7 @@
     model: $('model'),
     modelSearch: $('modelSearch'),
     modelHint: $('modelHint'),
+    modelRetryBtn: $('modelRetryBtn'),
     systemPrompt: $('systemPrompt'),
     temperature: $('temperature'),
     maxTokens: $('maxTokens'),
@@ -3814,6 +3815,13 @@
     return state.settings.provider === provider;
   }
 
+  // Retry is only meaningful when the last attempt failed; hide it otherwise so
+  // it never becomes background furniture.
+  function setModelRetryVisible(visible) {
+    if (!els.modelRetryBtn) return;
+    els.modelRetryBtn.classList.toggle('hidden', !visible);
+  }
+
   async function fetchModels(provider, apiKey) {
     const cfg = getProviderConfig(provider);
     if (!cfg) {
@@ -3853,6 +3861,7 @@
     }
     if (isProviderShownInDrawer(provider)) {
       els.modelHint.textContent = 'Loading models…';
+      setModelRetryVisible(false);
     }
     const setModels = (list, statusText) => {
       // Always store into the cross-provider map (so the header picker
@@ -3917,13 +3926,19 @@
           ? ' Badges: 🔧 tools (needed for agent mode) · 👁 vision · 🧠 reasoning.'
           : '';
         setModels(sorted, `${sorted.length} models. Pick one and Save.${legend}`);
+        if (isProviderShownInDrawer(provider)) setModelRetryVisible(false);
       }
     } catch (e) {
       if (cfg.fallbackModels) {
         setModels(cfg.fallbackModels, `${cfg.fallbackModels.length} models (fallback — /models endpoint unreachable: ${e.message}).`);
+        if (isProviderShownInDrawer(provider)) setModelRetryVisible(true);
       } else {
         setModels([], `Failed: ${e.message}`);
-        if (isProviderShownInDrawer(provider)) { state.allModels = []; els.model.innerHTML = ''; }
+        if (isProviderShownInDrawer(provider)) {
+          state.allModels = [];
+          els.model.innerHTML = '';
+          setModelRetryVisible(true);
+        }
       }
     }
   }
@@ -6686,6 +6701,21 @@
         if (!els.sessionsPopover.contains(e.target) && !els.sessionsBtn.contains(e.target)) closeSessionsPopover();
       }
     });
+
+    if (els.modelRetryBtn) {
+      els.modelRetryBtn.addEventListener('click', async () => {
+        // Use what the drawer is actually showing: the provider dropdown may
+        // hold an unsaved choice, and the key field may hold a pasted key that
+        // has not been saved yet. Falling back to the saved provider's key would
+        // retry with credentials the user is no longer looking at.
+        const shownProvider = els.provider.value;
+        const shownKey = (els.apiKey.value || '').trim();
+        const provider = isProviderShownInDrawer(shownProvider) ? shownProvider : state.settings.provider;
+        els.modelHint.textContent = 'Retrying…';
+        setModelRetryVisible(false);
+        await fetchModels(provider, shownKey || currentApiKey());
+      });
+    }
 
     els.revealBtn.addEventListener('click', () => {
       els.apiKey.type = els.apiKey.type === 'password' ? 'text' : 'password';
