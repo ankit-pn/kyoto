@@ -3197,20 +3197,97 @@
   }
   async function loadFullSession(id) {
     const got = await chrome.storage.local.get(SESS_KEY(id));
-    return got[SESS_KEY(id)] || null;
+    const raw = got?.[SESS_KEY(id)];
+    if (!raw) return null;
+    // Distinguish "gone" from "unreadable": a corrupt record used to look
+    // identical to a missing one, so the panel silently showed an empty chat and
+    // the user could not tell whether their history was lost or never existed.
+    if (typeof raw !== 'object' || !raw.id || !Array.isArray(raw.history)) {
+      warnPersistFailure('this conversation could not be read (the stored record is malformed)', null, { sticky: true });
+      return null;
+    }
+    return raw;
   }
+
+  // ── Storage failures must be visible ─────────────────
+  // persistSession wrote to chrome.storage.local with no error handling. On a
+  // quota failure the write threw into whatever flow happened to be saving, the
+  // in-memory index was updated anyway, and the user was left believing the
+  // conversation was stored. Silent data loss is worse than a loud error.
+  let _persistWarnedAt = 0;
+  let _persistFailed = null;   // { reason, quota } while a save is failing
+  let _storageNotice = null;   // { reason } one-off problem (e.g. unreadable record)
+
+  function renderPersistWarn() {
+    const bar = document.getElementById('persistWarnBar');
+    if (!bar) return;
+    const info = _storageNotice || _persistFailed;
+    if (!info) { bar.classList.add('hidden'); return; }
+    const text = bar.querySelector('.pw-text');
+    if (text) {
+      text.textContent = `Storage problem: ${info.reason}.`
+        + (info.quota ? ' Storage is full — export or delete old conversations to make room.' : '')
+        + (_storageNotice ? '' : ' Anything you do now may be lost when the panel closes.');
+    }
+    bar.classList.remove('hidden');
+  }
+
+  function storageQuotaProblem(err) {
+    const msg = String(err?.message || err || '');
+    return /quota|QUOTA_BYTES|exceeded/i.test(msg);
+  }
+
+  /**
+   * @param {string} reason human-readable
+   * @param {Error|null} err
+   * @param {{sticky?: boolean}} [opts] sticky notices are not cleared by a later
+   *   successful save — a successful write does not make an unreadable record
+   *   readable again.
+   */
+  function warnPersistFailure(reason, err, opts = {}) {
+    // Warn at most once every 30s: a failing write usually fails on every
+    // subsequent turn too, and flooding the transcript helps nobody.
+    const now = Date.now();
+    if (now - _persistWarnedAt < 30000) return;
+    _persistWarnedAt = now;
+    const quota = storageQuotaProblem(err);
+    // A chat line alone is wiped by the next transcript re-render, so the
+    // warning also lives in a bar that survives until a save succeeds.
+    if (opts.sticky) _storageNotice = { reason, quota };
+    else _persistFailed = { reason, quota };
+    renderPersistWarn();
+    addMessage('assistant',
+      `**Could not save ${reason}.**${quota ? ' Storage is full — export or delete old conversations to make room.' : ''} Anything you do now may be lost when the panel closes.`,
+      { error: true });
+    announce('Warning: this conversation could not be saved.');
+  }
+
+  /** @returns {Promise<boolean>} whether the conversation is safely stored */
   async function persistSession(s) {
     s.lastActive = Date.now();
-    await chrome.storage.local.set({ [SESS_KEY(s.id)]: s });
+    try {
+      await chrome.storage.local.set({ [SESS_KEY(s.id)]: s });
+    } catch (err) {
+      // Do NOT update the in-memory index: it would claim a save that failed.
+      warnPersistFailure('this conversation', err);
+      return false;
+    }
     const idx = state.sessionsIndex.findIndex(x => x.id === s.id);
     const meta = { id: s.id, title: s.title, tabId: s.tabId, url: s.url, createdAt: s.createdAt, lastActive: s.lastActive };
     if (idx >= 0) state.sessionsIndex[idx] = meta;
     else state.sessionsIndex.unshift(meta);
     state.sessionsIndex.sort((a, b) => b.lastActive - a.lastActive);
-    await chrome.storage.local.set({ [INDEX_KEY]: state.sessionsIndex });
+    try {
+      await chrome.storage.local.set({ [INDEX_KEY]: state.sessionsIndex });
+    } catch (err) {
+      warnPersistFailure('the conversation list', err);
+      return false;
+    }
     // Invalidate the deep-search content cache so the next search picks
     // up newly-added messages instead of returning stale matches.
     sessionContentCache?.delete?.(s.id);
+    if (_persistFailed) { _persistFailed = null; renderPersistWarn(); }
+    return true;
   }
   async function deleteSession(id) {
     await chrome.storage.local.remove(SESS_KEY(id));
@@ -8332,6 +8409,13 @@
     wireOverlayDismissal();
     wireShortcutsHelp();
     wireModalFocusTrap();
+    renderPersistWarn();
+    document.querySelector('#persistWarnBar .pw-dismiss')?.addEventListener('click', () => {
+      // Dismissing acknowledges everything currently shown.
+      _storageNotice = null;
+      const bar = document.getElementById('persistWarnBar');
+      if (bar) bar.classList.add('hidden');
+    });
     wireDrawerSections();
     wireDrawerDirtyTracking();
     refreshSectionCollapse();

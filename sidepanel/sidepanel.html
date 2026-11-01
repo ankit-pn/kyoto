@@ -71,6 +71,10 @@
     <button id="jumpLatestBtn" class="jump-latest hidden" type="button" aria-label="Jump to the latest message">↓ Latest</button>
     <!-- Follow-ups typed while a reply is still streaming. Without this, Enter
          mid-stream started a SECOND concurrent loop on the same session. -->
+    <div id="persistWarnBar" class="persist-warn hidden" role="alert">
+      <span class="pw-text"></span>
+      <button class="pw-dismiss" type="button" aria-label="Dismiss the storage warning">×</button>
+    </div>
     <div id="queueBar" class="queue-bar hidden" aria-live="polite"></div>
     <div class="composer-box">
       <!-- Slash command palette. Anchored to the composer box so it

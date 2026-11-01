@@ -1861,3 +1861,63 @@ test('a sent message clears its draft', async () => {
   doc.getElementById('stopBtn').click();
   await settle(150);
 });
+
+// ══════════════════════════════════════════════════════
+// Storage failures are visible
+// ══════════════════════════════════════════════════════
+// persistSession had no error handling: a quota failure threw into whatever
+// flow was saving, the in-memory index was updated anyway, and the user went on
+// believing their conversation was stored. Silent data loss is the worst UX
+// failure there is, so it gets a persistent warning rather than a chat line
+// (which the next transcript re-render wipes).
+
+test('a failed save shows a persistent, actionable warning', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  const realSet = chrome.storage.local.set;
+  chrome.storage.local.set = async (obj) => {
+    if (Object.keys(obj).some(k => k.startsWith('kyoto_session_'))) {
+      throw new Error('QUOTA_BYTES quota exceeded');
+    }
+    return realSet.call(chrome.storage.local, obj);
+  };
+
+  const p = await bootPanel({ chrome });
+  const bar = p.window.document.getElementById('persistWarnBar');
+  assert.ok(!bar.classList.contains('hidden'), 'a failing save must be visible');
+  assert.match(bar.textContent, /storage problem/i);
+  assert.match(bar.textContent, /storage is full/i, 'quota failures should say what to do about it');
+  assert.match(bar.textContent, /lost/i, 'and that the work is at risk');
+  // It must survive the transcript re-render that happens during boot.
+  assert.ok(bar.isConnected, 'the warning bar is part of the persistent UI');
+});
+
+test('a healthy save shows no warning', async () => {
+  const p = await bootPanel();
+  const bar = p.window.document.getElementById('persistWarnBar');
+  assert.ok(bar.classList.contains('hidden'), 'no false alarm when storage works');
+});
+
+test('a malformed stored conversation is reported, not silently blank', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('kyoto_sessions_index', [{ id: 's_bad', title: 'Broken', lastActive: Date.now(), tabId: 1, url: 'https://e.test/' }]);
+  chrome.__store.set('kyoto_session_s_bad', { nonsense: true });   // no id, no history
+
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  doc.getElementById('sessionsBtn').click();
+  await settle(120);
+  const row = [...doc.querySelectorAll('#sessionsList .sess-item')].find(el => (el.textContent || '').includes('Broken'));
+  assert.ok(row, 'the broken session is still listed');
+  row.click();
+  await settle(250);
+
+  // The panel must not blow up, and it must say something rather than showing an
+  // empty conversation as if the history never existed. The warning lives in the
+  // persistent bar, because the chat line is wiped by the re-render that follows.
+  assert.deepEqual(p.errors, [], 'an unreadable record must not throw');
+  const bar = doc.getElementById('persistWarnBar');
+  assert.ok(!bar.classList.contains('hidden'), 'an unreadable conversation must be reported');
+  assert.match(bar.textContent, /could not be read|malformed/i);
+});
