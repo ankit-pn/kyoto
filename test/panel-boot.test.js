@@ -2495,3 +2495,26 @@ test('the skills drawer can be opened repeatedly without getting stuck', async (
   assert.ok(!doc.getElementById('skillsDrawer').classList.contains('hidden'), 'reopening works too');
   assert.match(doc.getElementById('skillsList').textContent, /not configured/i);
 });
+
+test('truncated labels expose their full text in a tooltip', async () => {
+  // Session titles and URLs are clipped with CSS ellipsis. Without a title the
+  // full value was unreachable — you could never read a long title in full.
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  const longTitle = 'A very long conversation title that the CSS ellipsis rule will definitely clip';
+  chrome.__store.set('kyoto_sessions_index', [
+    { id: 's_long', title: longTitle, lastActive: Date.now() - 5000, tabId: 1, url: 'https://example.test/a/long/path' }
+  ]);
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  await settle(300);
+  doc.getElementById('sessionsBtn').click();
+  await settle(300);
+
+  const row = [...doc.querySelectorAll('#sessionsList .sess-item')]
+    .find(el => (el.textContent || '').includes('A very long'));
+  assert.ok(row, 'the long-titled conversation should be listed');
+  assert.equal(row.querySelector('.sess-title').getAttribute('title'), longTitle,
+    'the clipped title must be readable in full');
+  assert.ok(row.querySelector('.sess-url').getAttribute('title'), 'and so must the clipped URL');
+});

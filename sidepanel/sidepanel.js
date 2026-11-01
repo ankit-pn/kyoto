@@ -2417,11 +2417,11 @@
     }
     const items = [];
     if (session.goal) {
-      items.push(`<div class="goal-item">🎯 <strong>Goal:</strong><span class="goal-text">${esc(session.goal)}</span><button class="goal-x" data-act="clear-goal" title="Clear goal">×</button></div>`);
+      items.push(`<div class="goal-item">🎯 <strong>Goal:</strong><span class="goal-text" title="${esc(session.goal)}">${esc(session.goal)}</span><button class="goal-x" data-act="clear-goal" title="Clear goal">×</button></div>`);
     }
     for (const [id, l] of state.activeLoops) {
       if (l.sessionId !== session.id) continue;
-      items.push(`<div class="goal-item">🔁 <strong>Loop:</strong><span class="goal-text">every ${fmtDuration(l.intervalMs)}: ${esc(l.prompt)} (${l.count} fired)</span><button class="goal-x" data-act="stop-loop" data-id="${esc(id)}" title="Stop loop">×</button></div>`);
+      items.push(`<div class="goal-item">🔁 <strong>Loop:</strong><span class="goal-text" title="every ${fmtDuration(l.intervalMs)}: ${esc(l.prompt)} (${l.count} fired)">every ${fmtDuration(l.intervalMs)}: ${esc(l.prompt)} (${l.count} fired)</span><button class="goal-x" data-act="stop-loop" data-id="${esc(id)}" title="Stop loop">×</button></div>`);
     }
     if (!items.length) {
       els.goalBar.classList.add('hidden');
@@ -2798,7 +2798,7 @@
                 : '<span class="slash-tag">custom</span>';
       return `<div class="slash-item${i === 0 ? ' active' : ''}" id="slash-item-${i}" data-name="${esc(c.name)}" data-action="${c.action ? '1' : '0'}" role="option" aria-selected="${i === 0 ? 'true' : 'false'}">
         <span class="slash-name">/${esc(c.name)}</span>
-        <span class="slash-preview">${esc(preview)}</span>
+        <span class="slash-preview" title="${esc(preview)}">${esc(preview)}</span>
         ${tag}
       </div>`;
     }).join('') + '<div class="slash-hint">Tab/Enter → fill · ↑↓ → navigate · Esc → close</div>';
@@ -4375,7 +4375,7 @@
         const active = (m._provider === state.settings.provider && m.id === state.settings.model) ? ' active' : '';
         const info = window.KyotoModels?.get(m._provider, m.id);
         const caps = info ? `<span class="popover-caps" title="ctx ${info.context ?? '?'} / out ${info.output ?? '?'} · ${info.source}">${fmt(info.context)} / ${fmt(info.output)}</span>` : '';
-        parts.push(`<div class="popover-item${active}" id="popover-item-${parts.length}" role="option" aria-selected="${active ? 'true' : 'false'}" data-model="${esc(m.id)}" data-provider="${esc(m._provider)}"><span class="popover-mname">${esc(m.name)}${esc(modelCapBadges(m))}</span>${caps}<span class="check">✓</span></div>`);
+        parts.push(`<div class="popover-item${active}" id="popover-item-${parts.length}" role="option" aria-selected="${active ? 'true' : 'false'}" data-model="${esc(m.id)}" data-provider="${esc(m._provider)}"><span class="popover-mname" title="${esc(m.name)}">${esc(m.name)}${esc(modelCapBadges(m))}</span>${caps}<span class="check">✓</span></div>`);
       }
     });
     els.popoverList.innerHTML = parts.join('');
@@ -4480,11 +4480,11 @@
         <div class="sess-item${isCurrent ? ' active' : ''}"${isCurrent ? ' aria-current="true"' : ''} role="listitem" data-id="${esc(s.id)}">
           <div class="sess-row">
             ${dot}
-            <span class="sess-title">${esc(s.title || 'Untitled')}${hitTag}</span>
+            <span class="sess-title" title="${esc(s.title || 'Untitled')}">${esc(s.title || 'Untitled')}${hitTag}</span>
             <span class="sess-time">${esc(fmtTime(s.lastActive))}</span>
           </div>
           <div class="sess-row sub">
-            <span class="sess-url">${esc(url)}</span>
+            <span class="sess-url" title="${esc(url)}">${esc(url)}</span>
             <span class="sess-actions">
               <button class="sess-act" data-act="fork" title="Fork (duplicate as new)" aria-label="Fork conversation">⎘</button>
               <button class="sess-act" data-act="export" title="Export as Markdown" aria-label="Export conversation as Markdown">⇣</button>
@@ -6175,7 +6175,10 @@
     const name = document.createElement('span');
     name.className = 'skill-name';
     name.textContent = s.name || '(untitled)';
-    name.title = s.skill_id;
+    // The element truncates with an ellipsis, so the tooltip must reveal the
+    // full NAME (it previously showed the skill id, which does not help read a
+    // clipped title). The id is still on the row's dataset.
+    name.title = s.name || '(untitled)';
     const meta = document.createElement('span');
     meta.className = 'skill-meta';
     const parts = [];
@@ -7874,7 +7877,7 @@
         html.push(
           `<div class="palette-item${active}" id="palette-item-${idx}" role="option" aria-selected="${active ? 'true' : 'false'}" data-idx="${idx}">` +
           `<span class="pi-label">${esc(item.label)}</span>` +
-          (item.hint ? `<span class="pi-hint">${esc(item.hint)}</span>` : '') +
+          (item.hint ? `<span class="pi-hint" title="${esc(item.hint)}">${esc(item.hint)}</span>` : '') +
           `</div>`
         );
       }

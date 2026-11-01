@@ -863,3 +863,54 @@ test('reduced motion neutralises every transition and animation', () => {
   assert.match(block, /animation-iteration-count:[^;]*!important/, 'and not left looping');
   assert.match(block, /scroll-behavior:\s*auto/, 'smooth scrolling must be disabled too');
 });
+
+// ── Truncated text must be readable somewhere ─────────
+// CSS text-overflow: ellipsis hides content. If the element has no `title` (and
+// the JS does not set one), the full value is unreachable — a long conversation
+// title could never be read in full.
+
+test('every element truncated by CSS exposes its full text', () => {
+  const css = read('sidepanel/sidepanel.css');
+  const js = read('sidepanel/sidepanel.js');
+  const lines = css.split('\n');
+
+  // Collect selectors whose rule truncates text.
+  const truncated = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/text-overflow:\s*ellipsis/.test(lines[i])) continue;
+    for (let j = i; j >= Math.max(0, i - 12); j--) {
+      if (lines[j].includes('{')) {
+        const owner = (lines[j].split('{')[0].trim() || (lines[j - 1] || '').trim()).trim();
+        truncated.push(...owner.split(',').map(x => x.trim()).filter(Boolean));
+        break;
+      }
+    }
+  }
+  assert.ok(truncated.length >= 5, `expected several truncated selectors, found ${truncated.length}`);
+
+  // Either the render site sets title="..." inline, or JS assigns .title dynamically.
+  const unreadable = [];
+  for (const sel of truncated) {
+    // A compound selector like ".goal-item > .goal-text" styles the LAST class;
+    // checking only the first would look at the wrong element.
+    const classes = [...sel.matchAll(/\.([A-Za-z0-9_-]+)/g)].map(m => m[1]);
+    const cls = classes.length ? classes[classes.length - 1] : null;
+    const id = (sel.match(/#([A-Za-z0-9_-]+)/) || [])[1];
+    const token = cls ? `class="${cls}"` : null;
+    const inline = token && js.includes(token) && new RegExp(`${token}[^>]*\\stitle=`).test(js);
+    // camelCase accessor used by the els registry: .ctx-txt -> els.ctxTxt.title
+    const camel = (name) => name.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    const dynamic = id ? new RegExp(`\\.${id}\\.title\\s*=`).test(js) : false;
+    const dynamicViaEls = (id || cls)
+      ? new RegExp(`\\.${camel(id || cls)}\\.title\\s*=`).test(js)
+      : false;
+    const dynamicByCls = cls ? new RegExp(`querySelectorAll\\('\\.${cls}'`).test(js) : false;
+    // createElement pattern: x.className = 'cls' later followed by x.title = ...
+    const dynamicCreate = cls
+      ? new RegExp(`\\.className\\s*=\\s*'${cls}'[\\s\\S]{0,400}?\\.title\\s*=`).test(js)
+      : false;
+    if (!inline && !dynamic && !dynamicViaEls && !dynamicByCls && !dynamicCreate) unreadable.push(sel);
+  }
+  assert.deepEqual(unreadable, [],
+    `these truncate text but never expose the full value (add a title):\n${unreadable.join('\n')}`);
+});
