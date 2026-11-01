@@ -945,3 +945,35 @@ test('controls that signal state keep their active-state styling', () => {
     assert.ok(new RegExp(`\\.${cls}\\b`).test(css), `expected a .${cls} state rule`);
   }
 });
+
+test('the Escape handler covers every dismissible overlay', () => {
+  // The shortcuts help promises Esc closes "a dialog, popover or the palette".
+  // That promise is only true if the dismissal handler knows about every overlay;
+  // the session picker was missing and nothing noticed.
+  const html = read('sidepanel/sidepanel.html');
+  const js = read('sidepanel/sidepanel.js');
+
+  // A dismissible surface: a popover or drawer container. Inner bodies
+  // (popoverList, sessionsList, skillsList) and scrims are not surfaces in their
+  // own right — a scrim is dismissed by its drawer.
+  const overlays = [];
+  for (const m of html.matchAll(/<[a-z]+[^>]*class="([^"]*)"[^>]*id="([^"]+)"/g)) {
+    const [, cls, id] = m;
+    // Match whole class TOKENS: "popover-body" is not a popover. A word-boundary
+    // regex treats the hyphen as a boundary and matches it by mistake.
+    const tokens = cls.split(/\s+/);
+    const isSurface = tokens.some(t => t === 'popover' || t === 'drawer');
+    if (isSurface) overlays.push(id);
+  }
+  assert.ok(overlays.length >= 4, `expected several overlays, found ${overlays.length}: ${overlays.join(',')}`);
+
+  const wire = js.slice(js.indexOf('function wireOverlayDismissal'), js.indexOf('function wireOverlayDismissal') + 4000);
+  assert.ok(wire.length > 500, 'the Escape handler should exist');
+
+  // The palette and shortcuts dialog handle Esc in their own listeners; the slash
+  // palette is dismissed by the composer handler.
+  const selfHandled = new Set(['paletteOverlay', 'shortcutsOverlay', 'slashPalette']);
+  const missing = overlays.filter(id => !selfHandled.has(id) && !wire.includes(id));
+  assert.deepEqual(missing, [],
+    `Esc does not close these overlays: ${missing.join(', ')}`);
+});

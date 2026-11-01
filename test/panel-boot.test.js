@@ -2554,3 +2554,35 @@ test('Enter activates the highlighted conversation from the keyboard', async () 
   assert.ok(doc.getElementById('sessionsPopover').classList.contains('hidden'),
     'Enter must open the highlighted conversation and close the picker');
 });
+
+test('Escape closes every overlay the panel can open', async () => {
+  // The shortcuts help promises "Esc — Close a dialog, popover or the palette".
+  // The session picker was the one surface it did not close, while everything
+  // else worked, so the promise was quietly untrue for one popover.
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const esc = (target) => (target || doc).dispatchEvent(
+    new p.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  const visible = (id) => !doc.getElementById(id).classList.contains('hidden');
+  await settle(400);
+
+  const cases = [
+    { open: () => doc.getElementById('sessionsBtn').click(), id: 'sessionsPopover', focus: 'sessionsSearch', after: 'sessionsBtn' },
+    { open: () => doc.getElementById('modelBtn').click(), id: 'modelPopover', focus: 'popoverSearch', after: 'modelBtn' },
+    { open: () => doc.getElementById('settingsBtn').click(), id: 'drawer' },
+    { open: () => doc.getElementById('skillsManageBtn').click(), id: 'skillsDrawer' }
+  ];
+
+  for (const c of cases) {
+    c.open();
+    await settle(250);
+    assert.ok(visible(c.id), `${c.id} should be open before Esc`);
+    esc(c.focus ? doc.getElementById(c.focus) : doc);
+    await settle(200);
+    assert.ok(!visible(c.id), `Esc must close ${c.id}`);
+    if (c.after) {
+      assert.equal(doc.activeElement, doc.getElementById(c.after),
+        `Esc should return focus to ${c.after} so the keyboard lands somewhere sensible`);
+    }
+  }
+});

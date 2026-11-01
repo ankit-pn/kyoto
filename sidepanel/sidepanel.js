@@ -8103,6 +8103,14 @@
         e.preventDefault();
         els.modelPopover.classList.add('hidden');
         els.modelBtn?.focus?.();
+        return;
+      }
+      // The session picker was the one overlay Esc did not close, even though the
+      // shortcuts help promises "Esc — close a dialog, popover or the palette".
+      if (els.sessionsPopover && !els.sessionsPopover.classList.contains('hidden')) {
+        e.preventDefault();
+        closeSessionsPopover();
+        els.sessionsBtn?.focus?.();
       }
     });
   }
