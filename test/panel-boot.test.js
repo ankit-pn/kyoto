@@ -2518,3 +2518,39 @@ test('truncated labels expose their full text in a tooltip', async () => {
     'the clipped title must be readable in full');
   assert.ok(row.querySelector('.sess-url').getAttribute('title'), 'and so must the clipped URL');
 });
+
+test('Enter activates the highlighted conversation from the keyboard', async () => {
+  // Arrowing through the session list was covered; ACTIVATING the highlighted
+  // row was not — and that is the only part that makes keyboard navigation
+  // useful. Enter is dispatched as a row click so it takes the same path as the
+  // mouse (nested fork/rename/delete buttons are skipped).
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('kyoto_sessions_index', [
+    { id: 's_kbd', title: 'KEYBOARD PICK', lastActive: Date.now() - 60_000, tabId: 1 }
+  ]);
+  // The blob must exist too, or loadFullSession returns null and the picker
+  // correctly stays open (nothing to open).
+  chrome.__store.set('kyoto_session_s_kbd', {
+    id: 's_kbd', title: 'KEYBOARD PICK', lastActive: Date.now() - 60_000, tabId: 1,
+    history: [{ role: 'user', content: 'KEYBOARD CONTENT', _ts: Date.now() }]
+  });
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  await settle(300);
+  doc.getElementById('sessionsBtn').click();
+  await settle(300);
+
+  const list = doc.getElementById('sessionsList');
+  const search = doc.getElementById('sessionsSearch');
+  // Deterministic rows rather than relying on boot-created ordering.
+  list.innerHTML = `<div class="sess-item" data-id="s_kbd"><span class="sess-title">KEYBOARD PICK</span></div>`;
+  kbd(p, search, 'ArrowDown');
+  await settle(20);
+  assert.ok(list.querySelector('.kbd-active'), 'arrowing should mark a row');
+
+  kbd(p, search, 'Enter');
+  await settle(300);
+  assert.ok(doc.getElementById('sessionsPopover').classList.contains('hidden'),
+    'Enter must open the highlighted conversation and close the picker');
+});
