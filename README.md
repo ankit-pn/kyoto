@@ -145,6 +145,7 @@ Each tab owns its own conversation.
 
 - Tab switch → side panel swaps the visible session.
 - Streams keep running in tabs you left. When the work completes it lands in that session's history.
+- **A running session stays bound to its own tab.** Tab-scoped tools (`page_*`, `tab_*`, `cookies_*`, `network_capture_*`, `console_*`, `debugger_*`, `idb_*`, `youtube_*`, …) are pinned to the conversation's tab and never follow the tab you switch to — otherwise a background turn would start reading and clicking whatever page you happened to focus, and its context would quietly describe the wrong page. The cached page snapshot is tagged with the tab it came from and is only injected into the session that owns that tab, so switching tabs mid-turn can't leak another page into an in-flight conversation.
 - Manually opening a session from the popover **pins** it (auto-tab-swap disabled until you hit "New chat").
 - Closed tabs don't delete their sessions, they unbind. Session lives on in the menu; rebind via the per-row action.
 - Per-row actions: **rename**, **bind/unbind**, **fork** (duplicate as a new session), **export to Markdown**, **delete**.

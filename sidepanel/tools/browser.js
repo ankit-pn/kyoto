@@ -23,9 +23,17 @@
   T({
     name: 'tab_active',
     group: 'browser',
-    description: 'Get information about the active tab in the current window.',
-    parameters: OBJ(),
-    handler: async () => activeTab()
+    // "Active" here means the tab this conversation is working on. The side
+    // panel injects the conversation's bound tabId, so a background turn is not
+    // silently answered with whichever tab the user just switched to.
+    description: 'Get information about the tab this conversation is bound to (falls back to the active tab of the current window when unbound).',
+    parameters: OBJ({ tabId: NUM }),
+    handler: async ({ tabId } = {}) => {
+      if (tabId != null) {
+        try { return await chrome.tabs.get(tabId); } catch { /* tab closed */ }
+      }
+      return activeTab();
+    }
   });
 
   T({

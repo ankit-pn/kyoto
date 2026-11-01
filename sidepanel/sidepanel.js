@@ -3071,7 +3071,7 @@
   // the tool schemas. Ignoring it made compaction fire far too late.
   function contextOverheadTokens(session) {
     let chars = (state.settings.systemPrompt || '').length;
-    if (els.useContext?.checked && state.page?.content && isActive(session.id)) {
+    if (els.useContext?.checked && state.page?.content && isActive(session.id) && pageContextMatches(state.page, session)) {
       chars += String(state.page.content).length;
     }
     // Tool schemas: ~120 tokens each is a fair average for our definitions.
@@ -4088,19 +4088,34 @@
     els.ctxDot.className = 'dot load';
     els.ctxTxt.textContent = 'Reading page…';
     try {
-      const res = await chrome.runtime.sendMessage({ type: 'PAGE_EXTRACT_CONTENT' });
+      // Read the tab the VISIBLE SESSION is bound to, not blindly the active
+      // tab. With a pinned session the user can browse elsewhere while the
+      // session stays on screen; snapshotting the newly focused tab would then
+      // inject a page the conversation is not working on.
+      let targetTabId = state.activeSession?.tabId ?? null;
+      if (targetTabId == null) {
+        const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+        targetTabId = t?.id ?? null;
+      }
+      const res = await chrome.runtime.sendMessage({
+        type: 'PAGE_EXTRACT_CONTENT',
+        args: targetTabId != null ? { tabId: targetTabId } : {}
+      });
       if (!res?.ok || !res.data?.content) {
         state.page = null;
         els.ctxDot.className = 'dot err';
         els.ctxTxt.textContent = res?.error ? `No access: ${res.error}` : 'Page not readable';
         return;
       }
-      state.page = res.data;
+      // Record which tab the snapshot came from so the prompt builder can
+      // refuse to mix tabs.
+      state.page = { ...res.data, tabId: targetTabId };
       els.ctxDot.className = 'dot ok';
       els.ctxTxt.textContent = state.page.title || state.page.url || 'Page loaded';
       els.ctxTxt.title = `${state.page.title || ''}\n${state.page.url || ''}\n${state.page.content.length} chars`;
-      // Update session.url whenever we can
-      if (state.activeSession) {
+      // Update session.url whenever we can — but never overwrite the session's
+      // URL with a different tab's URL.
+      if (state.activeSession && pageContextMatches(state.page, state.activeSession)) {
         state.activeSession.url = state.page.url;
         await persistSession(state.activeSession);
       }
@@ -4549,21 +4564,32 @@
   // running (its session is pinned to a dedicated tab), we inject that
   // tabId into the call so its actions land on the right tab even if
   // the user has clicked away into another window.
-  const TAB_AWARE_TOOLS = new Set([
-    'page_content','page_html','page_query','page_click','page_fill','page_scroll',
-    'page_wait_for','page_eval','page_local_storage','page_session_storage',
-    'page_local_storage_set','page_local_storage_remove','page_session_storage_set',
-    'page_session_storage_remove','page_fill_form','idb_list_databases','idb_list_stores',
-    'idb_read','tab_active','tab_navigate','tab_reload','tab_screenshot',
-    'network_capture_start','console_attach','console_read','page_performance',
-    'debugger_attach','debugger_detach','page_fetch_intercept','page_fetch_intercept_read',
-    'media_detect','youtube_extract','youtube_capture_streams','yt_dlp_command',
-    'minimax_describe_tab'
-  ]);
+  // Tab-scoped tool names live in sidepanel/tab-target.js, together with the
+  // (unit-tested) decision logic that pins each call to the conversation's tab.
+  const TT = window.KyotoTabTarget || {};
+  if (!TT.injectToolTabId) {
+    console.error('[Kyoto] sidepanel/tab-target.js failed to load — tab-scoped tools will follow the active tab.');
+  }
+
+  // A cached page snapshot may only be injected into the conversation whose tab
+  // it was taken from. Keeps a pinned session from being fed another tab's page.
+  function pageContextMatches(page, session) {
+    if (!page || !page.content) return false;
+    return TT.pageContextMatchesSession ? TT.pageContextMatchesSession(page.tabId, session?.tabId) : true;
+  }
 
   async function callToolOrMCP(name, args, session) {
-    if (session?._subagent && session.tabId != null && TAB_AWARE_TOOLS.has(name)) {
-      args = { ...args, tabId: args?.tabId ?? session.tabId };
+    // Pin tab-scoped tools to the tab this CONVERSATION is bound to — for every
+    // session, not just subagents.
+    //
+    // Previously this only happened for subagents, so a normal session's tools
+    // fell through to the background's "active tab" default. If the user
+    // switched tabs mid-turn, every subsequent tool call silently retargeted
+    // itself at the newly focused tab: a running background task began reading
+    // and clicking a page the model never chose, and the tool results (hence the
+    // model's context) started describing the wrong page.
+    if (TT.injectToolTabId) {
+      args = TT.injectToolTabId({ toolName: name, args, session });
     }
     if (state.mcpTools.find(t => t.function.name === name)) {
       return window.KyotoMCP.call(name, args);
@@ -4992,7 +5018,7 @@
       }
     }
 
-    if (els.useContext.checked && state.page?.content && isActive(session.id)) {
+    if (els.useContext.checked && state.page?.content && isActive(session.id) && pageContextMatches(state.page, session)) {
       systemParts.push(
         `Current page context:\nTitle: ${state.page.title}\nURL: ${state.page.url}\n\n--- PAGE CONTENT ---\n${state.page.content}\n--- END PAGE CONTENT ---`
       );
