@@ -2081,6 +2081,8 @@
 
   function updateCaptureUI() {
     if (!els.captureBtn) return;
+    // These are toggles; a screen reader needs the state, not just a red dot.
+    els.captureBtn.setAttribute('aria-pressed', state.capture.active ? 'true' : 'false');
     if (state.capture.active) {
       els.captureBtn.classList.add('recording');
       els.captureBtn.title = `Recording on this tab — click to stop (${state.capture.events.length} events)`;
@@ -2809,6 +2811,7 @@
   function updateVisionUI() {
     if (!els.visionBtn) return;
     els.visionBtn.classList.toggle('active', state.visionPending);
+    els.visionBtn.setAttribute('aria-pressed', state.visionPending ? 'true' : 'false');
     els.visionBtn.title = state.visionPending
       ? 'Screenshot will be attached to the next message. Click to cancel.'
       : 'Attach a screenshot of the current tab with the next message (requires a vision-capable model)';
@@ -4190,7 +4193,7 @@
       const hitTag = q && contentHits.has(s.id) && !(s.title || '').toLowerCase().includes(q) && !(s.url || '').toLowerCase().includes(q)
         ? ' <span class="hit-tag">content match</span>' : '';
       return `
-        <div class="sess-item${isCurrent ? ' active' : ''}" data-id="${esc(s.id)}">
+        <div class="sess-item${isCurrent ? ' active' : ''}"${isCurrent ? ' aria-current="true"' : ''} role="listitem" data-id="${esc(s.id)}">
           <div class="sess-row">
             ${dot}
             <span class="sess-title">${esc(s.title || 'Untitled')}${hitTag}</span>
@@ -4564,6 +4567,9 @@
       let autoContinues = 0;
       let goalContinues = 0;
       announce('Working on it.');
+      // Assistive tech should know the transcript is still changing rather than
+      // complete — otherwise a screen reader user reads a half-written reply.
+      if (els.chat) els.chat.setAttribute('aria-busy', 'true');
       let stoppedReason = 'maxSteps'; // overwritten if we break naturally
       let lastAssistantText = '';   // for optional read-aloud at turn end
 
@@ -4800,6 +4806,7 @@
       // Optional read-aloud. Fire-and-forget: speech must never delay or fail
       // the turn, and the synthesizer is stopped if another turn starts.
       try { maybeAutoSpeak(lastAssistantText); } catch { /* ignore */ }
+      if (els.chat) els.chat.removeAttribute('aria-busy');
       announce('Reply ready.');
     } catch (e) {
       // OpenAI-compat servers reject the next turn with "insufficient
@@ -4819,6 +4826,7 @@
     } finally {
       runtime.busy = false;
       runtime.abort = null;
+      if (els.chat) els.chat.removeAttribute('aria-busy');
       if (isActive(session.id)) {
         els.sendBtn.disabled = false;
         els.stopBtn.classList.add('hidden');
@@ -7649,6 +7657,7 @@
   function applySpeechState(next) {
     speechState = next;
     if (micBtn) micBtn.classList.toggle('listening', !!next.listening);
+    if (micBtn) micBtn.setAttribute('aria-pressed', next.listening ? 'true' : 'false');
     if (micBtn) micBtn.title = next.listening ? 'Listening… click to stop' : 'Voice input (speech-to-text)';
     if (next.error) {
       addMessage('assistant', `_Voice input error: ${next.error}_`, { error: true });

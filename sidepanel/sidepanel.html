@@ -16,7 +16,7 @@
       </button>
     </div>
     <div class="hdr-r">
-      <button class="ibtn capture-btn" id="captureBtn" title="Record a skill — capture user actions on this page and save them as a reusable playbook" aria-label="Record page actions">
+      <button class="ibtn capture-btn" id="captureBtn" title="Record a skill — capture user actions on this page and save them as a reusable playbook" aria-label="Record page actions" aria-pressed="false">
         <span class="capture-dot"></span>
         <span class="capture-count" id="captureCount"></span>
       </button>
@@ -83,8 +83,8 @@
           <input type="checkbox" id="useContext" checked />
           <span>Page context</span>
         </label>
-                <button id="micBtn" class="btn-mini hidden" type="button" title="Voice input (speech-to-text)">🎤</button>
-        <button id="visionBtn" class="btn-mini btn-vision" type="button" title="Attach a screenshot of the current tab with the next message (requires a vision-capable model)">📸</button>
+                <button id="micBtn" class="btn-mini hidden" type="button" title="Voice input (speech-to-text)" aria-pressed="false">🎤</button>
+        <button id="visionBtn" class="btn-mini btn-vision" type="button" title="Attach a screenshot of the current tab with the next message (requires a vision-capable model)" aria-pressed="false">📸</button>
         <div class="composer-spacer"></div>
         <button id="stopBtn" class="btn-stop hidden" title="Stop generating">Stop</button>
         <button id="sendBtn" class="btn-send" title="Send (Enter)" aria-label="Send message">
@@ -109,7 +109,7 @@
     <div class="popover-hdr">
       <input type="text" id="sessionsSearch" placeholder="Search sessions…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="sessionsList" aria-autocomplete="list" aria-label="Search conversations" />
     </div>
-    <div class="popover-body" id="sessionsList" role="listbox" aria-label="Conversations">
+    <div class="popover-body" id="sessionsList" role="list" aria-label="Conversations">
       <p class="popover-empty">No sessions yet.</p>
     </div>
   </div>

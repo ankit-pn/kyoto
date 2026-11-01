@@ -1336,7 +1336,9 @@ test('the session picker exposes its keyboard cursor', async () => {
 
   assert.equal(input.getAttribute('role'), 'combobox');
   assert.equal(input.getAttribute('aria-expanded'), 'true');
-  assert.equal(list.getAttribute('role'), 'listbox');
+  // A list, not a listbox: session rows contain nested fork/rename/delete
+  // buttons, and an option may not contain interactive descendants.
+  assert.equal(list.getAttribute('role'), 'list');
 
   kbd(p, input, 'ArrowDown');
   await settle(20);
@@ -1372,4 +1374,84 @@ test('the composer owns the slash-command listbox', async () => {
   const ad2 = input.getAttribute('aria-activedescendant');
   assert.notEqual(ad2, ad, 'moving the highlight must move the active descendant');
   assert.equal(doc.getElementById(ad2), palette.querySelector('.slash-item.active'));
+});
+
+// ══════════════════════════════════════════════════════
+// UI state exposed to assistive tech
+// ══════════════════════════════════════════════════════
+// Toggles only signalled state with a red dot / highlight class, and the
+// transcript never said it was still changing.
+
+test('toggle buttons expose their pressed state', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  for (const id of ['captureBtn', 'visionBtn']) {
+    const btn = doc.getElementById(id);
+    assert.ok(btn.hasAttribute('aria-pressed'), `${id} must declare aria-pressed`);
+    assert.equal(btn.getAttribute('aria-pressed'), 'false', `${id} starts unpressed`);
+  }
+
+  // Vision attach is a pure client-side toggle — easy to drive.
+  doc.getElementById('visionBtn').click();
+  await settle(40);
+  assert.equal(doc.getElementById('visionBtn').getAttribute('aria-pressed'), 'true',
+    'turning the screenshot toggle on must be announced');
+  doc.getElementById('visionBtn').click();
+  await settle(40);
+  assert.equal(doc.getElementById('visionBtn').getAttribute('aria-pressed'), 'false',
+    'and turning it off again');
+});
+
+test('the transcript announces that it is busy while streaming', async () => {
+  const { doc, send } = await bootWithPendingTurn(hangingFetch);
+  const chat = doc.getElementById('chat');
+  assert.ok(!chat.hasAttribute('aria-busy'), 'idle transcript is not busy');
+
+  send('hello');
+  await settle(150);
+  assert.equal(chat.getAttribute('aria-busy'), 'true',
+    'a streaming reply means the transcript is still changing');
+
+  doc.getElementById('stopBtn').click();
+  await settle(250);
+  assert.ok(!chat.hasAttribute('aria-busy'), 'aria-busy must be cleared when the turn ends');
+});
+
+test('the active conversation is marked with aria-current', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('sessionsBtn').click();
+  await settle(80);
+
+  const rows = [...doc.querySelectorAll('#sessionsList .sess-item')];
+  assert.ok(rows.length > 0, 'there should be at least one session');
+  const current = rows.filter(r => r.getAttribute('aria-current') === 'true');
+  assert.equal(current.length, 1, 'exactly one row is the current conversation');
+  assert.ok(current[0].classList.contains('active'), 'aria-current must match the visual state');
+  // Rows are listitems, because they contain their own buttons.
+  for (const r of rows) assert.equal(r.getAttribute('role'), 'listitem');
+});
+
+test('the mic reports listening state', async () => {
+  const p = await bootPanel({
+    beforeBoot: (window) => {
+      class FakeRecognition {
+        start() { /* stay listening */ }
+        stop() { this.onend?.(); }
+      }
+      window.SpeechRecognition = FakeRecognition;
+    }
+  });
+  const doc = p.window.document;
+  const mic = doc.getElementById('micBtn');
+  assert.equal(mic.getAttribute('aria-pressed'), 'false', 'mic starts unpressed');
+
+  mic.click();
+  await settle(40);
+  assert.equal(mic.getAttribute('aria-pressed'), 'true', 'listening must be announced');
+  assert.ok(mic.classList.contains('listening'));
+
+  mic.click();
+  await settle(40);
+  assert.equal(mic.getAttribute('aria-pressed'), 'false', 'stopping must clear it');
 });

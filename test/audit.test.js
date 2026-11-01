@@ -397,6 +397,8 @@ test('every listbox is owned by a combobox that can reach it', () => {
   // announced. Each combobox must declare aria-controls pointing at a real
   // listbox in the same document.
   const boxes = [...HTML.matchAll(/id="([^"]+)"[^>]*role="listbox"/g)].map(m => m[1]);
+  // (The session list is a role="list": its rows contain nested action buttons,
+  // and an option may not contain interactive descendants.)
   assert.ok(boxes.length >= 3, `expected the pickers to be listboxes, found ${boxes.length}`);
   // The owner may be a combobox (search inputs) or a textbox (the composer,
   // which owns the slash-command listbox) — the invariant is the wiring, not the role.
@@ -410,5 +412,14 @@ test('every listbox is owned by a combobox that can reach it', () => {
   }
   for (const box of boxes) {
     assert.ok(covered.has(box), `listbox "${box}" has no owner with aria-controls/aria-expanded`);
+  }
+});
+
+test('toggle buttons declare their pressed state', () => {
+  // A toggle whose state is only a colour/class is invisible to assistive tech.
+  for (const id of ['captureBtn', 'visionBtn', 'micBtn']) {
+    const tag = (HTML.match(new RegExp(`<button[^>]*id="${id}"[^>]*>`)) || [''])[0];
+    assert.ok(tag, `${id} should exist`);
+    assert.match(tag, /aria-pressed="(true|false)"/, `${id} is a toggle and needs aria-pressed`);
   }
 });
