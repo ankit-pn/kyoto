@@ -1746,3 +1746,118 @@ test('a broken image becomes a visible, announced placeholder', async () => {
   assert.match(note.textContent, /could not be displayed/i);
   assert.ok(note.textContent.length > 10, 'the placeholder carries the description the image had');
 });
+
+// ══════════════════════════════════════════════════════
+// Per-conversation drafts
+// ══════════════════════════════════════════════════════
+// The composer is one shared textarea and switching sessions never touched it:
+// a half-written message for one conversation followed you into another, one
+// Enter away from being sent to the wrong place.
+
+async function bootTwoSessions(chromeOverride) {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = chromeOverride || makeChrome();
+  chrome.__store.set('kyoto_sessions_index', [
+    { id: 's_a', title: 'Alpha', lastActive: Date.now(), tabId: 1, url: 'https://a.test/' },
+    { id: 's_b', title: 'Beta', lastActive: Date.now() - 1000, tabId: 2, url: 'https://b.test/' }
+  ]);
+  chrome.__store.set('kyoto_session_s_a', { id: 's_a', title: 'Alpha', lastActive: Date.now(), tabId: 1, history: [] });
+  chrome.__store.set('kyoto_session_s_b', { id: 's_b', title: 'Beta', lastActive: Date.now(), tabId: 2, history: [] });
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  const input = doc.getElementById('input');
+  const pick = async (title) => {
+    doc.getElementById('sessionsBtn').click();
+    await settle(120);
+    const row = [...doc.querySelectorAll('#sessionsList .sess-item')]
+      .find(el => (el.textContent || '').includes(title));
+    assert.ok(row, `session ${title} should be listed`);
+    row.click();
+    await settle(220);
+  };
+  const typeDraft = (text) => {
+    input.value = text;
+    input.dispatchEvent(new p.window.Event('input', { bubbles: true }));
+  };
+  return { p, doc, input, pick, typeDraft, chrome };
+}
+
+test('a draft does not leak into another conversation', async () => {
+  const { input, pick, typeDraft } = await bootTwoSessions();
+  await pick('Alpha');
+  typeDraft('half-written message for Alpha');
+  await pick('Beta');
+  assert.equal(input.value, '', 'switching conversations must not carry the draft over');
+});
+
+test('returning to a conversation restores its draft', async () => {
+  const { input, pick, typeDraft } = await bootTwoSessions();
+  await pick('Alpha');
+  typeDraft('keep me');
+  await pick('Beta');
+  await pick('Alpha');
+  assert.equal(input.value, 'keep me', 'the draft should come back with its conversation');
+});
+
+test('a draft survives a send that is rejected', async () => {
+  // The Enter handler empties the composer before it knows whether the turn will
+  // be accepted (here: no API key), so the draft must not be discarded by that.
+  const { p, input, pick, typeDraft } = await bootTwoSessions();
+  await pick('Alpha');
+  typeDraft('text I must not lose');
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(300);
+
+  await pick('Beta');
+  await pick('Alpha');
+  assert.equal(input.value, 'text I must not lose',
+    'a failed send must not cost the user their draft');
+});
+
+test('drafts survive a panel reload', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  const first = await bootTwoSessions(chrome);
+  await first.pick('Alpha');
+  first.typeDraft('persisted across reload');
+  await settle(600);   // let the debounced save flush
+
+  assert.equal(chrome.__store.get('kyoto_drafts')?.s_a, 'persisted across reload',
+    'the draft should be persisted, not only held in memory');
+
+  const second = await bootTwoSessions(chrome);   // same storage, fresh panel
+  await second.pick('Alpha');
+  assert.equal(second.input.value, 'persisted across reload');
+});
+
+test('a sent message clears its draft', async () => {
+  // Accept the turn for real (hanging network) so the send actually lands in
+  // history, which is when the draft is cleared.
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('provider', 'openrouter');
+  chrome.__store.set('model', 'test/model');
+  chrome.__store.set('apiKeys', { openrouter: 'test-key' });
+  chrome.__store.set('kyoto_sessions_index', [{ id: 's_a', title: 'Alpha', lastActive: Date.now(), tabId: 1, url: 'https://a.test/' }]);
+  chrome.__store.set('kyoto_session_s_a', { id: 's_a', title: 'Alpha', lastActive: Date.now(), tabId: 1, history: [] });
+
+  const p = await bootPanel({ chrome, beforeBoot: (w) => { w.fetch = hangingFetch; } });
+  const doc = p.window.document;
+  const input = doc.getElementById('input');
+  doc.getElementById('sessionsBtn').click();
+  await settle(120);
+  [...doc.querySelectorAll('#sessionsList .sess-item')].find(e => e.textContent.includes('Alpha')).click();
+  await settle(220);
+
+  input.value = 'send me';
+  input.dispatchEvent(new p.window.Event('input', { bubbles: true }));
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(300);
+  await settle(600);   // debounced save window
+
+  const stored = chrome.__store.get('kyoto_drafts') || {};
+  assert.ok(!stored.s_a, `a delivered message should clear its draft, still stored: ${JSON.stringify(stored)}`);
+
+  doc.getElementById('stopBtn').click();
+  await settle(150);
+});

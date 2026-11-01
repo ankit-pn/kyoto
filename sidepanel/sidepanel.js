@@ -283,6 +283,7 @@
     tabToSession: {},           // tabId -> sessionId
     activeSession: null,        // currently-loaded full session
     runtimes: {},               // sessionId -> { abort, busy }
+    drafts: new Map(),          // sessionId -> unsent composer text
     pinnedToSession: false,     // when true, tab switches do NOT swap session
     page: null,                 // page context for active tab
     allModels: [],               // models for the provider shown in the Settings drawer (legacy alias)
@@ -3375,7 +3376,80 @@
   }
 
   // ── Switch / render whole session ────────────────────
-  async function switchToSession(session, { fromUser = false } = {}) {
+  // ── Per-conversation drafts ──────────────────────────
+  // The composer is a single shared textarea, and switching sessions never
+  // touched it: a half-written message for one conversation silently followed
+  // you into another, one Enter away from being sent to the wrong place.
+  const DRAFTS_KEY = 'kyoto_drafts';
+  let _draftSaveTimer = null;
+
+  function resizeComposer() {
+    if (!els.input) return;
+    els.input.style.height = 'auto';
+    const max = 160;
+    els.input.style.height = Math.min(els.input.scrollHeight || 22, max) + 'px';
+  }
+
+  function persistDraftsDebounced() {
+    clearTimeout(_draftSaveTimer);
+    _draftSaveTimer = setTimeout(() => {
+      try {
+        chrome.storage.local.set({ [DRAFTS_KEY]: Object.fromEntries(state.drafts) });
+      } catch { /* storage unavailable: drafts stay in memory */ }
+    }, 400);
+  }
+
+  /**
+   * Remember what is in the composer for the session we are leaving.
+   *
+   * Only ever SETS, never deletes. Deletion is already handled by the input
+   * listener (typing then clearing the field fires `input`). Deleting here would
+   * lose the draft after a send that fails in preflight: the Enter handler
+   * empties the composer before it knows whether the turn will be accepted.
+   */
+  function stashDraft(sessionId) {
+    if (!sessionId || !els.input) return;
+    const text = els.input.value;
+    if (text && text.trim()) {
+      state.drafts.set(sessionId, text);
+      persistDraftsDebounced();
+    }
+  }
+
+  function clearDraft(sessionId) {
+    if (!sessionId) return;
+    if (state.drafts.delete(sessionId)) persistDraftsDebounced();
+  }
+
+  /** Put the target session's unsent text (or nothing) back in the composer. */
+  function restoreDraft(sessionId) {
+    if (!els.input) return;
+    const text = (sessionId && state.drafts.get(sessionId)) || '';
+    if (els.input.value === text) return;
+    els.input.value = text;
+    resizeComposer();
+    // Programmatic writes don't fire `input`; the slash palette and autosize
+    // both listen for it.
+    try { els.input.dispatchEvent(new Event('input', { bubbles: true })); } catch { /* non-fatal */ }
+  }
+
+  async function loadDrafts() {
+    try {
+      const got = await chrome.storage.local.get(DRAFTS_KEY);
+      const stored = got?.[DRAFTS_KEY];
+      if (stored && typeof stored === 'object') {
+        for (const [id, text] of Object.entries(stored)) {
+          if (typeof text === 'string' && text.trim()) state.drafts.set(id, text);
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  async function switchToSession(session, { fromUser = false } = { }) {
+    // Stash the outgoing conversation's draft BEFORE the active session moves.
+    const previous = state.activeSession;
+    if (previous && previous.id !== session.id) stashDraft(previous.id);
+
     state.activeSession = session;
     if (fromUser) state.pinnedToSession = true;
     if (session.tabId != null) state.tabToSession[session.tabId] = session.id;
@@ -3384,6 +3458,7 @@
     updateSessionsButton();
     updateGoalUI();
     refreshPageContext();
+    restoreDraft(session.id);
   }
 
   /**
@@ -4463,6 +4538,9 @@
       session.title = (textForTitle.split('\n')[0] || 'New chat').slice(0, 60);
     }
 
+    // Only now is the message really sent: clearing earlier would discard the
+    // user's text when the turn is rejected in preflight (e.g. missing key).
+    clearDraft(session.id);
     session.history.push({ role: 'user', content: text, _ts: Date.now() });
     const userIdx = session.history.length - 1;
     if (isActive(session.id)) {
@@ -6224,6 +6302,13 @@
   // ── Event wiring ─────────────────────────────────────
   function wireEvents() {
     els.input.addEventListener('input', () => {
+      // Keep the active conversation's draft in sync as the user types.
+      if (state.activeSession?.id) {
+        const text = els.input.value;
+        if (text && text.trim()) state.drafts.set(state.activeSession.id, text);
+        else state.drafts.delete(state.activeSession.id);
+        persistDraftsDebounced();
+      }
       els.input.style.height = 'auto';
       els.input.style.height = Math.min(els.input.scrollHeight, 160) + 'px';
       refreshSlashPalette();
@@ -8240,6 +8325,7 @@
   // ── Boot ─────────────────────────────────────────────
   (async () => {
     await loadSettings();
+    await loadDrafts();
     await loadSpendTotal();
     wirePalette();
     wireVoice();
