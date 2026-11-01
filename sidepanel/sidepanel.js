@@ -173,6 +173,7 @@
     reloadCtxBtn: $('reloadCtxBtn'),
     useContext: $('useContext'),
     visionBtn: $('visionBtn'),
+    paletteBtn: $('paletteBtn'),
     slashPalette: $('slashPalette'),
     toolsEnabled: $('toolsEnabled'),
     maxAgentSteps: $('maxAgentSteps'),
@@ -6690,6 +6691,14 @@
           poppingOut = false;
           els.popOutBtn.disabled = false;
         }
+      });
+    }
+
+    if (els.paletteBtn) {
+      els.paletteBtn.addEventListener('click', () => {
+        // Clicking must not leave the button focused behind the palette; the
+        // palette itself manages focus and restores it on close.
+        openPalette();
       });
     }
 

@@ -1013,3 +1013,20 @@ test('Escape-dismissible surfaces declare the shortcut', () => {
     assert.match(tag, /aria-keyshortcuts="Escape"/, `${id} is closed by Escape; declare aria-keyshortcuts="Escape"`);
   }
 });
+
+test('the command palette is reachable without a keyboard shortcut', () => {
+  // Guards against the palette quietly becoming keyboard-only again: there must
+  // be a click path that opens it, not just the Ctrl+K handler.
+  const js = read('sidepanel/sidepanel.js');
+  const html = read('sidepanel/sidepanel.html');
+  assert.ok(html.includes('id="paletteBtn"'), 'the palette button must exist in the markup');
+
+  // The click handler must actually call openPalette.
+  const clickBlock = js.slice(
+    js.indexOf("els.paletteBtn.addEventListener('click'"),
+    js.indexOf("els.paletteBtn.addEventListener('click'") + 300);
+  assert.match(clickBlock, /openPalette\(\)/, 'clicking the button must open the palette');
+
+  // And the shortcut must still work, so both routes exist.
+  assert.match(js, /mod && \(e\.key === 'k'/, 'Ctrl/Cmd+K should remain wired');
+});

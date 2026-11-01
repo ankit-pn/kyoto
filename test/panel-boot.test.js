@@ -2586,3 +2586,28 @@ test('Escape closes every overlay the panel can open', async () => {
     }
   }
 });
+
+test('the command palette has a visible, clickable entry point', async () => {
+  // openPalette() used to have exactly one caller: the Ctrl+K keydown handler.
+  // A mouse user therefore could not reach the palette at all — 60 actions,
+  // conversations, models, tools — and could not reach the keyboard-shortcuts
+  // help either, because that lives inside the palette. The shortcut was
+  // discoverable only by already knowing it.
+  const p = await bootPanel();
+  const doc = p.window.document;
+  await settle(400);
+
+  const btn = doc.getElementById('paletteBtn');
+  assert.ok(btn, 'a visible command-palette button should exist');
+  assert.equal(btn.tagName, 'BUTTON', 'and it should be a real button');
+  assert.ok(btn.getAttribute('aria-label'), 'with an accessible name');
+  assert.equal(btn.getAttribute('aria-keyshortcuts'), 'Control+K',
+    'and it should advertise the shortcut so the keyboard route is discoverable too');
+
+  assert.ok(doc.getElementById('paletteOverlay').classList.contains('hidden'));
+  btn.click();
+  await settle(250);
+  assert.ok(!doc.getElementById('paletteOverlay').classList.contains('hidden'),
+    'clicking it must open the palette');
+  assert.equal(doc.activeElement?.id, 'paletteInput', 'and focus should move into the palette');
+});

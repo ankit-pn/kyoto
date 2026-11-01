@@ -89,6 +89,13 @@
         </label>
                 <button id="micBtn" class="btn-mini hidden" type="button" title="Voice input (speech-to-text)" aria-label="Voice input" aria-pressed="false">🎤</button>
         <button id="visionBtn" class="btn-mini btn-vision" type="button" title="Attach a screenshot of the current tab with the next message (requires a vision-capable model)" aria-label="Attach a screenshot to the next message" aria-pressed="false">📸</button>
+        <!-- Discoverable entry point to the command palette. Until now openPalette()
+             had exactly one caller: the Ctrl+K keydown handler. A mouse user had no
+             way to reach the palette — 60 actions, sessions, models, tools — and so
+             could not reach the keyboard-shortcuts help either, since that is an
+             action inside the palette. The shortcut was undiscoverable without
+             already knowing it. -->
+        <button id="paletteBtn" class="btn-mini" type="button" title="Command palette (Ctrl+K)" aria-label="Open the command palette" aria-keyshortcuts="Control+K">⌘K</button>
         <div class="composer-spacer"></div>
         <button id="stopBtn" class="btn-stop hidden" title="Stop generating">Stop</button>
         <button id="sendBtn" class="btn-send" title="Send (Enter)" aria-label="Send message">
