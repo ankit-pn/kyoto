@@ -1683,3 +1683,66 @@ test('session actions are named after what they do, not their glyph', async () =
   // And they say what they act on.
   for (const n of names) assert.match(n, /conversation/i);
 });
+
+// ══════════════════════════════════════════════════════
+// Attached images
+// ══════════════════════════════════════════════════════
+// Screenshot attachments have no alt: a screen reader announced "image" or read
+// a fragment of the base64 data URL, and a broken image was a silent blank box.
+
+async function bootVisionSession() {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('kyoto_sessions_index', [{ id: 's_vis', title: 'Vision', lastActive: Date.now(), tabId: 1, url: 'https://e.test/' }]);
+  chrome.__store.set('kyoto_session_s_vis', {
+    id: 's_vis', title: 'Vision', lastActive: Date.now(), tabId: 1,
+    history: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'look at this' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAABBBBCCCCDDDD' } }
+      ],
+      _ts: Date.now()
+    }]
+  });
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  doc.getElementById('sessionsBtn').click();
+  await settle(120);
+  const row = [...doc.querySelectorAll('#sessionsList .sess-item')].find(el => el.textContent.includes('Vision'));
+  assert.ok(row, 'the seeded conversation should be listed');
+  row.click();
+  await settle(250);
+  return { p, doc };
+}
+
+test('an attached screenshot has a descriptive alt that does not leak the payload', async () => {
+  const { doc } = await bootVisionSession();
+  const img = doc.querySelector('.msg-image');
+  assert.ok(img, 'the image part should render');
+
+  const alt = img.getAttribute('alt');
+  assert.ok(alt && alt.trim().length > 3, 'the image needs a real description');
+  assert.ok(!/base64|data:/i.test(alt), `alt must not echo the data URL, got ${JSON.stringify(alt)}`);
+});
+
+test('every image in the panel has alt text', async () => {
+  const { doc } = await bootVisionSession();
+  const images = [...doc.querySelectorAll('img')];
+  assert.ok(images.length > 0, 'there should be at least one image to check');
+  const missing = images.filter(i => !(i.getAttribute('alt') || '').trim());
+  assert.deepEqual(missing, [], 'all images need alt text');
+});
+
+test('a broken image becomes a visible, announced placeholder', async () => {
+  const { p, doc } = await bootVisionSession();
+  const img = doc.querySelector('.msg-image');
+  img.dispatchEvent(new p.window.Event('error'));
+  await settle(40);
+
+  assert.equal(doc.querySelector('.msg-image'), null, 'the broken image should be replaced');
+  const note = doc.querySelector('.msg-image-fallback');
+  assert.ok(note, 'a fallback must be shown');
+  assert.match(note.textContent, /could not be displayed/i);
+  assert.ok(note.textContent.length > 10, 'the placeholder carries the description the image had');
+});

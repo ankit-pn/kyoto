@@ -3586,6 +3586,17 @@
           img.src = part.image_url.url;
           img.className = 'msg-image';
           img.loading = 'lazy';
+          // Screenshot attachments had no alt at all: a screen reader announced
+          // "image" or read a fragment of the base64 data URL. Describe what it
+          // is instead, and never echo the payload into the name.
+          img.alt = role === 'user' ? 'Screenshot attached to this message' : 'Image in the reply';
+          // A broken image is otherwise a silent blank box.
+          img.addEventListener('error', () => {
+            const note = document.createElement('span');
+            note.className = 'msg-image-fallback';
+            note.textContent = `${img.alt} — could not be displayed`;
+            img.replaceWith(note);
+          });
           body.appendChild(img);
         }
       }
