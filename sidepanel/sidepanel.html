@@ -540,8 +540,14 @@
       </div>
       <p class="hint">Exports a JSON file with provider keys, custom providers, MCP servers, slash commands, prefs. Import merges keys back. Sessions and memories are NOT included.</p>
 
-      <button class="btn-primary" id="saveBtn">Save</button>
+    </div>
+
+    <!-- Pinned: Save used to sit at the very end of a 15-section, 41-field
+         scroll, so saving a provider or model change meant scrolling through
+         the whole drawer. -->
+    <div class="drawer-footer">
       <p class="status" id="saveStatus"></p>
+      <button class="btn-primary" id="saveBtn" type="button">Save</button>
     </div>
   </aside>
 

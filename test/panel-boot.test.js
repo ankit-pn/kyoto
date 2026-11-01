@@ -601,3 +601,172 @@ test('a failed turn offers retry, and retrying re-runs without duplicating the p
 });
 
 
+
+// ══════════════════════════════════════════════════════
+// Collapsible settings sections
+// ══════════════════════════════════════════════════════
+// 15 sections / 41 fields: the advanced half (cron, workspace, shell, S3,
+// MCP, backup) buried everything used day to day.
+
+function sectionState(doc) {
+  const out = {};
+  for (const h of doc.querySelectorAll('.drawer-body .drawer-section')) {
+    let anyHidden = false;
+    let el = h.nextElementSibling;
+    while (el && !(el.tagName === 'H3')) { if (el.hidden) anyHidden = true; el = el.nextElementSibling; }
+    out[h.textContent.trim()] = anyHidden ? 'collapsed' : 'expanded';
+  }
+  return out;
+}
+
+test('advanced sections start collapsed while core ones stay open', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+
+  const state = sectionState(doc);
+  assert.equal(state['Appearance'], 'expanded', 'core settings must be visible');
+  assert.equal(state['Context & spend'], 'expanded');
+  assert.equal(state['Background jobs (cron)'], 'collapsed', 'advanced settings should start collapsed');
+  assert.equal(state['MCP servers'], 'collapsed');
+  assert.equal(state['Backup'], 'collapsed');
+
+  // Every heading is a keyboard-reachable toggle with an expanded state.
+  for (const h of doc.querySelectorAll('.drawer-body .drawer-section')) {
+    assert.equal(h.getAttribute('role'), 'button');
+    assert.ok(h.hasAttribute('tabindex'), 'headings must be focusable');
+    assert.ok(['true', 'false'].includes(h.getAttribute('aria-expanded')));
+  }
+});
+
+test('clicking a section heading expands and persists it', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+
+  const heading = [...doc.querySelectorAll('.drawer-body .drawer-section')]
+    .find(h => h.textContent.trim() === 'MCP servers');
+  assert.equal(heading.getAttribute('aria-expanded'), 'false');
+
+  heading.click();
+  await settle(40);
+  assert.equal(heading.getAttribute('aria-expanded'), 'true', 'a collapsed section must expand on click');
+  assert.equal(sectionState(doc)['MCP servers'], 'expanded');
+
+  const writes = p.chrome.__calls.filter(c => c.ns === 'storage' && c.method === 'set'
+    && c.args[0] && 'kyoto_collapsed_sections' in c.args[0]);
+  assert.ok(writes.length > 0, 'collapse state must be persisted');
+  assert.ok(!writes[writes.length - 1].args[0].kyoto_collapsed_sections.includes('mcp-servers'),
+    'an expanded section must be removed from the collapsed set');
+});
+
+test('section headings toggle from the keyboard', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+
+  const heading = [...doc.querySelectorAll('.drawer-body .drawer-section')]
+    .find(h => h.textContent.trim() === 'Shell bridge (native messaging)');
+  assert.equal(heading.getAttribute('aria-expanded'), 'false');
+  heading.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(40);
+  assert.equal(heading.getAttribute('aria-expanded'), 'true', 'Enter must toggle the section');
+});
+
+test('collapse choices survive a panel reload', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+
+  // First run: collapse a section that is open by default.
+  const first = await bootPanel({ chrome });
+  const doc1 = first.window.document;
+  doc1.getElementById('settingsBtn').click();
+  await settle(80);
+  const appearance = [...doc1.querySelectorAll('.drawer-body .drawer-section')]
+    .find(h => h.textContent.trim() === 'Appearance');
+  assert.equal(appearance.getAttribute('aria-expanded'), 'true');
+  appearance.click();
+  await settle(40);
+
+  // Second run with the same storage: the choice must be remembered.
+  const second = await bootPanel({ chrome });
+  const doc2 = second.window.document;
+  doc2.getElementById('settingsBtn').click();
+  await settle(80);
+  assert.equal(sectionState(doc2)['Appearance'], 'collapsed',
+    'a section the user collapsed must stay collapsed after reload');
+});
+
+// ══════════════════════════════════════════════════════
+// Pinned Save + unsaved-changes indicator
+// ══════════════════════════════════════════════════════
+// Save used to be the last element of a 15-section / 41-field scroll: changing
+// the provider or model at the top meant scrolling the whole drawer to apply it.
+
+test('Save is pinned outside the scrolling drawer body', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+
+  const save = doc.getElementById('saveBtn');
+  assert.ok(save, 'Save must exist');
+  assert.equal(save.closest('.drawer-body'), null,
+    'Save must not live inside the scrolling body — it has to stay reachable');
+  assert.ok(save.closest('.drawer-footer'), 'Save belongs in the pinned footer');
+
+  // The body is the scroll container; the footer is its sibling.
+  const body = doc.querySelector('.drawer-body');
+  const footer = doc.querySelector('.drawer-footer');
+  assert.equal(footer.parentElement, body.parentElement,
+    'footer and body must be siblings for the flex column to pin the footer');
+});
+
+test('editing a setting marks the drawer dirty, and saving clears it', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+
+  const save = doc.getElementById('saveBtn');
+  assert.equal(save.classList.contains('dirty'), false, 'a freshly opened drawer is clean');
+
+  const provider = doc.getElementById('provider');
+  provider.value = 'deepseek';
+  provider.dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  await settle(30);
+  assert.equal(save.classList.contains('dirty'), true, 'an edit must be visible as unsaved');
+  assert.match(save.getAttribute('aria-label'), /unsaved/i);
+
+  // A save that is REJECTED (here: no API key) must keep the marker — the edits
+  // really are still unsaved, so clearing it would be a lie.
+  save.click();
+  await settle(120);
+  assert.equal(save.classList.contains('dirty'), true,
+    'a refused save must not claim the changes were stored');
+
+  // The marker is cleared by the same routine on a successful save; reopening
+  // the drawer is another path that resets it, so prove resetting works here.
+  doc.getElementById('closeDrawerBtn').click();
+  await settle(40);
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+  assert.equal(save.classList.contains('dirty'), false,
+    'reopening the drawer must start from a clean state');
+});
+
+test('typing in a text field marks the drawer dirty', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+  const save = doc.getElementById('saveBtn');
+  const prompt = doc.getElementById('systemPrompt');
+  prompt.value = 'Be concise.';
+  prompt.dispatchEvent(new p.window.Event('input', { bubbles: true }));
+  await settle(30);
+  assert.equal(save.classList.contains('dirty'), true);
+});

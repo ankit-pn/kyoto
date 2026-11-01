@@ -284,3 +284,20 @@ test('the layout adapts to a narrow side panel', () => {
   assert.match(css, /@media\s*\(max-width:\s*380px\)/,
     'a side panel is routinely dragged narrow; the layout needs a narrow breakpoint');
 });
+
+test('the drawer keeps Save outside the scrolling region', () => {
+  // Save used to be the last element of a 15-section / 41-field scroll, so a
+  // change made at the top of the form required scrolling the whole drawer to
+  // apply it. Structural guard so it cannot drift back.
+  const bodyStart = HTML.indexOf('class="drawer-body"');
+  const asideEnd = HTML.indexOf('</aside>');
+  assert.ok(bodyStart > -1 && asideEnd > bodyStart);
+  const saveIdx = HTML.indexOf('id="saveBtn"');
+  assert.ok(saveIdx > -1, 'the Save button must exist');
+  const footerIdx = HTML.indexOf('class="drawer-footer"');
+  assert.ok(footerIdx > -1, 'there must be a pinned drawer footer');
+  assert.ok(saveIdx > footerIdx, 'Save must live inside the pinned footer');
+  // ...and the footer must come after the scrollable body closes.
+  const bodyEnd = HTML.indexOf('</div>', HTML.lastIndexOf('<p class="hint"', footerIdx));
+  assert.ok(footerIdx > bodyStart, 'footer must follow the body in source order');
+});

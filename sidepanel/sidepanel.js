@@ -5220,9 +5220,125 @@
     _announceTimer = setTimeout(() => { el.textContent = message; }, 30);
   }
 
+  // ── Collapsible settings sections ────────────────────
+  // The drawer grew to 15 sections / 41 fields. Most of it is configured once
+  // (cron, workspace, shell bridge, S3, MCP, backup) and gets in the way every
+  // other time, so the advanced half starts collapsed.
+  const COLLAPSED_KEY = 'kyoto_collapsed_sections';
+  const ADVANCED_SECTIONS = [
+    'background-jobs-cron', 'workspace-virtual-files', 'workspace-folder-on-disk',
+    'shell-bridge-native-messaging', 'skills-hub', 'aws-s3-and-s3-compatible',
+    'custom-openai-compatible-providers', 'custom-slash-commands', 'custom-js-tools',
+    'mcp-servers', 'backup'
+  ];
+  let _collapsedSections = null;   // Set of section ids, loaded once
+
+  // Stable key for a section, WITHOUT the 'sec-' id prefix, so it can be
+  // compared against the persisted list. (buildDrawerNav stores ids as
+  // 'sec-<slug>'; the two must agree.)
+  function sectionSlug(h) {
+    if (h.id) return h.id.replace(/^sec-/, '');
+    return h.textContent.toLowerCase()
+      .replace(/&/g, ' and ')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+
+  /** The elements a section owns: every following sibling up to the next heading. */
+  function sectionBodies(h) {
+    const out = [];
+    let el = h.nextElementSibling;
+    while (el && !(el.tagName === 'H3' && el.classList.contains('drawer-section'))) {
+      out.push(el);
+      el = el.nextElementSibling;
+    }
+    return out;
+  }
+
+  async function loadCollapsedSections() {
+    if (_collapsedSections) return _collapsedSections;
+    let ids = null;
+    try {
+      const got = await chrome.storage.local.get(COLLAPSED_KEY);
+      ids = got?.[COLLAPSED_KEY];
+    } catch { /* storage unavailable: fall back to defaults */ }
+    _collapsedSections = new Set(Array.isArray(ids) ? ids : ADVANCED_SECTIONS);
+    return _collapsedSections;
+  }
+
+  function persistCollapsedSections() {
+    if (!_collapsedSections) return;
+    try { chrome.storage.local.set({ [COLLAPSED_KEY]: [..._collapsedSections] }); } catch { /* non-fatal */ }
+  }
+
+  function applySectionState(h, collapsed) {
+    h.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    for (const el of sectionBodies(h)) el.hidden = collapsed;
+  }
+
+  function wireDrawerSections() {
+    if (!els.drawer) return;
+    for (const h of els.drawer.querySelectorAll('.drawer-body .drawer-section')) {
+      if (h.dataset.collapsible === '1') continue;
+      h.dataset.collapsible = '1';
+      h.classList.add('toggle');
+      h.setAttribute('role', 'button');
+      h.setAttribute('tabindex', '0');
+      const slug = sectionSlug(h);
+      if (!h.id) h.id = 'sec-' + slug;
+
+      const toggle = () => {
+        const next = h.getAttribute('aria-expanded') !== 'false'; // true -> collapse
+        applySectionState(h, next);
+        if (!_collapsedSections) _collapsedSections = new Set(ADVANCED_SECTIONS);
+        if (next) _collapsedSections.add(slug); else _collapsedSections.delete(slug);
+        persistCollapsedSections();
+        announce(`${h.textContent.trim()} ${next ? 'collapsed' : 'expanded'}.`);
+      };
+      h.addEventListener('click', toggle);
+      h.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      });
+    }
+  }
+
+  async function refreshSectionCollapse() {
+    if (!els.drawer) return;
+    const collapsed = await loadCollapsedSections();
+    for (const h of els.drawer.querySelectorAll('.drawer-body .drawer-section')) {
+      applySectionState(h, collapsed.has(sectionSlug(h)));
+    }
+  }
+
   // ── Settings drawer index ────────────────────────────
   // Built from the rendered headings rather than hardcoded, so adding or
   // reordering a section can never desync the nav.
+  // ── Unsaved-changes indicator ────────────────────────
+  // Closing the drawer discards edits silently. An always-visible Save plus a
+  // dot on it makes "I changed something and haven't saved" visible without
+  // interrupting with a confirm() dialog on every close.
+  function markDrawerDirty(dirty) {
+    if (!els.saveBtn) return;
+    els.saveBtn.classList.toggle('dirty', !!dirty);
+    els.saveBtn.setAttribute('aria-label', dirty ? 'Save changes (unsaved changes)' : 'Save changes');
+    if (els.saveBtn.title !== undefined) {
+      els.saveBtn.title = dirty ? 'You have unsaved changes' : 'Save settings';
+    }
+  }
+
+  function wireDrawerDirtyTracking() {
+    if (!els.drawer || els.drawer.dataset.dirtyWired === '1') return;
+    els.drawer.dataset.dirtyWired = '1';
+    const onChange = (e) => {
+      // Ignore the chat/other surfaces that may bubble through.
+      if (!e.target || !els.drawer.contains(e.target)) return;
+      if (e.target.closest('.drawer-nav')) return;      // navigation is not an edit
+      markDrawerDirty(true);
+    };
+    els.drawer.addEventListener('input', onChange);
+    els.drawer.addEventListener('change', onChange);
+  }
+
   function buildDrawerNav() {
     const nav = document.getElementById('drawerNav');
     if (!nav || !els.drawer) return;
@@ -5349,6 +5465,8 @@
       fetchModels(state.settings.provider, currentApiKey());
     }
     buildDrawerNav();
+    refreshSectionCollapse();
+    markDrawerDirty(false);
     // Move focus into the dialog so keyboard users are not left behind the
     // overlay. The provider select is the first meaningful control.
     try { (els.provider || els.drawer).focus?.(); } catch { /* non-fatal */ }
@@ -6701,6 +6819,7 @@
       fetchAllProviderModels({ background: true }).catch(() => {});
 
       updateModelLine();
+      markDrawerDirty(false);
       els.saveStatus.textContent = 'Saved.';
       els.saveStatus.className = 'status ok';
       setTimeout(() => { els.saveStatus.textContent = ''; closeDrawer(); }, 600);
@@ -7648,6 +7767,9 @@
     wirePalette();
     wireVoice();
     wireOverlayDismissal();
+    wireDrawerSections();
+    wireDrawerDirtyTracking();
+    refreshSectionCollapse();
     await openaiOauthLoad();
     applyAppearance();
     compileCustomTools();

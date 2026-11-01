@@ -1540,3 +1540,53 @@ body {
 }
 .retry-btn:hover { background: var(--accent-soft, rgba(76, 139, 245, 0.12)); }
 .retry-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Collapsible settings sections ───────────────────
+   Advanced sections start collapsed so the common settings (provider, model,
+   appearance, context & spend) are not buried under cron/S3/MCP/backup. */
+.drawer-body .drawer-section.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.drawer-body .drawer-section.toggle::before {
+  content: '▸';
+  font-size: 10px;
+  color: var(--text-faint, #888);
+  transition: transform 0.12s ease;
+  display: inline-block;
+}
+.drawer-body .drawer-section.toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+.drawer-body .drawer-section.toggle:hover { color: var(--accent); }
+.drawer-body .drawer-section.toggle:hover::before { color: var(--accent); }
+
+
+/* ── Pinned drawer footer ────────────────────────────
+   Save must always be reachable: the drawer body is a long scroll and the
+   button previously lived at its very end. */
+.drawer-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  box-shadow: 0 -6px 16px rgba(0, 0, 0, 0.14);
+}
+.drawer-footer .status { margin: 0; flex: 1; text-align: left; }
+/* Unsaved-changes marker: a change that would be lost on close is visible
+   without nagging with a dialog. */
+#saveBtn.dirty { position: relative; }
+#saveBtn.dirty::after {
+  content: '';
+  position: absolute;
+  top: -3px; right: -3px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--warn, #d29922);
+  box-shadow: 0 0 0 2px var(--bg);
+}
