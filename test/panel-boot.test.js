@@ -1532,3 +1532,76 @@ test('replaying history does not re-alert old errors', async () => {
   assert.equal(errCard.getAttribute('role'), null,
     'a replayed historical error must not be a live alert');
 });
+
+// ══════════════════════════════════════════════════════
+// Settings form accessibility
+// ══════════════════════════════════════════════════════
+// Every field had a visible <label>, but none were associated with their control:
+// no `for` attribute, and they do not wrap the input. Screen readers announced
+// the drawer as 30+ bare "combobox" / "edit text" controls with no name.
+
+function accessibleName(doc, control) {
+  if (control.getAttribute('aria-label')) return control.getAttribute('aria-label').trim();
+  const labelledby = control.getAttribute('aria-labelledby');
+  if (labelledby) {
+    const el = doc.getElementById(labelledby);
+    if (el) return el.textContent.trim();
+  }
+  if (control.id) {
+    const forLabel = doc.querySelector(`label[for="${control.id}"]`);
+    if (forLabel && forLabel.textContent.trim()) return forLabel.textContent.trim();
+  }
+  const wrap = control.closest('label');
+  if (wrap && wrap.textContent.trim()) return wrap.textContent.trim();
+  return '';
+}
+
+test('every settings control has an accessible name', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(120);
+
+  const drawer = doc.getElementById('drawer');
+  const controls = [...drawer.querySelectorAll('input:not([type="hidden"]), select, textarea')];
+  assert.ok(controls.length > 40, `expected the full form, got ${controls.length}`);
+
+  const unnamed = controls.filter(c => !accessibleName(doc, c)).map(c => c.id || c.tagName);
+  assert.deepEqual(unnamed, [], `controls with no accessible name: ${unnamed.join(', ')}`);
+});
+
+test('labels are associated with their control, not just adjacent to it', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(120);
+
+  // Spot-checks across different control types.
+  for (const [id, expected] of [['provider', 'Provider'], ['apiKey', 'OpenRouter API key'], ['model', /model/i], ['temperature', 'Temperature']]) {
+    const control = doc.getElementById(id);
+    assert.ok(control, `${id} should exist`);
+    const name = accessibleName(doc, control);
+    if (expected instanceof RegExp) assert.match(name, expected, `${id} has name "${name}"`);
+    else assert.equal(name, expected, `${id} should be announced as "${expected}"`);
+  }
+  // And the label is actually wired via for=, not just visually adjacent.
+  assert.equal(doc.querySelector('label[for="provider"]')?.textContent.trim(), 'Provider');
+});
+
+test('settings hints are linked to their field', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(120);
+
+  const drawer = doc.getElementById('drawer');
+  const described = [...drawer.querySelectorAll('[aria-describedby]')];
+  assert.ok(described.length >= 10, `expected hints to be linked, found ${described.length}`);
+  // And each reference resolves to real guidance text.
+  let resolved = 0;
+  for (const control of described) {
+    const target = doc.getElementById(control.getAttribute('aria-describedby'));
+    if (target && target.textContent.trim()) resolved++;
+  }
+  assert.equal(resolved, described.length, 'every aria-describedby must point at real hint text');
+});

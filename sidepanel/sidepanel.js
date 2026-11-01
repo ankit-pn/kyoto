@@ -5363,6 +5363,66 @@
     _announceTimer = setTimeout(() => { el.textContent = message; }, 30);
   }
 
+  // ── Form field labelling ─────────────────────────────
+  // Every settings control sits next to a <label>, but none of those labels were
+  // associated with their control: no `for`, and they do not wrap the input. A
+  // screen reader therefore announced the drawer's fields as bare "combobox" /
+  // "edit text" with no name at all.
+  //
+  // Done programmatically rather than by hand-editing 30+ fields so it stays
+  // correct as the drawer grows, and so fields added later are covered too.
+  const LABELABLE = 'input:not([type="hidden"]), select, textarea';
+
+  /** The guidance paragraph that belongs to a .field, wherever it sits. */
+  function hintForField(field) {
+    const inside = field.querySelector('.hint');
+    if (inside) return inside;
+    const next = field.nextElementSibling;
+    if (next && next.classList && next.classList.contains('hint')) return next;
+    // Some fields live inside a .field-row whose following sibling is the hint.
+    const row = field.parentElement;
+    if (row && row.classList.contains('field-row')) {
+      const after = row.nextElementSibling;
+      if (after && after.classList.contains('hint')) return after;
+    }
+    return null;
+  }
+
+  function wireFieldLabels() {
+    if (!els.drawer) return;
+    let counter = 0;
+    for (const field of els.drawer.querySelectorAll('.field')) {
+      const label = field.querySelector('label');
+      if (!label) continue;
+      if (label.classList.contains('check-row')) continue;   // wraps its own input
+      const labelText = label.textContent.trim();
+      if (!labelText) continue;
+
+      const controls = [...field.querySelectorAll(LABELABLE)];
+      if (!controls.length) continue;
+
+      // First control: a real <label for>, so the name is announced natively.
+      const primary = controls[0];
+      if (!primary.id) primary.id = `field-${++counter}`;
+      if (!label.getAttribute('for')) label.setAttribute('for', primary.id);
+
+      // Any further control in the same field (e.g. a search box beside a list)
+      // still needs a name of its own.
+      for (const extra of controls.slice(1)) {
+        if (extra.getAttribute('aria-label') || extra.getAttribute('aria-labelledby')) continue;
+        if (extra.id && els.drawer.querySelector(`label[for="${extra.id}"]`)) continue;
+        extra.setAttribute('aria-label', labelText);
+      }
+
+      // Link the guidance text: a hint nobody hears is dead text.
+      const hint = hintForField(field);
+      if (hint && !primary.hasAttribute('aria-describedby')) {
+        if (!hint.id) hint.id = `hint-${++counter}`;
+        primary.setAttribute('aria-describedby', hint.id);
+      }
+    }
+  }
+
   // ── Collapsible settings sections ────────────────────
   // The drawer grew to 15 sections / 41 fields. Most of it is configured once
   // (cron, workspace, shell bridge, S3, MCP, backup) and gets in the way every
@@ -5608,6 +5668,7 @@
     if (currentApiKey() || getProviderConfig(state.settings.provider)?.isCustom) {
       fetchModels(state.settings.provider, currentApiKey());
     }
+    wireFieldLabels();
     buildDrawerNav();
     refreshSectionCollapse();
     markDrawerDirty(false);
