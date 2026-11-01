@@ -2229,3 +2229,56 @@ test('a blocked download that falls back to a tab is not an error', async () => 
   assert.ok(!/could not save/i.test(doc.getElementById('chat').textContent),
     'a successful fallback must not be reported as an error');
 });
+
+// ══════════════════════════════════════════════════════
+// Opening conversations: newest click wins
+// ══════════════════════════════════════════════════════
+// Loading a conversation is async, so two quick clicks raced: whichever LOAD
+// finished last won, not whichever was clicked last. Click A, change your mind,
+// click B — and you end up in A, which reads as the panel ignoring your click.
+
+async function bootTwoSlowFastSessions() {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('kyoto_sessions_index', [
+    { id: 's_slow', title: 'SLOWSESSION', lastActive: Date.now(), tabId: 1 },
+    { id: 's_fast', title: 'FASTSESSION', lastActive: Date.now() - 1000, tabId: 2 }
+  ]);
+  chrome.__store.set('kyoto_session_s_slow', { id: 's_slow', title: 'SLOWSESSION', lastActive: Date.now(), tabId: 1, history: [{ role: 'user', content: 'SLOW CONTENT', _ts: Date.now() }] });
+  chrome.__store.set('kyoto_session_s_fast', { id: 's_fast', title: 'FASTSESSION', lastActive: Date.now(), tabId: 2, history: [{ role: 'user', content: 'FAST CONTENT', _ts: Date.now() }] });
+  const realGet = chrome.storage.local.get;
+  chrome.storage.local.get = async (keys) => {
+    const k = Array.isArray(keys) ? keys : [keys];
+    // Making one load slow is the whole point: it must not win by finishing late.
+    if (k.some(x => String(x) === 'kyoto_session_s_slow')) await new Promise(r => setTimeout(r, 400));
+    return realGet.call(chrome.storage.local, keys);
+  };
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  await settle(1200);
+  doc.getElementById('sessionsBtn').click();
+  await settle(400);
+  const rows = [...doc.querySelectorAll('#sessionsList .sess-item')];
+  const rowOf = (t) => rows.find(el => (el.textContent || '').includes(t));
+  assert.ok(rowOf('SLOWSESSION') && rowOf('FASTSESSION'), `both conversations should be listed (got ${rows.length})`);
+  return { p, doc, rows, rowOf };
+}
+
+test('clicking two conversations quickly opens the one clicked last', async () => {
+  const { doc, rowOf } = await bootTwoSlowFastSessions();
+  rowOf('SLOWSESSION').click();      // slow load
+  await settle(30);
+  rowOf('FASTSESSION').click();      // user changes their mind
+  await settle(1000);
+
+  const chat = doc.getElementById('chat').textContent;
+  assert.match(chat, /FAST CONTENT/, 'the last-clicked conversation must win');
+  assert.ok(!/SLOW CONTENT/.test(chat), 'the superseded load must not overwrite it');
+});
+
+test('a single click still opens that conversation', async () => {
+  const { doc, rowOf } = await bootTwoSlowFastSessions();
+  rowOf('SLOWSESSION').click();
+  await settle(900);
+  assert.match(doc.getElementById('chat').textContent, /SLOW CONTENT/);
+});

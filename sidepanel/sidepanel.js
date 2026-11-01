@@ -3606,6 +3606,24 @@
     } catch { /* ignore */ }
   }
 
+  // ── Opening a conversation by id ─────────────────────
+  // Loading is async, so two quick clicks raced: whichever load finished LAST
+  // won, not whichever was clicked last. Clicking A then B would leave you
+  // looking at A. A monotonic token makes the newest intent authoritative and
+  // lets superseded loads be discarded.
+  let _sessionOpenToken = 0;
+
+  async function openSessionById(id, { closePopover = false } = {}) {
+    const token = ++_sessionOpenToken;
+    const full = await loadFullSession(id);
+    // A newer open request superseded this one — drop it on the floor.
+    if (token !== _sessionOpenToken) return false;
+    if (!full) return false;
+    if (closePopover) closeSessionsPopover();
+    switchToSession(full, { fromUser: true });
+    return true;
+  }
+
   async function switchToSession(session, { fromUser = false } = { }) {
     // Stash the outgoing conversation's draft BEFORE the active session moves.
     const previous = state.activeSession;
@@ -7127,11 +7145,9 @@
         }
         return;
       }
-      // Click on row → open that session
-      const full = await loadFullSession(id);
-      if (!full) return;
-      closeSessionsPopover();
-      switchToSession(full, { fromUser: true });
+      // Click on row → open that session (newest click wins, even if an earlier
+      // load is still in flight).
+      await openSessionById(id, { closePopover: true });
     });
     document.addEventListener('click', (e) => {
       if (!els.modelPopover.classList.contains('hidden')) {
@@ -7705,8 +7721,7 @@
         hint: sess.url || '', source: 'session',
         run: async () => {
           closePalette();
-          const full = await loadFullSession(sess.id);
-          if (full) switchToSession(full, { fromUser: true });
+          await openSessionById(sess.id);
         }
       });
     }
