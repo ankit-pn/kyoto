@@ -1139,9 +1139,14 @@
         const f = state.openaiDeviceFlow;
         if (els.openaiUserCode) els.openaiUserCode.textContent = f.user_code || '—';
         if (els.openaiVerifyUrl) {
-          const href = f.verification_uri_complete || f.verification_uri || '#';
-          els.openaiVerifyUrl.href = href;
-          els.openaiVerifyUrl.textContent = href;
+          // Never leave a dead "#" link: if the flow gave us no URI, hide the
+          // anchor rather than rendering something that goes nowhere.
+          const href = f.verification_uri_complete || f.verification_uri || '';
+          els.openaiVerifyUrl.classList.toggle('hidden', !href);
+          if (href) {
+            els.openaiVerifyUrl.href = href;
+            els.openaiVerifyUrl.textContent = href;
+          }
         }
       }
     }
@@ -6857,16 +6862,16 @@
     if (els.shellInstallCopyAltBtn) els.shellInstallCopyAltBtn.addEventListener('click', () => {
       copyToClipboard(els.shellInstallCmdAlt.value, els.shellInstallCopyAltBtn);
     });
-    if (els.shellInstallToggleAltBtn) els.shellInstallToggleAltBtn.addEventListener('click', (e) => {
-      e.preventDefault();
+    if (els.shellInstallToggleAltBtn) els.shellInstallToggleAltBtn.addEventListener('click', () => {
       const wrap = els.shellInstallAltWrap;
       if (!wrap) return;
       const showing = wrap.classList.toggle('hidden');
       // toggle returns the new state of "is class present" — if it just
-      // ADDED .hidden, we're hiding. Flip the label accordingly.
+      // ADDED .hidden, we're hiding. Flip the label and the expanded state.
       els.shellInstallToggleAltBtn.textContent = showing
         ? 'Show command for a different OS'
         : 'Hide command for the other OS';
+      els.shellInstallToggleAltBtn.setAttribute('aria-expanded', showing ? 'false' : 'true');
     });
 
     if (els.shellCopyIdBtn) els.shellCopyIdBtn.addEventListener('click', () => {

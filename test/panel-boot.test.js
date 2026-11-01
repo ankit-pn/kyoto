@@ -2434,3 +2434,25 @@ test('opening a dialog dismisses the composer autocomplete', async () => {
   await settle(120);
   assert.ok(slash.classList.contains('hidden'), 'the command palette must dismiss it too');
 });
+
+test('the shell-install disclosure is a button that reports its state', async () => {
+  // It was an <a href="#"> with a click handler: announced as a link, and Space
+  // did not activate it. A disclosure is a button.
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const btn = doc.getElementById('shellInstallToggleAltBtn');
+  assert.ok(btn, 'the disclosure should exist');
+  assert.equal(btn.tagName, 'BUTTON', 'a disclosure must be a button, not a link');
+  assert.equal(btn.getAttribute('aria-expanded'), 'false');
+  assert.equal(btn.getAttribute('aria-controls'), 'shellInstallAltWrap');
+  assert.ok(doc.getElementById('shellInstallAltWrap'), 'aria-controls must resolve');
+
+  btn.click();
+  await settle(30);
+  assert.equal(btn.getAttribute('aria-expanded'), 'true', 'opening must be announced');
+  assert.match(btn.textContent, /hide/i, 'and the label should flip');
+
+  btn.click();
+  await settle(30);
+  assert.equal(btn.getAttribute('aria-expanded'), 'false', 'closing must be announced too');
+});

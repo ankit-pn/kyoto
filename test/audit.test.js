@@ -722,3 +722,46 @@ test('the focus ring contrasts with every surface it can appear on', () => {
   }
   assert.deepEqual(failures, [], `focus indicator contrast failures:\n${failures.join('\n')}`);
 });
+
+// ── Links vs buttons, and external-link safety ────────
+// An <a href="#"> with a click handler is a button wearing a link's role: screen
+// readers announce "link", and Space does not activate it. Related: any
+// target="_blank" without rel="noopener" hands the opener reference to the new
+// page (reverse tabnabbing).
+
+test('no link is used as a button', () => {
+  // A real anchor must go somewhere. `href="#"` is a placeholder for a click
+  // handler, which means the element should be a <button>.
+  // Exception: openaiVerifyUrl is a genuine external link whose href comes from
+  // the OAuth device flow at runtime; it is hidden (not rendered as "#") when the
+  // flow returns no URI, so it is never a clickable dead link.
+  const RUNTIME_POPULATED = new Set(['openaiVerifyUrl']);
+  const offenders = [...HTML.matchAll(/<a\b[^>]*href="#"[^>]*>([\s\S]*?)<\/a>/g)]
+    .filter(m => ![...RUNTIME_POPULATED].some(id => m[0].includes(`id="${id}"`)))
+    .map(m => m[0].slice(0, 90));
+  assert.deepEqual(offenders, [],
+    `these anchors should be buttons:\n${offenders.join('\n')}`);
+});
+
+test('every external link is opened safely', () => {
+  const anchors = [...HTML.matchAll(/<a\b[^>]*>/g)].map(m => m[0]);
+  const unsafe = anchors.filter(tag => /target="_blank"/.test(tag) && !/rel="[^"]*noopener/.test(tag));
+  assert.deepEqual(unsafe, [], `target="_blank" needs rel="noopener":\n${unsafe.join('\n')}`);
+
+  // Links generated in JS count too, and are easy to forget.
+  const jsAnchors = [...read('sidepanel/sidepanel.js').matchAll(/<a\s+href=[^>]*>/g)].map(m => m[0]);
+  const unsafeJs = jsAnchors.filter(tag => /target="_blank"/.test(tag) && !/rel="[^"]*noopener/.test(tag));
+  assert.deepEqual(unsafeJs, [], `JS-generated links need rel="noopener":\n${unsafeJs.join('\n')}`);
+});
+
+test('disclosure toggles expose their expanded state', () => {
+  // Anything that shows/hides a panel must announce that it does, and whether it
+  // is currently open.
+  const html = read('sidepanel/sidepanel.html');
+  const toggles = [...html.matchAll(/<button[^>]*aria-controls="([^"]+)"[^>]*>/g)];
+  assert.ok(toggles.length >= 1, 'expected at least the shell-install disclosure');
+  for (const [tag, controls] of toggles) {
+    assert.match(tag, /aria-expanded="(true|false)"/, `toggle for "${controls}" needs aria-expanded`);
+    assert.ok(html.includes(`id="${controls}"`), `aria-controls="${controls}" must resolve to a real element`);
+  }
+});
