@@ -280,7 +280,9 @@ test('5 consecutive failures auto-pauses the job', async () => {
     name: 'flaky', schedule: { every: '1m' },
     code: 'throw new Error("x")', autoPauseAfter: 5,
   });
-  for (let i = 0; i < 5; i++) await Cron.runJobNow(j.id);
+  // force:true — this test needs 5 forced attempts, and each failure opens a
+  // backoff window that an ordinary manual run now respects.
+  for (let i = 0; i < 5; i++) await Cron.runJobNow(j.id, { force: true });
   const cur = await Cron.getJob(j.id);
   assert.equal(cur.paused, true);
   // Alarm should have been cleared on auto-pause.
@@ -422,12 +424,40 @@ test('successful run clears backoff window and consecutiveFailures', async () =>
   let cur = await Cron.getJob(j.id);
   assert.equal(cur.consecutiveFailures, 1);
   assert.ok(cur._backoffUntil > Date.now());
-  // Flip to success.
+  // Flip to success. force:true because the failure above opened a backoff
+  // window that a plain manual run now respects.
   await Cron.stateSet('mode', 'ok');
-  await Cron.runJobNow(j.id);
+  await Cron.runJobNow(j.id, { force: true });
   cur = await Cron.getJob(j.id);
   assert.equal(cur.consecutiveFailures, 0);
   assert.equal(cur._backoffUntil, null);
+});
+
+// Audit C12: a manual run is still a run. It must honour the backoff window
+// (and the singleton guard) instead of starting a second concurrent copy;
+// force:true is the explicit opt-out.
+test('runJobNow respects the backoff window unless force:true', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const j = await Cron.addJob({
+    name: 'manual-backoff', schedule: { every: '1m' }, autoPauseAfter: 99,
+    code: 'throw new Error("nope")',
+  });
+  const first = await Cron.runJobNow(j.id);
+  assert.equal(first.ok, false);
+  assert.equal(first.skipped, undefined, 'the first run actually executes');
+
+  // Inside the backoff window the second manual run is skipped, not executed.
+  const second = await Cron.runJobNow(j.id);
+  assert.equal(second.skipped, true);
+  assert.equal(second.reason, 'backoff');
+
+  // force:true bypasses the backoff window and really runs (and fails) again.
+  const forced = await Cron.runJobNow(j.id, { force: true });
+  assert.equal(forced.skipped, undefined);
+  assert.equal(forced.ok, false);
+  const cur = await Cron.getJob(j.id);
+  assert.equal(cur.consecutiveFailures, 2);
 });
 
 test('K.tools.fs_write + fs_read round-trip via the shared KyotoVFS', async () => {
@@ -474,8 +504,8 @@ test('auto-pause fires a chrome.notifications.create call', async () => {
     schedule: { every: '1m' }, autoPauseAfter: 2,
     code: 'throw new Error("boom")'
   });
-  await Cron.runJobNow(j.id);
-  await Cron.runJobNow(j.id);  // hits the threshold
+  await Cron.runJobNow(j.id, { force: true });
+  await Cron.runJobNow(j.id, { force: true });  // hits the threshold (forced past the backoff window)
   const cur = await Cron.getJob(j.id);
   assert.equal(cur.paused, true);
   assert.equal(notifications.length, 1, 'one notification per auto-pause event');
@@ -603,8 +633,8 @@ test('autoPauseNotify: false suppresses the chrome.notifications call', async ()
     schedule: { every: '1m' }, autoPauseAfter: 2, autoPauseNotify: false,
     code: 'throw new Error("x")',
   });
-  await Cron.runJobNow(j.id);
-  await Cron.runJobNow(j.id);
+  await Cron.runJobNow(j.id, { force: true });
+  await Cron.runJobNow(j.id, { force: true });
   const cur = await Cron.getJob(j.id);
   assert.equal(cur.paused, true, 'still auto-pauses');
   assert.equal(notifications.length, 0, 'but no toast was fired');
@@ -767,19 +797,30 @@ test('importAll replace mode wipes existing jobs and imports fresh', async () =>
   assert.equal(list.jobs[0].name, 'after');
 });
 
-test('stateSet returns sizeWarning when aggregate state exceeds 80% of 5MB', async () => {
+// Audit C17: the warning threshold used to be 4MB and the message claimed the
+// local quota was ~5MB. Chrome's `storage.local` quota is ~10MB, so the
+// warning fired when the store was still less than half full and understated
+// the platform limit. Threshold is now 8MB (~80% of 10MB).
+test('stateSet returns sizeWarning when aggregate state exceeds 80% of 10MB', async () => {
   const { stubs } = makeChromeStub();
   const Cron = loadCronEngine({ chromeStubs: stubs });
-  // 49KB per write × 90 keys ≈ 4.4MB. The 50KB per-value cap stays
-  // separate; we're checking the AGGREGATE.
+  // 49KB per write × 175 keys ≈ 8.4MB. The 50KB per-value cap stays separate;
+  // we're checking the AGGREGATE.
   const chunk = 'a'.repeat(49 * 1024);
-  for (let i = 0; i < 90; i++) {
+  for (let i = 0; i < 175; i++) {
     await Cron.stateSet('big.' + i, chunk);
   }
   const r = await Cron.stateSet('big.last', chunk);
-  assert.ok(r.sizeWarning, 'should warn when over 80%, got: ' + JSON.stringify(r));
+  assert.ok(r.sizeWarning, 'should warn when over 80%, got: ' + JSON.stringify({ ...r, value: undefined }));
   assert.ok(/MB/.test(r.sizeWarning));
-  assert.ok(r.bytesUsed > 4 * 1024 * 1024);
+  assert.ok(r.bytesUsed > 8 * 1024 * 1024);
+});
+
+test('stateSet does not warn while the state store is under the threshold', async () => {
+  const { stubs } = makeChromeStub();
+  const Cron = loadCronEngine({ chromeStubs: stubs });
+  const r = await Cron.stateSet('small.key', 'a'.repeat(1024));
+  assert.equal(r.sizeWarning, undefined);
 });
 
 test('reconcile creates missing alarms and clears orphans', async () => {

@@ -23,6 +23,13 @@
     openrouter: {
       _default: { context: 128000, output: 8192 }
     },
+    'opencode-go': {
+      // Cold-start defaults only — the public /models catalogue replaces
+      // these as soon as the provider's key is present (see register()).
+      'glm-5.3':       { context: 1000000, output: 131072 },
+      'deepseek-v4.1-flash': { context: 1000000, output: 384000 },
+      _default:        { context: 200000,  output: 32768 }
+    },
     deepseek: {
       'deepseek-chat':     { context: 128000, output: 8192 },
       'deepseek-reasoner': { context: 64000,  output: 8192 },
@@ -39,6 +46,24 @@
 
   let registry = null;
   let lastFetchedAt = 0;
+
+  // Per-provider metadata parsed from a provider's own /models endpoint.
+  // This is the freshest source for limits, vision and pricing — models.dev
+  // lags behind new releases, and some providers (OpenCode Go) carry
+  // capability flags that models.dev does not model at all.
+  // provider -> Map(modelId -> {context, maxOutput, modalities, reasoning, pricing, ...})
+  const catalogue = new Map();
+
+  function register(provider, list) {
+    if (!provider) return;
+    const map = new Map();
+    for (const item of list || []) {
+      const id = item?.id || item?.model || item?.name;
+      if (!id) continue;
+      map.set(String(id), item);
+    }
+    if (map.size) catalogue.set(provider, map);
+  }
 
   async function loadCache() {
     const g = await chrome.storage.local.get(CACHE_KEY);
@@ -106,9 +131,32 @@
         };
       }
     }
+    // The provider's own catalogue beats our static table: it is the only
+    // source that knows about models released after this extension shipped.
+    const pm = catalogue.get(provider)?.get(modelId);
+    if (pm) {
+      return {
+        context: pm.context ?? null,
+        output: pm.maxOutput ?? null,
+        cost: pm.pricing ? { input: pm.pricing.prompt, output: pm.pricing.completion } : null,
+        name: pm.name || modelId,
+        modalities: pm.modalities || null,
+        reasoning: pm.reasoning || null,
+        supportsTools: pm.supportsTools !== false,
+        source: 'catalogue'
+      };
+    }
     const s = STATIC[provider]?.[modelId] || STATIC[provider]?._default;
     if (s) return { ...s, name: modelId, source: 'static' };
     return null;
+  }
+
+  // Reasoning capability for the active model, from whichever source knows.
+  // Returns {supported, efforts[], defaultEffort, mandatory} or null.
+  function reasoningFor(provider, modelId) {
+    const direct = catalogue.get(provider)?.get(modelId)?.reasoning;
+    if (direct) return direct;
+    return get(provider, modelId)?.reasoning || null;
   }
 
   // Does this model accept image inputs in its prompt? Falls back to
@@ -187,6 +235,8 @@
     contextLength,
     costFor,
     supportsVision,
+    reasoningFor,
+    register,
     formatN,
     formatUsd,
     getRegistry: () => registry,

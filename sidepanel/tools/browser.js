@@ -37,7 +37,17 @@
       if (!freshSession && window.__kyotoMarkPendingTabBind) {
         window.__kyotoMarkPendingTabBind();
       }
-      const tab = await chrome.tabs.create({ url, active });
+      let tab;
+      try {
+        tab = await chrome.tabs.create({ url, active });
+      } catch (e) {
+        // Mark-then-create is not atomic: chrome.tabs.create can reject
+        // (malformed/restricted URL), and the one-shot bind flag would stay
+        // armed for whatever tab is created next (the user's Ctrl+T,
+        // window.open, another agent). Roll it back before rethrowing.
+        try { window.__kyotoClearPendingTabBind?.(); } catch {}
+        throw e;
+      }
       return { id: tab.id, url: tab.url, inheritedSession: !freshSession };
     }
   });
@@ -191,14 +201,24 @@
         const el = document.querySelector(sel);
         if (!el) return { filled: false, error: 'no match' };
         el.focus();
-        if (el.isContentEditable) {
-          el.textContent = val;
-        } else {
-          const proto = el instanceof HTMLTextAreaElement
-            ? HTMLTextAreaElement.prototype
-            : HTMLInputElement.prototype;
-          const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-          setter.call(el, val);
+        // Branch on the element's own type: the HTMLInputElement/
+        // HTMLTextAreaElement `value` prototype setter brand-checks `this`,
+        // so calling it on a <select>/<button>/custom element throws
+        // "TypeError: Illegal invocation".
+        try {
+          if (el.isContentEditable) {
+            el.textContent = val;
+          } else if (el instanceof HTMLTextAreaElement) {
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, val);
+          } else if (el instanceof HTMLInputElement) {
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, val);
+          } else if (el instanceof HTMLSelectElement) {
+            el.value = val;
+          } else {
+            return { filled: false, tag: el.tagName, error: `unsupported element <${el.tagName.toLowerCase()}> — expected input, textarea, select or contenteditable` };
+          }
+        } catch (e) {
+          return { filled: false, tag: el.tagName, error: e?.message || String(e) };
         }
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -402,6 +422,15 @@
     handler: async ({ database, tabId }) => {
       tabId = tabId ?? (await activeTab()).id;
       return scrip(tabId, async (dbName) => {
+        // `indexedDB.open(name)` without a version CREATES an empty v1
+        // database when the name doesn't exist. This tool is documented as
+        // read-only, and creating one makes a typo'd name silently "succeed"
+        // against a fresh DB. Check the existing set first.
+        let existing = null;
+        if (indexedDB.databases) {
+          try { existing = (await indexedDB.databases()).map(d => d.name); } catch {}
+        }
+        if (existing && !existing.includes(dbName)) return { error: `database "${dbName}" not found` };
         return await new Promise((resolve) => {
           const req = indexedDB.open(dbName);
           req.onerror = () => resolve({ error: req.error?.message || 'open failed' });
@@ -434,6 +463,13 @@
     handler: async ({ database, store, limit = 50, tabId }) => {
       tabId = tabId ?? (await activeTab()).id;
       return scrip(tabId, async (dbName, storeName, lim) => {
+        // Same read-only guard as idb_list_stores: opening a missing name
+        // would create an empty database as a side effect of a "read".
+        let existing = null;
+        if (indexedDB.databases) {
+          try { existing = (await indexedDB.databases()).map(d => d.name); } catch {}
+        }
+        if (existing && !existing.includes(dbName)) return { error: `database "${dbName}" not found` };
         return await new Promise((resolve) => {
           const req = indexedDB.open(dbName);
           req.onerror = () => resolve({ error: req.error?.message || 'open failed' });
@@ -482,16 +518,22 @@
         for (const [sel, val] of Object.entries(map)) {
           const el = document.querySelector(sel);
           if (!el) { results.push({ selector: sel, ok: false, error: 'no match' }); continue; }
-          el.focus();
-          if (el.isContentEditable) { el.textContent = val; }
-          else {
-            const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-            setter.call(el, val);
+          // Per-field try/catch + type branch: one unsupported element (e.g. a
+          // <select>, which has no borrowable input/textarea value setter)
+          // must not abort the whole batch with "Illegal invocation".
+          try {
+            el.focus();
+            if (el.isContentEditable) { el.textContent = val; }
+            else if (el instanceof HTMLTextAreaElement) { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, val); }
+            else if (el instanceof HTMLInputElement) { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, val); }
+            else if (el instanceof HTMLSelectElement) { el.value = val; }
+            else { results.push({ selector: sel, ok: false, tag: el.tagName, error: `unsupported element <${el.tagName.toLowerCase()}>` }); continue; }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            results.push({ selector: sel, ok: true });
+          } catch (e) {
+            results.push({ selector: sel, ok: false, error: e?.message || String(e) });
           }
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          results.push({ selector: sel, ok: true });
         }
         return { filled: results.filter(r => r.ok).length, total: results.length, results };
       }, [fields]);

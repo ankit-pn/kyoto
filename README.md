@@ -2,7 +2,7 @@
 
 **An AI browser agent for developers, in your Chrome side panel.**
 
-Bring your own key for any OpenAI-compatible provider (OpenRouter, DeepSeek, MiniMax direct, Ollama, Groq, Together, Fireworks, Gemini-OAI, Anthropic-via-proxy, …), pick any model, and let it drive the browser: read DOM, inspect network, dump cookies, run JavaScript, click buttons, capture screenshots, search history, generate Postman collections, and call out to MCP servers. Per-tab sessions, OpenAI-style streaming tool calling with reasoning support, models.dev-powered token budgeting.
+Bring your own key for any OpenAI-compatible provider (OpenRouter, OpenCode Go, DeepSeek, MiniMax direct, Ollama, Groq, Together, Fireworks, Gemini-OAI, Anthropic-via-proxy, …), pick any model, and let it drive the browser: read DOM, inspect network, dump cookies, run JavaScript, click buttons, capture screenshots, search history, generate Postman collections, and call out to MCP servers. Per-tab sessions, OpenAI-style streaming tool calling with structured reasoning passthrough, models.dev + live-catalogue token budgeting.
 
 > Loaded as an unpacked extension only — not on the Chrome Web Store. Chrome 116+.
 
@@ -11,14 +11,14 @@ Bring your own key for any OpenAI-compatible provider (OpenRouter, DeepSeek, Min
 ## Highlights
 
 - **Native Chrome side panel.** Toolbar icon or `Ctrl/Cmd+Shift+L`. Also opens inside DevTools (F12 → Kyoto tab) and as a pop-out window.
-- **Any OpenAI-compatible provider, multiple at once.** Three first-class (OpenRouter / DeepSeek / MiniMax) plus an unlimited "custom" slot for Ollama, LM Studio, Groq, Together, Cerebras, Gemini-OAI, Anthropic-via-LiteLLM, your-own-proxy, etc.
+- **Any OpenAI-compatible provider, multiple at once.** Four first-class (OpenRouter / OpenCode Go / DeepSeek / MiniMax) plus an unlimited "custom" slot for Ollama, LM Studio, Groq, Together, Cerebras, Gemini-OAI, Anthropic-via-LiteLLM, your-own-proxy, etc.
 - **Per-tab sessions.** Every tab owns its own conversation. Switching tabs swaps the visible session; in-flight streams keep running for the tabs you left.
-- **Streaming tool-call loop.** Up to 12 round-trips per turn. Captures `reasoning_content` from DeepSeek thinking-mode and reasoning models, echoes it back as the API requires.
+- **Streaming tool-call loop.** Up to 12 round-trips per turn. Captures the reasoning channel — OpenRouter's `reasoning_details` (replayed verbatim, in order, encrypted blocks included), plus `reasoning_content` / `reasoning` from DeepSeek thinking-mode and other reasoning models.
 - **~100 built-in tools** across browser, DOM, cookies, network, storage, devtools, debugger, history, memory, minimax, media, **shell** (with background jobs), **meta** (ask_user), devtools-export groups. Plus your own:
   - **Custom JS tools** — write a JS function body in Settings, model can call it.
   - **MCP server support** — JSON-RPC over HTTP; tools auto-registered as `mcp__<server>__<tool>`.
-- **Cost & token visibility.** `stream_options.include_usage` parsed; each assistant message gets a `1.2K↧ · 0.4K↥ · $0.0021` chip from models.dev pricing.
-- **Dynamic `max_tokens`** clamped from models.dev per-model caps. No more 400s from over-asking.
+- **Cost & token visibility.** Each assistant message gets a `1.2K↧ · 0.4K↥ · $0.0021` chip. OpenRouter and OpenCode Go report their own per-request `cost` (including cache and reasoning token detail); other providers fall back to models.dev pricing.
+- **Dynamic `max_tokens`** clamped from models.dev *and* the provider's live `/models` catalogue (which knows about models released after this extension shipped). No more 400s from over-asking.
 - **Slash commands** — built-in (`/summarize`, `/cookies`, `/network`, `/see`, `/har`, `/postman`, `/ts`, `/search`, `/vlm`, `/npm`, `/pypi`, `/so`, …) plus user-defined.
 - **Cross-session memory** — agent can `memory_add` / `_search` / `_get`; titles surface in the system prompt automatically.
 - **Pinned messages, replay/edit, fork session, export to Markdown, full-content session search.**
@@ -50,12 +50,35 @@ Click the gear icon. Pick a provider, paste an API key, save. Models load automa
 
 | Provider | Key URL |
 |---|---|
-| **OpenRouter** | [openrouter.ai/keys](https://openrouter.ai/keys) — ~350 models across OpenAI, Anthropic, Google, Meta, DeepSeek, MiniMax, … |
+| **OpenRouter** | [openrouter.ai/keys](https://openrouter.ai/keys) — ~450 models across OpenAI, Anthropic, Google, Meta, DeepSeek, MiniMax, … |
+| **OpenCode Go** | [opencode.ai/console](https://opencode.ai/console) → Account → Personal API keys (`oc_sk_…`) — subscription gateway; the $10/mo Go plan gives per-model monthly allowances across Claude, GPT, Gemini, GLM, Kimi, Qwen and more, all through one OpenAI-compatible endpoint. |
 | **DeepSeek direct** | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) — cheapest path to V3 / Reasoner. |
 | **MiniMax direct** | [minimax.io interface keys](https://www.minimax.io/platform/user-center/basic-information/interface-key) — MiniMax-M2 family + token-plan tools. |
 | **Custom (any OpenAI-compatible endpoint)** | Settings → Custom OpenAI-compatible providers → add base URL + optional key. Works for Ollama (`http://localhost:11434/v1`, keyless), LM Studio (`http://localhost:1234/v1`), Groq (`https://api.groq.com/openai/v1`), Together, Fireworks, Cerebras, Cloudflare AI Gateway, Anthropic-via-LiteLLM, Gemini-OAI (`https://generativelanguage.googleapis.com/v1beta/openai`). |
 
 Per-provider keys are stored independently; switching provider in Settings preserves each.
+
+### OpenCode Go notes
+
+Go is a separate product from pay-as-you-go "OpenCode Models" (`opencode.ai/zen`): same gateway and key type, different base path (`/inference/go` vs `/inference`) and different billing. Kyoto targets the Go subscription path:
+
+- Chat: `https://opencode.ai/inference/go/openai/v1/chat/completions`
+- Catalogue: `https://opencode.ai/inference/go/v1/models` — public, no key required, so the model picker fills in before you paste one.
+- Auth: `Authorization: Bearer oc_sk_…` **plus** `x-opencode-session: ses_…`, which the Go gateway requires on every request (it returns `400 MissingSessionID` before it even checks the key). Kyoto derives that id deterministically from the conversation so it stays stable across turns.
+- Every Go text model works through the OpenAI-compatible path — the gateway translates to the Anthropic/Gemini APIs server-side, so one code path drives Claude, Gemini and GPT models.
+- The gateway sends no CORS headers on its POST endpoint. That is fine for an extension (host permissions bypass CORS) but means a plain web page cannot call it.
+
+### OpenRouter routing & reasoning
+
+Settings → **OpenRouter routing & reasoning** exposes the parts of OpenRouter that matter for an agent:
+
+- **Reasoning effort** (`minimal` … `max`) → sent as `reasoning.effort`. Reasoning tokens are billed and count against `max_tokens`.
+- **Provider sort** (`price` / `throughput` / `latency` / `exacto`) → `provider.sort`. `exacto` ranks providers by tool-calling quality.
+- **Routing variant** (`:nitro`, `:floor`, `:exacto`) → appended to the model id at request time only; catalogue metadata still resolves against the base id. Catalog suffixes such as `:free` and `:batch` are real, separately-priced models and stay part of the id.
+- **Data collection** → `provider.data_collection: "deny"` refuses training/logging providers. Note many `:free` models then become unusable, because free models require the training toggle on your account.
+- `provider.require_parameters` is set automatically whenever tools are sent — without it OpenRouter *silently drops* `tools` when no provider supports them, and the agent loses the ability to act.
+
+Reasoning is preserved across multi-step tool loops: OpenRouter returns `reasoning_details`, which must be echoed back **verbatim and in order** (encrypted blocks carry the provider signature). Kyoto persists the exact array on the assistant turn and replays it rather than re-serialising it. Streaming failures arrive in-band with HTTP 200 (`error` + `finish_reason:"error"`) and are surfaced as real errors instead of a silently truncated reply.
 
 ## What you can ask it
 

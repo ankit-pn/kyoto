@@ -117,6 +117,7 @@
         <label>Provider</label>
         <select id="provider">
           <option value="openrouter">OpenRouter</option>
+          <option value="opencode-go">OpenCode Go</option>
           <option value="openai">OpenAI</option>
           <option value="deepseek">DeepSeek</option>
           <option value="minimax">MiniMax</option>
@@ -166,6 +167,59 @@
         <button class="btn-mini" id="testConnBtn" type="button">Test connection</button>
         <span class="status" id="testConnStatus"></span>
         <p class="hint">Sends a 1-token "ping" through the configured provider/model/key.</p>
+      </div>
+
+      <div id="orSection" class="hidden">
+        <h3 class="drawer-section">OpenRouter routing &amp; reasoning</h3>
+        <div class="field">
+          <label>Reasoning effort</label>
+          <select id="orReasoningEffort">
+            <option value="">Off — let the model decide</option>
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+          </select>
+          <p class="hint">Sent as <code>reasoning.effort</code>. Only models that advertise the effort honour it; reasoning tokens are billed and count toward max output tokens.</p>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Provider sort</label>
+            <select id="orSort">
+              <option value="">Default (balanced)</option>
+              <option value="price">Cheapest (price)</option>
+              <option value="throughput">Fastest tokens (throughput)</option>
+              <option value="latency">Lowest latency</option>
+              <option value="exacto">Best tool-calling (exacto)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Routing variant</label>
+            <select id="orVariant">
+              <option value="">None</option>
+              <option value=":nitro">:nitro — throughput</option>
+              <option value=":floor">:floor — cheapest</option>
+              <option value=":exacto">:exacto — tool quality</option>
+            </select>
+          </div>
+        </div>
+        <p class="hint">Sort and variant both steer provider selection. Catalog suffixes such as <code>:free</code> and <code>:batch</code> stay part of the model id and are picked per-model above.</p>
+        <div class="field">
+          <label>Data collection</label>
+          <select id="orDataCollection">
+            <option value="allow">Allow (needed for many :free models)</option>
+            <option value="deny">Deny — never route to training providers</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="check-row">
+            <input type="checkbox" id="orAllowFallbacks" checked />
+            <span>Allow provider fallbacks when the first choice fails</span>
+          </label>
+        </div>
+        <p class="hint">When tools are enabled Kyoto sets <code>provider.require_parameters</code> so OpenRouter never silently drops tool support. <code>:free</code> models additionally require the training toggle on your OpenRouter account.</p>
       </div>
 
       <h3 class="drawer-section">ChatGPT Plus / Pro (for OpenAI Codex models)</h3>
@@ -339,20 +393,27 @@
       </div>
 
       <h3 class="drawer-section">Skills hub</h3>
-      <p class="hint">Domain-scoped playbook store the agent searches before tackling tasks and writes to once a <code>/goal</code> completes. <strong>Pre-configured</strong> to the public hub at <code>skills.kryvik.com</code> — works out of the box. Leave these fields untouched, paste your own AWS-deployed hub URL + key (from <code>skills-hub/deploy.py</code>) to point at a private hub, or type <code>off</code> into the URL field to disable the hub entirely.</p>
+      <p class="hint">Domain-scoped playbook store the agent searches before tackling tasks and writes to once a <code>/goal</code> completes. The public hub URL (<code>skills.kryvik.com</code>) is filled in as a convenience, but <strong>no credential ships with the extension</strong> — the hub stays disabled until you paste your own hub API key here. Paste your own AWS-deployed hub URL + key (from <code>skills-hub/deploy.py</code>) for a private hub, or type <code>off</code> into the URL field to disable it entirely.</p>
       <div class="field">
         <label>Hub URL</label>
         <input type="text" id="skillsHubUrl" placeholder="https://skills.kryvik.com" autocomplete="off" />
       </div>
       <div class="field">
         <label>API key</label>
-        <input type="password" id="skillsHubKey" placeholder="…" autocomplete="off" />
+        <input type="password" id="skillsHubKey" placeholder="paste your hub API key…" autocomplete="off" />
       </div>
       <div class="field">
         <label class="check">
           <input type="checkbox" id="skillsAutoSave" checked />
           <span>Auto-save a skill when a <code>/goal</code> completes</span>
         </label>
+      </div>
+      <div class="field">
+        <label class="check">
+          <input type="checkbox" id="skillsHubAutoInjectGlobal" />
+          <span>Inject shared <code>global</code> skills into every session prompt</span>
+        </label>
+        <p class="hint">Off by default. Global skills come from a shared, writable hub, so anyone who can publish there could inject instructions into all of your sessions — only enable this with a hub you control or trust.</p>
       </div>
       <div class="mcp-actions">
         <button class="btn-mini" id="skillsHubTestBtn" type="button">Test connection</button>
@@ -470,6 +531,7 @@
   <script src="../lib/fflate.min.js"></script>
   <script src="vfs.js"></script>
   <script src="models-registry.js"></script>
+  <script src="providers.js"></script>
   <script src="tools/core.js"></script>
   <script src="tools/workspace.js"></script>
   <script src="tools/browser.js"></script>

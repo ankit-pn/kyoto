@@ -88,8 +88,14 @@
       }
 
       const wasCapturing = (await bg('NET_CAPTURE_LIST', { limit: 1 }))?.capturing;
-      if (!wasCapturing) await bg('NET_CAPTURE_START', { scope: 'tab', tabId });
-      try { await bg('NET_CAPTURE_CLEAR'); } catch {}
+      if (!wasCapturing) {
+        await bg('NET_CAPTURE_START', { scope: 'tab', tabId });
+        // Only clear a buffer this call started. If capture was already
+        // running, the buffer belongs to another consumer (a user's
+        // network_capture_start or a concurrent agent/subagent) and wiping
+        // it would silently destroy their captured events.
+        try { await bg('NET_CAPTURE_CLEAR'); } catch {}
+      }
 
       const playResult = await scrip(tabId, () => {
         const v = document.querySelector('video');

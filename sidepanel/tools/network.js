@@ -94,10 +94,18 @@
               status: res?.status, ok: res?.ok, error: err?.message
             };
             if (clone) {
-              try { rec.respBody = (await clone.text()).slice(0, 8000); }
-              catch {}
+              // Read the cloned body off the return path. `finally` runs
+              // before this function's return value is delivered, so awaiting
+              // clone.text() here would hold the page's own fetch() open until
+              // the whole body had been re-read — and forever on SSE/streaming
+              // responses, where the body never ends.
+              (async () => {
+                try { rec.respBody = (await clone.text()).slice(0, 8000); } catch {}
+                push(rec);
+              })();
+            } else {
+              push(rec);
             }
-            push(rec);
           }
           return res;
         };
@@ -158,20 +166,27 @@
           try { return typeof x === 'string' ? x : JSON.stringify(x); }
           catch { return String(x); }
         }).join(' ');
+        // One write path for every producer (console wrappers and the
+        // error/unhandledrejection listeners) so all of them honour the cap.
+        // The cap is read at push time so a later console_attach re-run can
+        // lower it.
+        const pushRec = (level, message) => {
+          const log = window.__kyoto_console_log;
+          log.push({ t: Date.now(), level, message });
+          while (log.length > window.__kyoto_console_cap) log.shift();
+        };
         for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
           const orig = console[level].bind(console);
           console[level] = function (...args) {
-            const log = window.__kyoto_console_log;
-            log.push({ t: Date.now(), level, message: fmt(args).slice(0, 4000) });
-            if (log.length > window.__kyoto_console_cap) log.shift();
+            pushRec(level, fmt(args).slice(0, 4000));
             return orig(...args);
           };
         }
         window.addEventListener('error', (e) => {
-          window.__kyoto_console_log.push({ t: Date.now(), level: 'error', message: `[uncaught] ${e.message} @ ${e.filename}:${e.lineno}` });
+          pushRec('error', `[uncaught] ${e.message} @ ${e.filename}:${e.lineno}`);
         });
         window.addEventListener('unhandledrejection', (e) => {
-          window.__kyoto_console_log.push({ t: Date.now(), level: 'error', message: `[unhandledrejection] ${e.reason?.message || e.reason}` });
+          pushRec('error', `[unhandledrejection] ${e.reason?.message || e.reason}`);
         });
         return { installed: true, alreadyOn: false };
       }, [max], 'MAIN');

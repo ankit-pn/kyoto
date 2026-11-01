@@ -462,9 +462,16 @@
         scope === 'all' ? { title: 'all-sessions' } : (sessionId ? { id: sessionId } : window.KyotoSession.active()),
         ext
       );
+      // This tool creates the blob URL, so this tool must revoke it — whichever
+      // path produced the download. Revoke on the download's terminal state,
+      // NOT on a fixed timer: with saveAs:true Chrome doesn't read the bytes
+      // until the user confirms the dialog, so a 120 s timer breaks long
+      // Save-As dialogs (audit C18).
+      let downloadId = null;
       try {
         if (window.KyotoWorkspace) {
           const r = await window.KyotoWorkspace.downloadUrl({ url, filename: suggested, saveAs: true });
+          downloadId = r.downloadId ?? null;
           return {
             ok: true, filename: suggested, bytes: blob.size,
             downloadId: r.downloadId, format: fmt, scope,
@@ -472,10 +479,18 @@
             ...(r.note ? { note: r.note } : {})
           };
         }
-        const downloadId = await chrome.downloads.download({ url, filename: suggested, saveAs: true });
+        downloadId = await chrome.downloads.download({ url, filename: suggested, saveAs: true });
         return { ok: true, filename: suggested, bytes: blob.size, downloadId, format: fmt, scope };
+      } catch (e) {
+        // The download never started, so nothing will ever read the blob.
+        try { URL.revokeObjectURL(url); } catch {}
+        throw e;
       } finally {
-        setTimeout(() => URL.revokeObjectURL(url), 120000);
+        if (downloadId != null) {
+          const revokeWhenDone = window.KyotoWorkspace?._revokeBlobUrlWhenDownloaded;
+          if (revokeWhenDone) revokeWhenDone(url, downloadId);
+          else setTimeout(() => URL.revokeObjectURL(url), 120000);
+        }
       }
     }
   });
