@@ -3968,6 +3968,10 @@
     if (!els.modelPopover.classList.contains('hidden')) { closeModelPopover(); return; }
     els.modelPopover.classList.remove('hidden');
     els.popoverSearch.value = '';
+    els.popoverList.setAttribute('role', 'listbox');
+    els.popoverList.setAttribute('aria-label', 'Models');
+    // Focus the filter so the picker is usable without the mouse at all.
+    try { els.popoverSearch.focus(); } catch { /* non-fatal */ }
     // Render whatever we already have cached so the user sees something
     // immediately. The background refresh then re-renders when more
     // models arrive.
@@ -4040,10 +4044,13 @@
         const active = (m._provider === state.settings.provider && m.id === state.settings.model) ? ' active' : '';
         const info = window.KyotoModels?.get(m._provider, m.id);
         const caps = info ? `<span class="popover-caps" title="ctx ${info.context ?? '?'} / out ${info.output ?? '?'} · ${info.source}">${fmt(info.context)} / ${fmt(info.output)}</span>` : '';
-        parts.push(`<div class="popover-item${active}" data-model="${esc(m.id)}" data-provider="${esc(m._provider)}"><span class="popover-mname">${esc(m.name)}${esc(modelCapBadges(m))}</span>${caps}<span class="check">✓</span></div>`);
+        parts.push(`<div class="popover-item${active}" role="option" aria-selected="${active ? 'true' : 'false'}" data-model="${esc(m.id)}" data-provider="${esc(m._provider)}"><span class="popover-mname">${esc(m.name)}${esc(modelCapBadges(m))}</span>${caps}<span class="check">✓</span></div>`);
       }
     });
     els.popoverList.innerHTML = parts.join('');
+    // Highlight the top result so Enter picks the obvious choice immediately.
+    const first = els.popoverList.querySelector('.popover-item');
+    if (first) first.classList.add('kbd-active');
   }
 
   // Fetch every provider that has a key in apiKeys. Custom providers
@@ -6460,6 +6467,35 @@
     els.popoverList.addEventListener('click', async (e) => {
       const item = e.target.closest('.popover-item');
       if (!item?.dataset.model) return;
+      await pickPopoverModel(item);
+    });
+
+    // Keyboard navigation. Typing filters the list, so requiring the mouse to
+    // choose a result defeated the purpose — especially with ~450 models.
+    els.popoverSearch.addEventListener('keydown', async (e) => {
+      const items = [...els.popoverList.querySelectorAll('.popover-item')];
+      if (!items.length) return;
+      const cursorAt = () => items.findIndex(el => el.classList.contains('kbd-active'));
+      const moveTo = (to) => {
+        const next = Math.max(0, Math.min(items.length - 1, to));
+        items.forEach(el => el.classList.remove('kbd-active'));
+        items[next].classList.add('kbd-active');
+        items[next].scrollIntoView?.({ block: 'nearest' });
+      };
+      const c = cursorAt();
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveTo(c === -1 ? 0 : c + 1); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); moveTo(c === -1 ? items.length - 1 : c - 1); return; }
+      if (e.key === 'Home')      { e.preventDefault(); moveTo(0); return; }
+      if (e.key === 'End')       { e.preventDefault(); moveTo(items.length - 1); return; }
+      if (e.key === 'Enter') {
+        if (c === -1) return;           // nothing highlighted: no surprise selection
+        e.preventDefault();
+        await pickPopoverModel(items[c]);
+      }
+    });
+
+    async function pickPopoverModel(item) {
+      if (!item?.dataset.model) return;
       const patch = { model: item.dataset.model };
       // The header picker shows cross-provider models — if the user
       // picked a model that belongs to a different provider, auto-switch
@@ -6478,7 +6514,7 @@
       updateModelLine();
       updateMaxTokensHint();
       closeModelPopover();
-    });
+    }
 
     els.sessionsBtn.addEventListener('click', toggleSessionsPopover);
     let searchDebounce;
@@ -6488,6 +6524,32 @@
       const q = els.sessionsSearch.value.trim();
       searchDebounce = setTimeout(() => deepSearchSessions(q), 250);
     });
+    // Keyboard navigation for the session list, matching the model picker.
+    // Enter is dispatched as a plain row click so it takes exactly the same
+    // path as the mouse (including the nested fork/rename/delete buttons being
+    // skipped, because the event target is the row itself).
+    els.sessionsSearch.addEventListener('keydown', (e) => {
+      const items = [...els.sessionsList.querySelectorAll('.sess-item')];
+      if (!items.length) return;
+      const cursorAt = () => items.findIndex(el => el.classList.contains('kbd-active'));
+      const moveTo = (to) => {
+        const next = Math.max(0, Math.min(items.length - 1, to));
+        items.forEach(el => el.classList.remove('kbd-active'));
+        items[next].classList.add('kbd-active');
+        items[next].scrollIntoView?.({ block: 'nearest' });
+      };
+      const c = cursorAt();
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveTo(c === -1 ? 0 : c + 1); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); moveTo(c === -1 ? items.length - 1 : c - 1); return; }
+      if (e.key === 'Home')      { e.preventDefault(); moveTo(0); return; }
+      if (e.key === 'End')       { e.preventDefault(); moveTo(items.length - 1); return; }
+      if (e.key === 'Enter') {
+        if (c === -1) return;
+        e.preventDefault();
+        items[c].click();
+      }
+    });
+
     els.sessionsList.addEventListener('click', async (e) => {
       const act = e.target.closest('.sess-act');
       const item = e.target.closest('.sess-item');

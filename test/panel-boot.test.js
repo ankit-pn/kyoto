@@ -770,3 +770,112 @@ test('typing in a text field marks the drawer dirty', async () => {
   await settle(30);
   assert.equal(save.classList.contains('dirty'), true);
 });
+
+// ══════════════════════════════════════════════════════
+// Model picker keyboard navigation
+// ══════════════════════════════════════════════════════
+// The picker had a search box but no keyboard selection: you could filter a
+// 450-model list and then still had to reach for the mouse.
+
+function seedPopoverItems(p, doc) {
+  const list = doc.getElementById('popoverList');
+  list.innerHTML = `
+    <div class="popover-item" role="option" data-model="m-one" data-provider="openrouter">one</div>
+    <div class="popover-item" role="option" data-model="m-two" data-provider="openrouter">two</div>
+    <div class="popover-item" role="option" data-model="m-three" data-provider="openrouter">three</div>`;
+  return list;
+}
+const kbd = (p, el, key) => el.dispatchEvent(
+  new p.window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+
+test('the model picker focuses its search and exposes listbox semantics', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('modelBtn').click();
+  await settle(60);
+
+  assert.equal(doc.getElementById('popoverList').getAttribute('role'), 'listbox');
+  assert.equal(doc.activeElement, doc.getElementById('popoverSearch'),
+    'opening the picker should put the caret in the filter');
+});
+
+test('arrow keys move a keyboard cursor through the model list', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('modelBtn').click();
+  await settle(60);
+  const list = seedPopoverItems(p, doc);
+  const search = doc.getElementById('popoverSearch');
+  const cursor = () => list.querySelector('.kbd-active')?.textContent;
+
+  kbd(p, search, 'ArrowDown');
+  assert.equal(cursor(), 'one', 'first ArrowDown highlights the first result');
+  kbd(p, search, 'ArrowDown');
+  assert.equal(cursor(), 'two');
+  kbd(p, search, 'ArrowUp');
+  assert.equal(cursor(), 'one');
+  kbd(p, search, 'End');
+  assert.equal(cursor(), 'three', 'End jumps to the last result');
+  kbd(p, search, 'Home');
+  assert.equal(cursor(), 'one', 'Home jumps back to the first');
+});
+
+test('Enter selects the highlighted model and closes the picker', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('modelBtn').click();
+  await settle(60);
+  const list = seedPopoverItems(p, doc);
+  const search = doc.getElementById('popoverSearch');
+
+  kbd(p, search, 'ArrowDown');
+  kbd(p, search, 'ArrowDown');   // -> second item
+  kbd(p, search, 'Enter');
+  await settle(150);
+
+  const writes = p.chrome.__calls
+    .filter(c => c.ns === 'storage' && c.method === 'set' && c.args[0] && 'model' in c.args[0])
+    .map(c => c.args[0].model);
+  assert.equal(writes[writes.length - 1], 'm-two', 'Enter must select the highlighted model');
+  assert.ok(doc.getElementById('modelPopover').classList.contains('hidden'), 'picking closes the picker');
+});
+
+test('Enter with no highlight does not select anything', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('modelBtn').click();
+  await settle(60);
+  const list = seedPopoverItems(p, doc);
+  const search = doc.getElementById('popoverSearch');
+
+  kbd(p, search, 'Enter');       // no cursor moved yet, nothing highlighted
+  await settle(80);
+  const picked = p.chrome.__calls
+    .filter(c => c.ns === 'storage' && c.method === 'set' && c.args[0] && 'model' in c.args[0]);
+  assert.equal(picked.length, 0, 'Enter without a highlighted row must be a no-op');
+  assert.ok(!list.querySelector('.kbd-active'));
+});
+
+test('the session picker is keyboard navigable too', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('sessionsBtn').click();
+  await settle(80);
+
+  const list = doc.getElementById('sessionsList');
+  const search = doc.getElementById('sessionsSearch');
+  assert.equal(doc.activeElement, search, 'the session filter should take focus');
+
+  // Provide two rows so cursor movement is observable.
+  list.innerHTML = `
+    <div class="sess-item" data-id="s1"><span class="sess-title">one</span></div>
+    <div class="sess-item" data-id="s2"><span class="sess-title">two</span></div>`;
+  const cursor = () => list.querySelector('.kbd-active')?.dataset.id;
+
+  kbd(p, search, 'ArrowDown');
+  assert.equal(cursor(), 's1');
+  kbd(p, search, 'ArrowDown');
+  assert.equal(cursor(), 's2');
+  kbd(p, search, 'ArrowUp');
+  assert.equal(cursor(), 's1');
+});

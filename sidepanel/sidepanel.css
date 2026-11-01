@@ -1608,3 +1608,17 @@ body {
   background: var(--warn, #d29922);
   box-shadow: 0 0 0 2px var(--bg);
 }
+
+/* Keyboard cursor in the model picker (distinct from the ✓ selected item). */
+.popover-item.kbd-active {
+  background: var(--hover-strong);
+  border-radius: 4px;
+}
+.popover-item .check { opacity: 0; }
+.popover-item.active .check { opacity: 1; color: var(--accent); }
+
+/* Keyboard cursor in the session list. */
+.sess-item.kbd-active {
+  background: var(--hover-strong);
+  border-radius: 4px;
+}
