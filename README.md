@@ -11,6 +11,7 @@ Bring your own key for any OpenAI-compatible provider (OpenRouter, OpenCode Go, 
 ## Highlights
 
 - **Native Chrome side panel.** Toolbar icon or `Ctrl/Cmd+Shift+L`. Also opens inside DevTools (F12 → Kyoto tab) and as a pop-out window.
+- **Address-bar entry.** Type `ky <prompt>` in the omnibox from any tab — no panel round-trip. `ky summarize: …` / `ky explain: …` expand into page prompts.
 - **Any OpenAI-compatible provider, multiple at once.** Four first-class (OpenRouter / OpenCode Go / DeepSeek / MiniMax) plus an unlimited "custom" slot for Ollama, LM Studio, Groq, Together, Cerebras, Gemini-OAI, Anthropic-via-LiteLLM, your-own-proxy, etc.
 - **Per-tab sessions.** Every tab owns its own conversation. Switching tabs swaps the visible session; in-flight streams keep running for the tabs you left.
 - **Streaming tool-call loop.** Up to 12 round-trips per turn. Captures the reasoning channel — OpenRouter's `reasoning_details` (replayed verbatim, in order, encrypted blocks included), plus `reasoning_content` / `reasoning` from DeepSeek thinking-mode and other reasoning models.
@@ -136,8 +137,24 @@ Toggle groups on/off in **Settings → Tool groups**.
 | **shell** | `shell_exec` (sync, supports `idleTimeoutMs` — kills only when output goes silent), `shell_exec_bg` + `shell_poll` / `shell_wait` / `shell_kill` / `shell_jobs` (background jobs with idle-based killing), `shell_ping` (reports `jobsSupported`) |
 | **meta** | `ask_user` (interactive chat-card prompt — agent pauses and waits for the user) |
 | **fs** | Virtual workspace (IndexedDB, GB-scale): `fs_write`, `fs_append`, `fs_read` (offset/limit chunks), `fs_list`, `fs_stat`, `fs_delete`, `fs_move`, `fs_total`, `fs_zip` (download as ZIP), `fs_clear` |
+| **platform** | Chrome platform surfaces: `tabgroup_list` / `_create` / `_add` / `_ungroup`, `session_recent` + `session_restore` (undo a closed tab/window), `power_keep_awake` (stop the machine sleeping mid-run), `page_capture_mhtml` (offline page archive), `site_data_clear` (per-origin "log me out"), `windows_inspect`, `tab_move_to_window`, `reading_list_add` + `_query`, `idle_state` |
+| **intercept** | Request interception via `declarativeNetRequest`: `net_rules_list`, `net_rule_block` (kill a request → simulate outage), `net_rule_redirect` (point an API at a localhost mock), `net_rule_stub` (replace a body), `net_rule_remove`, `net_rule_clear` (restore normal networking) |
 
 Plus any MCP-server tools (auto-namespaced `mcp__<server>__<tool>`) and custom JS tools you define.
+
+## Chrome platform reach
+
+Kyoto uses ~26 Chrome extension APIs. Beyond the tab/DOM/cookie basics, the newest additions target the friction that makes agents unreliable:
+
+- **Tab groups** (`tabGroups`) — name/colour/close the tabs a task touched, so multi-tab work stays legible.
+- **Undo closed** (`sessions`) — `session_recent` + `session_restore`: "reopen what I just closed" finally works.
+- **Keep awake** (`power`) — long runs and cron jobs won't be interrupted by the machine sleeping.
+- **Page archive** (`pageCapture`) — MHTML snapshot preserves a page offline (styles, images, inline JS), not just extracted text.
+- **Start clean** (`browsingData`) — `site_data_clear` wipes one origin's cookies/cache/storage: sign out, or test as a new user.
+- **Idle awareness** (`idle`) — heavy or scheduled work can defer while you're actually working.
+- **Request interception** (`declarativeNetRequest`) — block requests to simulate an outage, or redirect an API at a localhost mock. Rules are browser-wide and persist until removed, so broad filters require an explicit `confirmBroad`: `net_rule_clear` is the reset. Note DNR cannot set a status code; `net_rule_stub` replaces a body and says so plainly.
+
+See [CHROME-API-ROADMAP.md](CHROME-API-ROADMAP.md) for the full coverage map — what's used, what's worth adding next (`tabCapture`, `offscreen`, `identity`, `userScripts`, `contentSettings`, `processes`, `tts`) and what is deliberately skipped.
 
 ## Per-tab sessions
 

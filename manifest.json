@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Kyoto — AI browser agent for developers",
-  "version": "14.22.0",
+  "name": "Kyoto \u2014 AI browser agent for developers",
+  "version": "14.23.0",
   "description": "AI browser agent for devs. BYOK any OpenAI-compat provider (OpenRouter / OpenCode Go / DeepSeek / MiniMax / Ollama / Groq / ...). Per-tab sessions, slash commands, cross-session memory, MCP servers, ~35 dev tools.",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -20,7 +20,17 @@
     "clipboardWrite",
     "alarms",
     "debugger",
-    "nativeMessaging"
+    "nativeMessaging",
+    "tabGroups",
+    "sessions",
+    "power",
+    "pageCapture",
+    "browsingData",
+    "readingList",
+    "idle",
+    "omnibox",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess"
   ],
   "optional_permissions": [
     "clipboardRead",
@@ -46,7 +56,9 @@
   },
   "devtools_page": "devtools/devtools.html",
   "sandbox": {
-    "pages": ["sandbox/python.html"]
+    "pages": [
+      "sandbox/python.html"
+    ]
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
@@ -60,6 +72,9 @@
       },
       "description": "Open Kyoto side panel"
     }
+  },
+  "omnibox": {
+    "keyword": "ky"
   },
   "icons": {
     "16": "icons/icon16.png",

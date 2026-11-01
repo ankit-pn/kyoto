@@ -32,6 +32,67 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   setTimeout(() => { chrome.runtime.sendMessage(payload).catch(() => {}); }, 250);
 });
 
+// ── Omnibox: type "ky <prompt>" in the address bar ────────────────────
+// Reachable from anywhere without opening the panel first, which is the
+// fastest path to "ask the agent something about this page".
+//
+// The panel is opened for the current tab and the prompt is delivered over
+// runtime messaging. Delivery is retried because sidePanel.open() resolves
+// before the panel document has necessarily registered its listener — a
+// single delayed send is racy on a cold start.
+const OMNIBOX_KEYWORD = 'ky';
+
+chrome.omnibox.setDefaultSuggestion({
+  description: 'Ask Kyoto: %s'
+});
+
+chrome.omnibox.onInputChanged.addListener((text, suggest) => {
+  const t = String(text || '').trim();
+  if (!t) return;
+  suggest([
+    { content: t, description: `Ask Kyoto — <match>${t}</match>` },
+    { content: `summarize: ${t}`, description: `Summarize: <match>${t}</match>` },
+    { content: `explain: ${t}`, description: `Explain: <match>${t}</match>` }
+  ]);
+});
+
+const OMNIBOX_PREFIXES = {
+  summarize: 'Summarize the current page, focusing on: ',
+  explain: 'Explain this page in simple terms, focusing on: '
+};
+
+chrome.omnibox.onInputEntered.addListener(async (text, disposition) => {
+  const raw = String(text || '').trim();
+  if (!raw) return;
+
+  // "summarize: …" / "explain: …" shortcuts expand into a normal prompt.
+  let prompt = raw;
+  const m = raw.match(/^(summarize|explain)\s*:\s*(.*)$/i);
+  if (m) {
+    const prefix = OMNIBOX_PREFIXES[m[1].toLowerCase()];
+    prompt = prefix + (m[2] || 'the page as a whole');
+  }
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id != null) {
+      try { await chrome.sidePanel.open({ tabId: tab.id }); } catch { /* already open */ }
+    }
+    // Retry: on a cold open the panel's listener may not exist yet. A few
+    // spaced attempts covers that without depending on a fixed sleep.
+    const payload = { type: 'ASK_PROMPT', text: prompt, fromOmnibox: true };
+    for (const delay of [0, 200, 600, 1200]) {
+      if (delay) await new Promise(r => setTimeout(r, delay));
+      try {
+        const res = await chrome.runtime.sendMessage(payload);
+        if (res?.delivered !== false) return;
+      } catch { /* panel not listening yet — retry */ }
+    }
+  } catch (e) {
+    console.warn('[Kyoto] omnibox dispatch failed:', e?.message || e);
+  }
+});
+
 // ── Network capture (webRequest, observe-only in MV3) ──
 const RING_MAX = 500;
 const capture = {

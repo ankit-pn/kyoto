@@ -2795,7 +2795,7 @@
     temperature: 0.7,
     maxTokens: 8192,
     toolsEnabled: true,
-    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta', 'skill', 'cron'],
+    enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta', 'skill', 'cron', 'platform', 'intercept', 'debugger'],
     mcpServers: [],
     redactSensitive: true,
     auditEnabled: true,
@@ -4938,7 +4938,7 @@
       systemParts.push(
         'You are Kyoto, an AI browser agent embedded in a Chrome side panel. ' +
         'You have tool access to: open/navigate tabs, run JS in pages, read DOM, inspect & modify cookies (including export for session cloning), ' +
-        'observe network requests, intercept fetch/XHR bodies, attach the Chrome DevTools Protocol (after the user grants the optional `debugger` permission), ' +
+        'observe network requests, intercept fetch/XHR bodies, attach the Chrome DevTools Protocol (the `debugger` permission ships granted, so enable the Debugger tool group in Settings to use it), ' +
         'search history/bookmarks/downloads, and call out to any configured MCP servers. ' +
         'Each session is bound to a tab; tab switches by the user do not interrupt your work in this session. ' +
         'Prefer reading before writing. When the user asks for "session cloning" or "auth cookies", use `cookies_analyze` + `cookies_export`. ' +
@@ -6512,7 +6512,27 @@
       }
     });
 
-    chrome.runtime.onMessage.addListener((msg) => {
+    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      if (msg?.type === 'ASK_PROMPT' && msg.text) {
+        // Address-bar entry point: "ky <prompt>" in the omnibox.
+        const text = String(msg.text).trim();
+        if (!text) { sendResponse({ delivered: false }); return; }
+        const session = state.activeSession;
+        const rt = session ? state.runtimes[session.id] : null;
+        if (rt?.busy) {
+          // Never interrupt a running turn from the address bar — stage the
+          // prompt in the composer so the user decides when to send it.
+          els.input.value = text;
+          els.input.focus();
+          if (session && isActive(session.id)) {
+            addMessage('assistant', '_A turn is already running — your address-bar prompt is staged in the composer._');
+          }
+        } else {
+          sendMessage(text);
+        }
+        sendResponse({ delivered: true });
+        return;
+      }
       if (msg?.type === 'ASK_SELECTION' && msg.text) {
         const q = `Regarding this selection:\n\n> ${msg.text.split('\n').join('\n> ')}\n\nWhat does this mean / explain it?`;
         sendMessage(q);
