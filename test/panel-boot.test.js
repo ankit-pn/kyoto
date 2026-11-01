@@ -2456,3 +2456,42 @@ test('the shell-install disclosure is a button that reports its state', async ()
   await settle(30);
   assert.equal(btn.getAttribute('aria-expanded'), 'false', 'closing must be announced too');
 });
+
+test('opening the skills manager with no hub opens the drawer and explains', async () => {
+  // It used to open nothing: a chat message went into the transcript (which the
+  // user may not be looking at) and the drawer stayed shut, so the button
+  // appeared dead. Worse, the drawer kept its static "Loading…" placeholder.
+  const p = await bootPanel();
+  const doc = p.window.document;
+  await settle(300);
+
+  doc.getElementById('skillsManageBtn').click();
+  await settle(500);
+
+  const drawer = doc.getElementById('skillsDrawer');
+  assert.ok(!drawer.classList.contains('hidden'), 'the drawer must open so the click has a visible effect');
+  assert.equal(doc.getElementById('skillsSummary').textContent, 'not configured');
+
+  const list = doc.getElementById('skillsList').textContent;
+  assert.match(list, /not configured/i, 'and say why it is empty');
+  assert.match(list, /Settings/i, 'with a pointer to where to fix it');
+  assert.ok(!/Loading…/.test(list), 'never leave a stale loading placeholder');
+});
+
+test('the skills drawer can be opened repeatedly without getting stuck', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  await settle(300);
+  const open = () => doc.getElementById('skillsManageBtn').click();
+
+  open();
+  await settle(200);
+  doc.getElementById('closeSkillsDrawerBtn').click();
+  await settle(120);
+  assert.ok(doc.getElementById('skillsDrawer').classList.contains('hidden'), 'closing works');
+
+  open();
+  await settle(200);
+  assert.ok(!doc.getElementById('skillsDrawer').classList.contains('hidden'), 'reopening works too');
+  assert.match(doc.getElementById('skillsList').textContent, /not configured/i);
+});

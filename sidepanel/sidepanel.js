@@ -6055,15 +6055,21 @@
   async function openSkillsManager() {
     if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not loaded._', { error: true }); return; }
     const cfg = await window.KyotoSkillHub.config();
-    if (!cfg.url || !cfg.key) {
-      addMessage('assistant', '_Skills hub not configured. Open Settings → Skills hub to paste your URL + API key._', { error: true });
-      return;
-    }
     dismissComposerOverlays();
     els.skillsDrawer.classList.remove('hidden');
     els.skillsOverlay.classList.remove('hidden');
     els.skillsFilterInput.value = '';
     _skillsManager.filter = '';
+    if (!cfg.url || !cfg.key) {
+      // Clicking "Manage skills" used to do nothing visible: it appended a chat
+      // message to a transcript the user may not be looking at and left the
+      // drawer shut. Open the drawer and explain the fix where the fix lives.
+      els.skillsSummary.textContent = 'not configured';
+      els.skillsList.innerHTML =
+        '<p class="hint">The skills hub is not configured yet, so there are no skills to manage.</p>' +
+        '<p class="hint">Set the hub URL and API key in <strong>Settings → Skills hub</strong>.</p>';
+      return;
+    }
     await refreshSkillsManager();
   }
 
