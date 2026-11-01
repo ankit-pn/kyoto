@@ -2034,3 +2034,63 @@ test('a tab closing mid-session is explained instead of leaking an id', async ()
   assert.ok(doc.getElementById('ctxTxt').title.length > 20, 'the tooltip should say what to do next');
   assert.equal(chrome.__store.get('kyoto_session_s_x')?.tabId, null, 'the dead binding is cleared');
 });
+
+// ══════════════════════════════════════════════════════
+// Failing background jobs are surfaced
+// ══════════════════════════════════════════════════════
+// Job failures were only visible inside Settings → Background jobs, a section
+// that is collapsed by default. A job that had been failing — or that auto-paused
+// after repeated failures — was invisible to anyone who did not go looking. Jobs
+// run unattended, so silence is the worst possible feedback.
+
+async function bootWithCronStatus(cronStatusResult) {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  const realSend = chrome.runtime.sendMessage;
+  chrome.runtime.sendMessage = async (msg) => {
+    if (msg && msg.type === 'CRON_STATUS') return cronStatusResult;
+    return realSend.call(chrome.runtime, msg);
+  };
+  const p = await bootPanel({ chrome });
+  await settle(300);
+  return { p, doc: p.window.document, chrome };
+}
+
+test('a paused background job is announced at start-up', async () => {
+  const { doc } = await bootWithCronStatus({
+    ok: true,
+    data: { jobs: [
+      { id: 'j1', name: 'price watcher', consecutiveFailures: 0, paused: false },
+      { id: 'j2', name: 'auth refresher', consecutiveFailures: 5, paused: true }
+    ], stateKeys: 0 }
+  });
+
+  const text = doc.getElementById('chat').textContent;
+  assert.match(text, /background job/i, 'a failing job must be mentioned');
+  assert.match(text, /auth refresher/, 'and named, so the user knows which one');
+  assert.match(text, /Settings/i, 'with a pointer to where to fix it');
+  assert.ok(!/price watcher/.test(text.split('⚠').pop() || ''), 'healthy jobs should not be listed');
+});
+
+test('failing-but-not-yet-paused jobs are announced too', async () => {
+  const { doc } = await bootWithCronStatus({
+    ok: true,
+    data: { jobs: [{ id: 'j3', name: 'backup', consecutiveFailures: 2, paused: false }], stateKeys: 0 }
+  });
+  assert.match(doc.getElementById('chat').textContent, /failing/i);
+});
+
+test('healthy jobs produce no notice', async () => {
+  const { doc } = await bootWithCronStatus({
+    ok: true,
+    data: { jobs: [{ id: 'j1', name: 'fine', consecutiveFailures: 0, paused: false }], stateKeys: 0 }
+  });
+  assert.ok(!/⚠/.test(doc.getElementById('chat').textContent), 'no false alarm when everything works');
+});
+
+test('an unresponsive background does not raise a job alarm', async () => {
+  // The service worker may simply be asleep; that is not "your jobs are broken".
+  const { p, doc } = await bootWithCronStatus(undefined);
+  assert.ok(!/background job/i.test(doc.getElementById('chat').textContent));
+  assert.deepEqual(p.errors.filter(e => /^uncaught|unhandled/i.test(e)), [], 'and it must not throw');
+});

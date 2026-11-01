@@ -3453,6 +3453,41 @@
   }
 
   // ── Switch / render whole session ────────────────────
+  // ── Background-job health ────────────────────────────
+  // Failing jobs were only visible inside the Settings drawer, in the Background
+  // jobs section — which is collapsed by default. A job that has been failing, or
+  // that auto-paused itself after repeated failures, was therefore invisible to a
+  // user who never opened that section. Jobs are supposed to run unattended, so
+  // silence is the worst possible feedback.
+  let _cronHealthReported = false;
+
+  async function surfaceCronHealth() {
+    if (_cronHealthReported) return;
+    if (!window.KyotoTools?.call) return;
+    let status;
+    try {
+      status = await window.KyotoTools.call('cron_status', {});
+    } catch {
+      return;   // background worker asleep/unavailable: not worth alarming about
+    }
+    const jobs = Array.isArray(status?.jobs) ? status.jobs : [];
+    if (!jobs.length) return;
+    const failing = jobs.filter(j => (j.consecutiveFailures || 0) > 0 || j.paused);
+    if (!failing.length) return;
+
+    _cronHealthReported = true;
+    const paused = failing.filter(j => j.paused);
+    const names = failing.slice(0, 3).map(j => `${j.name || j.slug || j.id}`).join(', ');
+    const more = failing.length > 3 ? ` and ${failing.length - 3} more` : '';
+    const what = paused.length
+      ? `${paused.length} background job${paused.length === 1 ? ' is' : 's are'} paused after repeated failures`
+      : `${failing.length} background job${failing.length === 1 ? ' is' : 's are'} failing`;
+    addMessage('assistant',
+      `⚠ **${what}** — ${names}${more}.\n\n` +
+      `_Open Settings → Background jobs to see the error and re-enable. Jobs run unattended, so nothing else will tell you._`);
+    announce(`${failing.length} background job${failing.length === 1 ? '' : 's'} need attention.`);
+  }
+
   // ── Per-conversation drafts ──────────────────────────
   // The composer is a single shared textarea, and switching sessions never
   // touched it: a half-written message for one conversation silently followed
@@ -8542,6 +8577,9 @@
     // picker can show them all without waiting for the user to flip
     // providers in Settings first.
     fetchAllProviderModels({ background: true }).catch(() => {});
+
+    // After the transcript render, so the notice is not wiped by it.
+    surfaceCronHealth().catch(() => {});
 
     els.input.focus();
   })().catch((err) => {
