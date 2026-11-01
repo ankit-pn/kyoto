@@ -1787,6 +1787,15 @@ kbd {
   border-radius: 8px;
 }
 .persist-warn .pw-text { flex: 1; min-width: 0; }
+.persist-warn .pw-dismiss:hover {
+  /* Every other control reacts to hover; this one did not, so the dismiss "x" on
+     a storage warning — a control you reach for when something is wrong — gave no
+     feedback that it was interactive at all. */
+  color: var(--text);
+  background: var(--hover);
+  border-radius: 4px;
+}
+
 .persist-warn .pw-dismiss {
   flex-shrink: 0;
   background: none;

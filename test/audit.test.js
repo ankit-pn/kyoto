@@ -914,3 +914,34 @@ test('every element truncated by CSS exposes its full text', () => {
   assert.deepEqual(unreadable, [],
     `these truncate text but never expose the full value (add a title):\n${unreadable.join('\n')}`);
 });
+
+// ── Interactive feedback ──────────────────────────────
+// A control that does not react to hover reads as static text. Checked across ALL
+// classes an element carries, because several controls are styled by a second
+// class (.capture-btn is also .ibtn; .install-copy is also .btn-mini).
+
+test('every interactive control has hover feedback', () => {
+  const css = read('sidepanel/sidepanel.css');
+  const html = read('sidepanel/sidepanel.html');
+  const hovered = new Set([...css.matchAll(/\.([A-Za-z0-9_-]+):hover/g)].map(m => m[1]));
+
+  const missing = [];
+  for (const m of html.matchAll(/<(?:button|a)\b[^>]*class="([^"]+)"/g)) {
+    const classes = m[1].split(/\s+/).filter(c => c && c !== 'hidden');
+    if (!classes.length) continue;
+    // Covered if ANY class on the element has a hover rule.
+    if (classes.some(c => hovered.has(c))) continue;
+    missing.push(classes.join('.'));
+  }
+  assert.deepEqual([...new Set(missing)], [],
+    `these controls give no hover feedback: ${[...new Set(missing)].join(', ')}`);
+});
+
+test('controls that signal state keep their active-state styling', () => {
+  // Hover must not be the only feedback: pressed/selected states need their own
+  // treatment so the state is visible without hovering.
+  const css = read('sidepanel/sidepanel.css');
+  for (const cls of ['recording', 'listening', 'active', 'copied']) {
+    assert.ok(new RegExp(`\\.${cls}\\b`).test(css), `expected a .${cls} state rule`);
+  }
+});
