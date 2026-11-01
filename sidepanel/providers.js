@@ -189,6 +189,12 @@
     const effort = orEffectiveEffort(settings);
     if (effort) extras.reasoning = { effort };
 
+    // Sticky routing / prompt-cache hint. OpenRouter pins a conversation to the
+    // same upstream provider when the request carries a stable session id,
+    // which is what makes provider-side prompt caching actually hit across
+    // turns (and keeps tool-calling behaviour consistent mid-conversation).
+    if (ctx.sessionId) extras.session_id = String(ctx.sessionId).slice(0, 256);
+
     return extras;
   }
 

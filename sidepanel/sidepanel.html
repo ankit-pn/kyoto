@@ -288,6 +288,32 @@
       </div>
       <p class="hint">Max steps = how many tool-call rounds the agent can do in a single send (default 50; opencode uses ~50). Auto-continues = how many times Kyoto will silently say "continue" when the model hits its output-token cap mid-thought.</p>
 
+      <h3 class="drawer-section">Context &amp; spend</h3>
+      <div class="field">
+        <label class="check-row">
+          <input type="checkbox" id="autoCompact" checked />
+          <span>Auto-compact long conversations</span>
+        </label>
+        <p class="hint">When the transcript approaches the model's context window, Kyoto folds the older turns into one recap and keeps recent turns verbatim (pinned messages always survive). Without this, a long session eventually fails every request with a context-length error. Use <code>/compact</code> to force it, <code>/cost</code> to see usage.</p>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Keep recent turns</label>
+          <input type="number" id="compactKeepTurns" min="2" max="30" step="1" value="6" />
+        </div>
+        <div class="field">
+          <label>Spend cap per session (USD)</label>
+          <input type="number" id="budgetUsd" min="0" max="1000" step="0.05" value="0" />
+        </div>
+      </div>
+      <p class="hint">Spend cap <code>0</code> = no cap. Costs are taken from the provider's own <code>usage.cost</code> when it reports one, so <code>/cost</code> reflects what you were actually billed. The agent stops cleanly at the cap instead of running away.</p>
+
+      <div class="field">
+        <label>Fallback models (one per line, <code>provider:model</code>)</label>
+        <textarea id="fallbackChain" rows="3" placeholder="openrouter:openai/gpt-4o-mini&#10;opencode-go:glm-5.3"></textarea>
+        <p class="hint">Tried in order when the primary model fails <em>transiently</em> — rate limits, provider overload, upstream disconnects, context overflow. Bad keys and exhausted credits are surfaced immediately instead of being retried on another model. Example: <code>openrouter:anthropic/claude-3.5-haiku</code></p>
+      </div>
+
       <div class="field">
         <label>Tool groups</label>
         <div id="toolGroups" class="grp-list"></div>
@@ -532,6 +558,7 @@
   <script src="vfs.js"></script>
   <script src="models-registry.js"></script>
   <script src="providers.js"></script>
+  <script src="context.js"></script>
   <script src="tools/core.js"></script>
   <script src="tools/workspace.js"></script>
   <script src="tools/browser.js"></script>

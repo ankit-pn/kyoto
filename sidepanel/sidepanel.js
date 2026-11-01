@@ -8,8 +8,12 @@
   // config object can carry, and keeping them in a pure module makes that
   // logic unit-testable outside Chrome. See test/providers.test.js.
   const KP = window.KyotoProviders || {};
+  const KC = window.KyotoContext || {};
   if (!KP.openrouter || !KP.opencodeGo) {
     console.error('[Kyoto] sidepanel/providers.js failed to load — OpenRouter and OpenCode Go are unavailable.');
+  }
+  if (!KC.planCompaction) {
+    console.error('[Kyoto] sidepanel/context.js failed to load — long sessions cannot auto-compact.');
   }
 
   const PROVIDERS = {
@@ -171,6 +175,11 @@
     toolsEnabled: $('toolsEnabled'),
     maxAgentSteps: $('maxAgentSteps'),
     maxAutoContinues: $('maxAutoContinues'),
+    // Context + spend controls
+    autoCompact: $('autoCompact'),
+    compactKeepTurns: $('compactKeepTurns'),
+    budgetUsd: $('budgetUsd'),
+    fallbackChain: $('fallbackChain'),
     toolGroups: $('toolGroups'),
     redactSensitive: $('redactSensitive'),
     auditEnabled: $('auditEnabled'),
@@ -1600,6 +1609,8 @@
   const BUILTIN_SLASH = {
     '/help':       '[CMD]:help',
     '/clear':      '[CMD]:clear',
+    '/compact':    '[CMD]:compact',
+    '/cost':       '[CMD]:cost',
     '/pin':        '[CMD]:pin_last_assistant',
     '/sessions':   '[CMD]:open_sessions',
     '/settings':   '[CMD]:open_settings',
@@ -2408,6 +2419,46 @@
       clearChat();
       return;
     }
+    if (action === 'cost') {
+      const s = state.activeSession;
+      const lines = [];
+      if (s) {
+        let tin = 0, tout = 0, turns = 0, costed = 0;
+        for (const m of (s.history || [])) {
+          if (!m._usage) continue;
+          tin += m._usage.prompt_tokens || 0;
+          tout += m._usage.completion_tokens || 0;
+          turns++;
+          if (m._cost != null) costed += m._cost;
+        }
+        lines.push(
+          `**This session** — ${fmtUsd(sessionSpend(s))}\n` +
+          `${fmtTok(tin)}↧ in / ${fmtTok(tout)}↥ out across ${turns} model turn${turns === 1 ? '' : 's'}` +
+          (costed && Math.abs(costed - sessionSpend(s)) > 1e-9 ? ` (providers reported ${fmtUsd(costed)})` : '')
+        );
+        if (s._compactions) lines.push(`Context compactions so far: ${s._compactions}`);
+      } else {
+        lines.push('_No active session._');
+      }
+      lines.push(`**All time** — ${fmtUsd(state.spendTotal || 0)} (tracked across sessions)`);
+      const cap = Number(state.settings.budgetUsd) || 0;
+      lines.push(cap > 0
+        ? `Cap: ${fmtUsd(cap)} per session — ${Math.max(0, cap - sessionSpend(state.activeSession)).toFixed(4)} USD left.`
+        : `No spend cap set — add one in Settings → Spend cap.`);
+      addMessage('assistant', lines.join('\n\n'));
+      return;
+    }
+    if (action === 'compact') {
+      const s = state.activeSession;
+      if (!s) return;
+      const ok = await maybeCompact(s, { force: true });
+      if (!ok) {
+        addMessage('assistant',
+          '_Nothing to compact: the transcript is already small, or it has too few complete turns to cut safely. ' +
+          'A compaction needs at least a few earlier user turns to fold into a summary._');
+      }
+      return;
+    }
     if (action === 'pin_last_assistant') {
       if (!state.activeSession) return;
       const hist = state.activeSession.history;
@@ -2737,6 +2788,23 @@
     // as config. Too low and complex multi-tool tasks die half-way.
     maxAgentSteps: 50,
     maxAutoContinues: 2,
+    // ── Context management ──
+    // An agent session grows monotonically and tool results are bulky, so a
+    // long session eventually exceeds the model's window and every request
+    // 400s. Compaction folds the older half of the transcript into a summary
+    // and keeps recent turns verbatim.
+    autoCompact: true,
+    compactThreshold: 0.75,   // compact once the estimate passes 75% of the window
+    compactKeepTurns: 6,      // recent user turns kept verbatim
+    // ── Spend guard ──
+    // Optional per-session cap in USD (0 = no cap). Costs come from the
+    // provider's own usage.cost where available.
+    budgetUsd: 0,
+    // Fallback chain: [{provider, model}] tried in order when the primary
+    // model fails with a transient error (rate limit, overload, disconnect,
+    // context overflow). Auth/quota failures are never retried on another
+    // model — they would fail the same way and would hide the real problem.
+    fallbackChain: [],
     // Per-tool-call wall-clock timeout (ms). If a single tool call
     // takes longer than this, it gets cut loose with an error result
     // so the chat turn can complete instead of wedging forever.
@@ -2876,6 +2944,136 @@
   }
   function keyFor(provider) { return state.settings.apiKeys?.[provider] || ''; }
   function currentApiKey() { return keyFor(state.settings.provider); }
+
+  // ── Spend tracking ───────────────────────────────────
+  // Per-session spend lives on the session (`_spend`, underscore-prefixed so it
+  // is never serialised onto the wire); the all-time total lives in local
+  // storage so it survives session deletion.
+  const SPEND_TOTAL_KEY = 'kyoto_spend_total';
+  function sessionSpend(session) { return Number(session?._spend || 0) || 0; }
+  async function loadSpendTotal() {
+    try {
+      const got = await chrome.storage.local.get(SPEND_TOTAL_KEY);
+      state.spendTotal = Number(got?.[SPEND_TOTAL_KEY]?.usd || 0) || 0;
+    } catch { state.spendTotal = 0; }
+  }
+  async function recordSpend(session, costUsd) {
+    if (!(costUsd > 0)) return;
+    session._spend = +(sessionSpend(session) + costUsd).toFixed(6);
+    try {
+      const total = +(Number(state.spendTotal || 0) + costUsd).toFixed(6);
+      state.spendTotal = total;
+      await chrome.storage.local.set({ [SPEND_TOTAL_KEY]: { usd: total, updatedAt: Date.now() } });
+    } catch { /* non-fatal: the cap still works off the session figure */ }
+  }
+  function fmtUsd(n) { return window.KyotoModels?.formatUsd?.(n) || `$${Number(n || 0).toFixed(4)}`; }
+  function fmtTok(n) { return window.KyotoModels?.formatN?.(n) || String(n || 0); }
+
+  // ── Model fallback ───────────────────────────────────
+  // Parse the Settings textarea: one candidate per line, `provider:model`.
+  // Provider ids can contain '-', model ids contain '/', so the FIRST colon is
+  // the separator.
+  // Parsing lives in context.js so the `provider:model` grammar is unit-tested.
+  function parseFallbackChain(lines) {
+    return KC.parseFallbackChain ? KC.parseFallbackChain(lines) : [];
+  }
+
+  // Candidates to try after the primary provider/model, in order. Entries that
+  // point at a provider with no key configured are dropped: trying them would
+  // just fail again with a confusing error.
+  function fallbackCandidates() {
+    const chain = parseFallbackChain(state.settings.fallbackChain || []);
+    return chain.filter(c => {
+      const cfg = getProviderConfig(c.provider);
+      if (!cfg) return false;
+      const hasOpenaiOauth = c.provider === 'openai' && !!state.openaiOauth?.accessToken;
+      return !!cfg.isCustom || !!keyFor(c.provider) || hasOpenaiOauth || !!cfg.publicModels;
+    });
+  }
+
+  // Run one streamed turn, falling back down the configured chain when the
+  // failure is transient (rate limit, overload, upstream disconnect, context
+  // overflow). Auth/quota errors are NOT retried: another model would just fail
+  // the same way, and hiding a bad key behind a chain is worse than surfacing it.
+  async function streamWithFallback(session, signal) {
+    const primary = { provider: state.settings.provider, model: state.settings.model };
+    const chain = [{ ...primary }, ...fallbackCandidates()];
+    let lastErr = null;
+    for (let i = 0; i < chain.length; i++) {
+      const cand = chain[i];
+      try {
+        const res = await streamOnce(session, signal, cand);
+        if (i > 0) {
+          res.fellBackFrom = primary;
+          res.fellBackTo = cand;
+        }
+        return res;
+      } catch (e) {
+        lastErr = e;
+        if (e?.name === 'AbortError') throw e;
+        // Never switch models after partial output: the user would see the
+        // reply stitched together from two different models.
+        if (e?._emitted) throw e;
+        if (i === chain.length - 1) throw e;
+        if (!(KC.isRetryableError ? KC.isRetryableError(e?.message) : false)) throw e;
+        console.warn(`[Kyoto] ${cand.provider}/${cand.model} failed (${e?.message}); trying fallback…`);
+      }
+    }
+    throw lastErr;
+  }
+
+  // ── Context compaction ───────────────────────────────
+  // Summarise everything before a safe cut point into one recap turn. The cut
+  // is chosen by context.js so a `tool_calls` group is never split (that
+  // transcript shape is rejected by every OpenAI-compatible server).
+  async function maybeCompact(session, { force = false, quiet = false } = {}) {
+    if (!session || session._subagent) return false;   // subagents are short-lived by design
+    if (!force && !state.settings.autoCompact) return false;
+    if (!KC.planCompaction) return false;
+    if (session._compacting) return false;
+
+    const provider = state.settings.provider;
+    const model = state.settings.model;
+    const ctxLen = window.KyotoModels?.contextLength(provider, model) || 128000;
+    const plan = KC.planCompaction(session.history, {
+      contextTokens: ctxLen,
+      threshold: Number(state.settings.compactThreshold) || 0.75,
+      keepTurns: Math.max(2, Number(state.settings.compactKeepTurns) || 6),
+      force
+    });
+    if (!plan) return false;
+
+    session._compacting = true;
+    try {
+      if (!quiet && isActive(session.id)) {
+        addMessage('assistant', `_Compacting ${plan.droppedCount} earlier messages (${fmtTok(plan.tokensBefore)} tokens) to stay inside the ${fmtTok(ctxLen)}-token window…_`);
+      }
+      let summary = '';
+      try {
+        summary = await oneShotCompletion(KC.summarisePrompt(session.history, plan), {
+          maxTokens: 900, temperature: 0.2
+        });
+      } catch (e) {
+        console.warn('[Kyoto] compaction summary failed, using fallback:', e?.message);
+      }
+      // A short/empty summary means the model call went sideways; the
+      // deterministic fallback still preserves the user's intent and the tools
+      // that ran, which is better than dropping context silently.
+      if (!summary || String(summary).trim().length < 40) {
+        summary = KC.fallbackSummary(session.history, plan);
+      }
+      session.history = KC.buildCompactedHistory(session.history, plan, summary);
+      session._compactions = (session._compactions || 0) + 1;
+      await persistSession(session);
+      if (!quiet && isActive(session.id)) {
+        renderSessionHistoryFresh();
+        addMessage('assistant', `_…compacted ${plan.droppedCount} messages into a summary — roughly ${fmtTok(plan.tokensBefore)} → ${fmtTok(plan.tokensAfterEstimate)} tokens. Pinned messages were kept._`);
+      }
+      return true;
+    } finally {
+      session._compacting = false;
+    }
+  }
 
   // ── Session storage ──────────────────────────────────
   const SESS_KEY = (id) => `kyoto_session_${id}`;
@@ -4022,7 +4220,39 @@
 
       stepLoop:
       for (let step = 0; step < maxSteps; step++) {
-        const { text: at, toolCalls, reasoning, reasoningField, echo, usage, finishReason } = await streamOnce(session, runtime.abort.signal);
+        // Spend guard. Checked before each model call so a runaway tool loop
+        // cannot blow past the cap the user set.
+        const cap = Number(state.settings.budgetUsd) || 0;
+        if (cap > 0 && sessionSpend(session) >= cap) {
+          const note =
+            `_Stopped: this session has spent ${fmtUsd(sessionSpend(session))}, at or over the ` +
+            `${fmtUsd(cap)} cap set in Settings → Spend cap. Raise or clear the cap to continue._`;
+          session.history.push({ role: 'assistant', content: note, _capHit: true });
+          if (isActive(session.id)) addMessage('assistant', note, { error: true });
+          await persistSession(session);
+          stoppedReason = 'budget';
+          break stepLoop;
+        }
+        // Keep the transcript inside the model's context window. This is the
+        // difference between a long session continuing and every subsequent
+        // request failing with a hard 400.
+        try {
+          await maybeCompact(session);
+        } catch (e) {
+          console.warn('[Kyoto] auto-compaction failed:', e?.message || e);
+        }
+
+        const streamRes = await streamWithFallback(session, runtime.abort.signal);
+        const { text: at, toolCalls, reasoning, reasoningField, echo, usage, finishReason } = streamRes;
+        // Tell the user once per turn when a fallback model took over — silently
+        // switching models mid-session is confusing when behaviour differs.
+        if (streamRes.fellBackTo && step === 0 && isActive(session.id)) {
+          addMessage('assistant',
+            `_${streamRes.fellBackFrom.provider}/${streamRes.fellBackFrom.model} was unavailable — ` +
+            `continuing on ${streamRes.fellBackTo.provider}/${streamRes.fellBackTo.model}._`);
+        }
+        // Cost must be attributed to whichever model actually served the turn.
+        const servedBy = streamRes.fellBackTo || { provider: state.settings.provider, model: state.settings.model };
 
         const msg = { role: 'assistant', content: at || '' };
         // Replay payload for the next request. On OpenRouter that is
@@ -4047,8 +4277,11 @@
           // miss provider-specific overrides.
           const cost = (usage.cost != null)
             ? usage.cost
-            : window.KyotoModels?.costFor(state.settings.provider, state.settings.model, usage);
-          if (cost != null) msg._cost = cost;
+            : window.KyotoModels?.costFor(servedBy.provider, servedBy.model, usage);
+          if (cost != null) {
+            msg._cost = cost;
+            await recordSpend(session, cost);
+          }
           if (isActive(session.id)) renderUsageChip(usage, msg._cost);
         }
         if (finishReason) msg._finishReason = finishReason;
@@ -4307,8 +4540,12 @@
   }
 
   // One streamed model call. Returns accumulated text + tool calls + reasoning.
-  async function streamOnce(session, signal) {
-    const { provider, model, temperature, maxTokens, toolsEnabled, enabledGroups } = state.settings;
+  async function streamOnce(session, signal, target) {
+    const { temperature, maxTokens, toolsEnabled, enabledGroups } = state.settings;
+    // `target` lets the fallback wrapper re-run this exact code against another
+    // provider/model without mutating global settings mid-turn.
+    const provider = target?.provider || state.settings.provider;
+    const model = target?.model || state.settings.model;
     const cfg = getProviderConfig(provider);
     if (!cfg) throw new Error(`Unknown provider: ${provider}`);
     const apiKey = keyFor(provider);
@@ -4323,7 +4560,7 @@
       throw new Error(`No API key configured for ${cfg.label}.${hint}`);
     }
 
-    const messages = buildMessages(session);
+    const messages = buildMessages(session, provider);
     // Subagents inherit the user's enabled groups by default, but the
     // spawn call can narrow them via _subagentEnabledGroups.
     const groupSet = session._subagent && session._subagentEnabledGroups
@@ -4382,7 +4619,10 @@
         model,
         settings: state.settings,
         hasTools: tools.length > 0,
-        hasStructuredOutput: false
+        hasStructuredOutput: false,
+        // Stable per-conversation id: OpenRouter uses it for sticky provider
+        // routing + prompt caching.
+        sessionId: session?.id
       }) || {};
       for (const [k, v] of Object.entries(extras)) {
         if (v && typeof v === 'object' && !Array.isArray(v) && body[k] && typeof body[k] === 'object') {
@@ -4522,7 +4762,11 @@
     if (streamErr) {
       const detail = streamErr.errorType ? ` [${streamErr.errorType}]` : '';
       const prov = streamErr.providerCode ? ` (provider: ${streamErr.providerCode})` : '';
-      throw new Error(`${cfg.label} stream error${detail}${prov}: ${streamErr.message}`);
+      const err = new Error(`${cfg.label} stream error${detail}${prov}: ${streamErr.message}`);
+      // Tag whether anything already reached the user: a fallback model must
+      // never be started after partial output, or the reply would be duplicated.
+      err._emitted = !!(acc.text || reasoningDisplay);
+      throw err;
     }
 
     // If the user switched away mid-stream and came back, the live DOM
@@ -4555,7 +4799,7 @@
     };
   }
 
-  function buildMessages(session) {
+  function buildMessages(session, providerOverride) {
     const systemParts = [];
     if (session._subagent) {
       // Subagent prompt — adapted from opencode's TaskPrompt
@@ -4675,7 +4919,7 @@
     // content, tool_calls, tool_call_id, name, plus the reasoning payload we
     // echo back — `reasoning_details` for OpenRouter (verbatim, in order),
     // otherwise the provider's own reasoning field.
-    const providerNow = state.settings.provider;
+    const providerNow = providerOverride || state.settings.provider;
     const cleaned = session.history.map(m => {
       const out = {};
       for (const k of Object.keys(m)) {
@@ -4702,6 +4946,13 @@
     els.toolsEnabled.checked = !!state.settings.toolsEnabled;
     if (els.maxAgentSteps) els.maxAgentSteps.value = state.settings.maxAgentSteps ?? 50;
     if (els.maxAutoContinues) els.maxAutoContinues.value = state.settings.maxAutoContinues ?? 2;
+    if (els.autoCompact) els.autoCompact.checked = state.settings.autoCompact !== false;
+    if (els.compactKeepTurns) els.compactKeepTurns.value = state.settings.compactKeepTurns ?? 6;
+    if (els.budgetUsd) els.budgetUsd.value = state.settings.budgetUsd ?? 0;
+    if (els.fallbackChain) {
+      els.fallbackChain.value = (state.settings.fallbackChain || [])
+        .map(c => `${c.provider}:${c.model}`).join('\n');
+    }
     els.redactSensitive.checked = state.settings.redactSensitive !== false;
     els.auditEnabled.checked = state.settings.auditEnabled !== false;
     if (els.auditStatus) els.auditStatus.textContent = `${(state.auditLog || []).length} entries`;
@@ -5986,6 +6237,11 @@
       const toolsEnabled = !!els.toolsEnabled.checked;
       const maxAgentSteps = Math.max(1, Math.min(200, Number(els.maxAgentSteps?.value) || 50));
       const maxAutoContinues = Math.max(0, Math.min(10, Number(els.maxAutoContinues?.value) || 2));
+      // Context + spend prefs.
+      const autoCompact = els.autoCompact ? !!els.autoCompact.checked : true;
+      const compactKeepTurns = Math.max(2, Math.min(30, Number(els.compactKeepTurns?.value) || 6));
+      const budgetUsd = Math.max(0, Math.min(1000, Number(els.budgetUsd?.value) || 0));
+      const fallbackChain = parseFallbackChain(els.fallbackChain?.value || '');
       // OpenRouter-only prefs. Stored regardless of the active provider so
       // switching back and forth doesn't lose them.
       const orReasoningEffort = els.orReasoningEffort?.value || '';
@@ -6082,6 +6338,7 @@
       await saveSettings({
         provider, model, systemPrompt, temperature, maxTokens,
         toolsEnabled, maxAgentSteps, maxAutoContinues, enabledGroups,
+        autoCompact, compactKeepTurns, budgetUsd, fallbackChain,
         apiKeys, mcpServers, customProviders, customSlashCommands, customTools,
         redactSensitive, auditEnabled, hideReasoning, theme, density,
         orReasoningEffort, orSort, orVariant, orDataCollection, orAllowFallbacks,
@@ -6257,6 +6514,7 @@
   // ── Boot ─────────────────────────────────────────────
   (async () => {
     await loadSettings();
+    await loadSpendTotal();
     await openaiOauthLoad();
     applyAppearance();
     compileCustomTools();

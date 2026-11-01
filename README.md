@@ -19,7 +19,7 @@ Bring your own key for any OpenAI-compatible provider (OpenRouter, OpenCode Go, 
   - **MCP server support** — JSON-RPC over HTTP; tools auto-registered as `mcp__<server>__<tool>`.
 - **Cost & token visibility.** Each assistant message gets a `1.2K↧ · 0.4K↥ · $0.0021` chip. OpenRouter and OpenCode Go report their own per-request `cost` (including cache and reasoning token detail); other providers fall back to models.dev pricing.
 - **Dynamic `max_tokens`** clamped from models.dev *and* the provider's live `/models` catalogue (which knows about models released after this extension shipped). No more 400s from over-asking.
-- **Slash commands** — built-in (`/summarize`, `/cookies`, `/network`, `/see`, `/har`, `/postman`, `/ts`, `/search`, `/vlm`, `/npm`, `/pypi`, `/so`, …) plus user-defined.
+- **Slash commands** — built-in (`/summarize`, `/cookies`, `/network`, `/see`, `/cost`, `/compact`, `/har`, `/postman`, `/ts`, `/search`, `/vlm`, `/npm`, `/pypi`, `/so`, …) plus user-defined.
 - **Cross-session memory** — agent can `memory_add` / `_search` / `_get`; titles surface in the system prompt automatically.
 - **Pinned messages, replay/edit, fork session, export to Markdown, full-content session search.**
 - **Vision** — 📸 button or `/see` attaches a tab screenshot as OpenAI multimodal content; or `minimax_describe_tab` for round-trip-free vision via MiniMax.
@@ -102,6 +102,7 @@ Type `/help` in the composer for the full list. Built-ins:
 | Command | What |
 |---|---|
 | `/help` `/clear` `/pin` `/sessions` `/settings` | Panel actions (don't go to the model) |
+| `/cost` `/compact` | Spend/usage report · force a context compaction |
 | `/summarize` `/explain` `/eli5` `/keypoints` | Quick page prompts |
 | `/cookies` `/clone-session` `/curl` `/diffcookies` | Cookie workflows |
 | `/network` `/api` `/har` `/postman` | Network inspection / export |
@@ -196,6 +197,18 @@ Kyoto accumulates the reasoning channel under whichever field name the provider 
 Following the sst/opencode pattern, Kyoto fetches [`models.dev/api.json`](https://models.dev) on boot (cached 24h, ETag-revalidated, CORS-friendly), reads `<provider>.models.<id>.limit.output`, and clamps `body.max_tokens = min(userPref, modelMax)` at request time. The header model badge shows the limits inline as `<context>↧/<output>↥` with the data source in the tooltip.
 
 Pricing from the same registry feeds the per-message cost chip.
+
+## Long sessions, cost and resilience
+
+Three things that keep a long agent session from falling over.
+
+**Auto-compaction.** An agent transcript only grows — tool results are bulky — and every model has a hard context window. Once the transcript passes it, *every* subsequent request fails with a context-length error and the session looks broken. Kyoto estimates the transcript before each model call (at ~3.6 chars/token, deliberately pessimistic) and, past ~75% of the window, folds the older turns into a single recap while keeping the recent turns verbatim. Pinned messages always survive.
+
+The risky part is the cut point: a transcript may never split an assistant message carrying `tool_calls` from the `tool` results that answer it — every OpenAI-compatible server rejects that shape. `sidepanel/context.js` only ever cuts immediately before a `user` turn, which is structurally safe, and `test/context.test.js` asserts the invariant. If the summarising call fails, a deterministic fallback summary (the user's own requests plus the tools that ran) is used instead, so context is never dropped silently. `/compact` forces it; Settings can disable it or change how many turns stay verbatim.
+
+**Spend guard.** Costs come from the provider's own `usage.cost` where it reports one (OpenRouter, OpenCode Go), falling back to models.dev pricing. `$` chips appear per message, `/cost` breaks down session vs. all-time, and **Settings → Spend cap** sets an optional per-session USD ceiling — the agent stops cleanly at the cap instead of running away mid-loop.
+
+**Model fallback.** **Settings → Fallback models** takes one `provider:model` per line and is tried in order when the primary fails *transiently*: rate limits, provider overload, upstream disconnects, context overflow. It deliberately does **not** retry auth or credit failures on another model — those fail identically everywhere and retrying would just hide a bad key. A fallback is only taken when nothing has been streamed yet, so a reply is never stitched together from two different models, and the UI says which model took over.
 
 ## Vision
 
