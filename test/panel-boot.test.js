@@ -1176,3 +1176,92 @@ test('clicking the scrim closes the shortcuts dialog', async () => {
   await settle(40);
   assert.ok(overlay.classList.contains('hidden'), 'a scrim click should dismiss it');
 });
+
+// ══════════════════════════════════════════════════════
+// Modal focus containment
+// ══════════════════════════════════════════════════════
+// The drawers and dialogs declare aria-modal="true" but did not trap focus, so
+// Tab walked out into the panel behind the scrim and keyboard users ended up
+// operating controls they could not see.
+
+function drawerFocusables(doc) {
+  const drawer = doc.getElementById('drawer');
+  return [...drawer.querySelectorAll('button, input, select, textarea, a[href]')]
+    .filter(el => !el.disabled && !el.hidden);
+}
+const pressTab = (p, opts = {}) => p.window.document.dispatchEvent(
+  new p.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, ...opts }));
+
+test('Tab wraps from the last control back to the first inside the drawer', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+
+  const items = drawerFocusables(doc);
+  assert.ok(items.length > 5, 'the drawer should have plenty of controls');
+  items[items.length - 1].focus();
+  pressTab(p);
+  assert.equal(doc.activeElement, items[0], 'focus must not escape past the last control');
+});
+
+test('Shift+Tab wraps from the first control back to the last', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+
+  const items = drawerFocusables(doc);
+  items[0].focus();
+  pressTab(p, { shiftKey: true });
+  assert.equal(doc.activeElement, items[items.length - 1], 'focus must not escape before the first control');
+});
+
+test('the obscured background is inert while a dialog is open', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const chat = doc.getElementById('chat');
+  assert.ok(!chat.inert && !chat.hasAttribute('inert'), 'background starts interactive');
+
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+  assert.ok(chat.inert === true || chat.hasAttribute('inert'),
+    'content behind the scrim must not be focusable or clickable');
+
+  doc.getElementById('closeDrawerBtn').click();
+  await settle(60);
+  assert.ok(!chat.inert && !chat.hasAttribute('inert'), 'closing restores the background');
+});
+
+test('the scrim still closes the drawer even with focus contained', async () => {
+  // Regression guard: making the background inert must NOT swallow the scrim
+  // click, which is how most people dismiss the drawer.
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(80);
+  doc.getElementById('overlay').click();
+  await settle(60);
+  assert.ok(doc.getElementById('drawer').classList.contains('hidden'), 'clicking the scrim must still close it');
+});
+
+test('the shortcuts dialog contains focus too', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+  await settle(60);
+  const overlay = doc.getElementById('shortcutsOverlay');
+  assert.ok(overlay.contains(doc.activeElement), 'focus starts inside');
+
+  const items = [...overlay.querySelectorAll('button, input, select, textarea, a[href]')].filter(el => !el.disabled && !el.hidden);
+  items[items.length - 1].focus();
+  pressTab(p);
+  assert.ok(overlay.contains(doc.activeElement), 'Tab must not leave the dialog');
+});
+
+test('Tab is not hijacked when no dialog is open', async () => {
+  const p = await bootPanel();
+  const ev = new p.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+  p.window.document.dispatchEvent(ev);
+  assert.equal(ev.defaultPrevented, false, 'normal tabbing must be untouched outside dialogs');
+});

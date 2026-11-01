@@ -5469,6 +5469,7 @@
     _focusBeforeDrawer = document.activeElement;
     els.drawer.classList.remove('hidden');
     els.overlay.classList.remove('hidden');
+    refreshModalInert();
     els.provider.value = state.settings.provider;
     els.apiKey.value = currentApiKey();
     els.systemPrompt.value = state.settings.systemPrompt;
@@ -5575,6 +5576,7 @@
   function closeDrawer() {
     els.drawer.classList.add('hidden');
     els.overlay.classList.add('hidden');
+    refreshModalInert();
     restoreFocusAfterDrawer();
   }
 
@@ -7327,6 +7329,7 @@
     paletteState.open = true;
     paletteState.index = 0;
     paletteEl.overlay.classList.remove('hidden');
+    refreshModalInert();
     paletteEl.input.value = '';
     renderPalette();
     paletteEl.input.focus();
@@ -7335,6 +7338,7 @@
     if (!paletteEl.overlay) return;
     paletteState.open = false;
     paletteEl.overlay.classList.add('hidden');
+    refreshModalInert();
     if (restoreFocus) { try { els.input?.focus(); } catch { /* non-fatal */ } }
   }
   function renderPalette() {
@@ -7403,6 +7407,84 @@
     paletteEl.overlay.addEventListener('click', (e) => { if (e.target === paletteEl.overlay) closePalette(); });
   }
 
+  // ── Modal focus containment ──────────────────────────
+  // The drawers and dialogs declare aria-modal="true", but without trapping
+  // focus Tab walks straight out into the panel behind the scrim: a keyboard
+  // user ends up operating controls they cannot see. `inert` also stops the
+  // obscured background from being clicked or reached at all.
+  // Ordered by stacking order (highest z-index first) so the topmost dialog is
+  // the one that traps focus when several are open.
+  const MODAL_SELECTORS = ['#shortcutsOverlay', '#paletteOverlay', '#skillsDrawer', '#drawer'];
+  // Scrims must stay interactive: clicking one is how the user dismisses the
+  // dialog, and `inert` would swallow that click.
+  const SCRIM_IDS = new Set(['overlay', 'skillsOverlay']);
+  const FOCUSABLE_SELECTOR = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  function openModalEl() {
+    for (const sel of MODAL_SELECTORS) {
+      const el = document.querySelector(sel);
+      if (el && !el.classList.contains('hidden')) return el;
+    }
+    return null;
+  }
+
+  /** Focusable, visible-ish descendants in DOM order. */
+  function focusableWithin(root) {
+    return [...root.querySelectorAll(FOCUSABLE_SELECTOR)].filter(el => {
+      if (el.hidden) return false;
+      if (el.closest('[hidden]')) return false;
+      // `offsetParent` is null for display:none, but also for position:fixed in
+      // some DOMs — treat it as advisory rather than a hard requirement.
+      return true;
+    });
+  }
+
+  /** Everything except the open modal becomes inert (unfocusable + unclickable). */
+  function setBackgroundInert(modal) {
+    for (const el of document.body.children) {
+      if (el === modal) continue;
+      if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+      if (SCRIM_IDS.has(el.id)) continue;           // keep click-to-dismiss working
+      const shouldBeInert = !!modal && !el.contains(modal);
+      if (!shouldBeInert) continue;
+      try { el.inert = true; } catch { el.setAttribute('inert', ''); }
+    }
+  }
+
+  function clearBackgroundInert() {
+    for (const el of document.body.children) {
+      try { el.inert = false; } catch { /* ignore */ }
+      el.removeAttribute?.('inert');
+    }
+  }
+
+  /** Re-evaluate inertness for whatever modal is currently open. */
+  function refreshModalInert() {
+    const modal = openModalEl();
+    if (modal) setBackgroundInert(modal);
+    else clearBackgroundInert();
+  }
+
+  function wireModalFocusTrap() {
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Tab') return;
+      const modal = openModalEl();
+      if (!modal) return;
+      const items = focusableWithin(modal);
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      // Focus outside the modal (e.g. it was just opened): pull it back in.
+      if (!modal.contains(active)) { e.preventDefault(); first.focus(); return; }
+      if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    });
+  }
+
   // ── Keyboard shortcuts help ──────────────────────────
   // The panel had shortcuts (palette, pickers, slash completion) and advertised
   // none of them. `?` opens a list of the ones that actually exist.
@@ -7418,6 +7500,7 @@
     if (!el || shortcutsOpen()) return;
     _focusBeforeShortcuts = document.activeElement;
     el.classList.remove('hidden');
+    refreshModalInert();
     // Move focus into the dialog, as with the settings drawer.
     try { document.getElementById('closeShortcutsBtn')?.focus(); } catch { /* non-fatal */ }
     announce('Keyboard shortcuts opened.');
@@ -7427,6 +7510,7 @@
     const el = document.getElementById('shortcutsOverlay');
     if (!el || !shortcutsOpen()) return;
     el.classList.add('hidden');
+    refreshModalInert();
     const prev = _focusBeforeShortcuts;
     _focusBeforeShortcuts = null;
     if (prev && typeof prev.focus === 'function' && document.contains(prev)) prev.focus();
@@ -8015,6 +8099,7 @@
     wireVoice();
     wireOverlayDismissal();
     wireShortcutsHelp();
+    wireModalFocusTrap();
     wireDrawerSections();
     wireDrawerDirtyTracking();
     refreshSectionCollapse();
