@@ -423,3 +423,92 @@ test('toggle buttons declare their pressed state', () => {
     assert.match(tag, /aria-pressed="(true|false)"/, `${id} is a toggle and needs aria-pressed`);
   }
 });
+
+// ── Colour contrast (measurable, not a matter of taste) ──
+// The text tokens had never been checked against WCAG. --text-faint was 3.6:1 on
+// dark and 3.0:1 on the elevated light background, used for hints, timestamps and
+// labels at 10-11px where the AA threshold is 4.5:1. Contrast is arithmetic, so
+// this is a guard rather than an opinion.
+
+function relativeLuminance(hex) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const [r, g, b] = [0, 2, 4].map(i => parseInt(full.slice(i, i + 2), 16) / 255);
+  const f = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+
+function contrastRatio(a, b) {
+  const la = relativeLuminance(a);
+  const lb = relativeLuminance(b);
+  const hi = Math.max(la, lb);
+  const lo = Math.min(la, lb);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** Colour tokens declared inside a given rule block. */
+function hexTokens(selector) {
+  const block = cssBlock(selector);
+  const out = {};
+  for (const m of block.matchAll(/--([a-z0-9-]+):\s*(#[0-9a-fA-F]{3,8})/g)) out[m[1]] = m[2];
+  return out;
+}
+
+const AA_NORMAL = 4.5;
+
+test('every text token meets WCAG AA against every surface it is used on', () => {
+  const scopes = {
+    dark: hexTokens(':root'),
+    light: hexTokens('body.theme-light'),
+    'system-light': hexTokens('@media (prefers-color-scheme: light)')
+  };
+  const failures = [];
+  for (const [name, t] of Object.entries(scopes)) {
+    for (const surface of ['bg', 'bg-elev', 'bg-elev2']) {
+      if (!t[surface]) continue;
+      for (const fg of ['text', 'text-dim', 'text-faint']) {
+        if (!t[fg]) continue;
+        const r = contrastRatio(t[fg], t[surface]);
+        if (r < AA_NORMAL) {
+          failures.push(`${name}: --${fg} ${t[fg]} on --${surface} ${t[surface]} = ${r.toFixed(2)}:1 (need ${AA_NORMAL})`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(failures, [], `contrast failures:\n${failures.join('\n')}`);
+});
+
+test('semantic colours are readable on the page background', () => {
+  // Error/ok/warn text appears on --bg in cron rows, statuses and tool states.
+  const scopes = {
+    dark: hexTokens(':root'),
+    light: hexTokens('body.theme-light')
+  };
+  const failures = [];
+  for (const [name, t] of Object.entries(scopes)) {
+    for (const fg of ['accent', 'danger', 'ok', 'warn']) {
+      if (!t[fg] || !t.bg) continue;
+      const r = contrastRatio(t[fg], t.bg);
+      // 3:1 is the UI-component threshold; these are used for text as well, so
+      // hold them to the normal-text bar where they already pass.
+      if (r < 3) failures.push(`${name}: --${fg} on --bg = ${r.toFixed(2)}:1`);
+    }
+  }
+  assert.deepEqual(failures, [], `semantic contrast failures:\n${failures.join('\n')}`);
+});
+
+test('the visual hierarchy of text tokens is preserved', () => {
+  // Making faint text pass must not make it indistinguishable from dim text.
+  for (const selector of [':root', 'body.theme-light']) {
+    const t = hexTokens(selector);
+    if (!t.text || !t['text-dim'] || !t['text-faint']) continue;
+    const dim = relativeLuminance(t['text-dim']);
+    const faint = relativeLuminance(t['text-faint']);
+    const bgLum = relativeLuminance(t.bg);
+    // Each step must be further from the background than the next-brighter token.
+    const dDim = Math.abs(dim - bgLum);
+    const dFaint = Math.abs(faint - bgLum);
+    assert.ok(dDim > dFaint, `${selector}: --text-dim must stay more prominent than --text-faint`);
+    assert.ok(dFaint > 0.01, `${selector}: --text-faint must remain visible against the background`);
+  }
+});

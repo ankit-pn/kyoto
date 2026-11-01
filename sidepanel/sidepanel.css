@@ -7,7 +7,7 @@
   --border-strong: #34343f;
   --text: #e7e7ea;
   --text-dim: #9a9aa6;
-  --text-faint: #6a6a78;
+  --text-faint: #86869a;   /* 5.4:1 on --bg, 4.8:1 on --bg-elev2 (was 3.6/3.2 — failed AA) */
   --accent: #5b8cff;
   --accent-hover: #6f9bff;
   --accent-soft: rgba(91, 140, 255, 0.12);
@@ -30,7 +30,7 @@ body.theme-light {
   --border-strong: #cdcdd4;
   --text: #1a1a1f;
   --text-dim: #5a5a66;
-  --text-faint: #8a8a96;
+  --text-faint: #6a6a76;   /* 5.3:1 on --bg, 4.6:1 on --bg-elev2 (was 3.4/3.0 — failed AA) */
   --accent: #2b5fff;
   --accent-hover: #1d4fe6;
   --accent-soft: rgba(43, 95, 255, 0.10);
@@ -51,7 +51,7 @@ body.theme-dark {
   --border-strong: #34343f;
   --text: #e7e7ea;
   --text-dim: #9a9aa6;
-  --text-faint: #6a6a78;
+  --text-faint: #86869a;   /* 5.4:1 on --bg, 4.8:1 on --bg-elev2 (was 3.6/3.2 — failed AA) */
   --accent: #5b8cff;
   --accent-hover: #6f9bff;
   --accent-soft: rgba(91, 140, 255, 0.12);
@@ -93,7 +93,7 @@ body.density-compact .drawer-body { padding: 10px 12px 16px; gap: 10px; }
     --border-strong: #cdcdd4;
     --text: #1a1a1f;
     --text-dim: #5a5a66;
-    --text-faint: #8a8a96;
+    --text-faint: #6a6a76;   /* 5.3:1 on --bg, 4.6:1 on --bg-elev2 (was 3.4/3.0 — failed AA) */
     --accent: #2b5fff;
     --accent-hover: #1d4fe6;
     --accent-soft: rgba(43, 95, 255, 0.10);
