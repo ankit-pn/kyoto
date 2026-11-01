@@ -24,7 +24,7 @@ Bring your own key for any OpenAI-compatible provider (OpenRouter, OpenCode Go, 
   - **Custom JS tools** — write a JS function body in Settings, model can call it.
   - **MCP server support** — JSON-RPC over HTTP; tools auto-registered as `mcp__<server>__<tool>`.
 - **Cost & token visibility.** Each assistant message gets a `1.2K↧ · 0.4K↥ · $0.0021` chip. OpenRouter and OpenCode Go report their own per-request `cost` (including cache and reasoning token detail); other providers fall back to models.dev pricing.
-- **Dynamic `max_tokens`** clamped from models.dev *and* the provider's live `/models` catalogue (which knows about models released after this extension shipped). No more 400s from over-asking.
+- **Dynamic `max_tokens`**, auto by default: leave the field empty and each request asks for the selected model's full documented output limit, read from models.dev *and* the provider's live `/models` catalogue (which knows about models released after this extension shipped). Type a number to cap it lower; it is never allowed above the model's limit. No more 400s from over-asking — and no more 8 192-token ceiling on a model that can write 384 000.
 - **Slash commands** — built-in (`/summarize`, `/cookies`, `/network`, `/see`, `/cost`, `/compact`, `/har`, `/postman`, `/ts`, `/search`, `/vlm`, `/npm`, `/pypi`, `/so`, …) plus user-defined.
 - **Cross-session memory** — agent can `memory_add` / `_search` / `_get`; titles surface in the system prompt automatically.
 - **Pinned messages, replay/edit, fork session, export to Markdown, full-content session search.**
@@ -235,7 +235,9 @@ Kyoto accumulates the reasoning channel under whichever field name the provider 
 
 `max_tokens` caps the model's **response** length. The cap varies wildly per model.
 
-Following the sst/opencode pattern, Kyoto fetches [`models.dev/api.json`](https://models.dev) on boot (cached 24h, ETag-revalidated, CORS-friendly), reads `<provider>.models.<id>.limit.output`, and clamps `body.max_tokens = min(userPref, modelMax)` at request time. The header model badge shows the limits inline as `<context>↧/<output>↥` with the data source in the tooltip.
+Following the sst/opencode pattern, Kyoto fetches [`models.dev/api.json`](https://models.dev) on boot (cached 24h, ETag-revalidated, CORS-friendly) and reads `<provider>.models.<id>.limit.output`.
+
+The setting is **auto by default** (`0`): `body.max_tokens` becomes the model's documented limit, so a model that can write 384 000 tokens is actually allowed to. Enter a number to cap it lower; an explicit value is clamped down to the model's limit (`resolveMaxOutput(requested)` → `requested > 0 ? min(requested, modelMax) : modelMax`). The settings hint states exactly what will be sent — it only says "clamped" when a clamp really happens. The header model badge shows the limits inline as `<context>↧/<output>↥` with the data source in the tooltip.
 
 Pricing from the same registry feeds the per-message cost chip.
 

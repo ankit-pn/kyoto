@@ -7,6 +7,7 @@
 //   await init()              -> boolean (have data)
 //   get(provider, modelId)    -> { context, output, name } | null
 //   maxOutput(provider, id)   -> number (output token cap, with fallback)
+//   resolveMaxOutput(p, id, requested) -> number (auto when requested <= 0)
 //   contextLength(provider, id) -> number | null
 //   getRegistry()             -> raw models.dev object
 
@@ -197,6 +198,26 @@
     const info = get(provider, modelId);
     return info?.output || fallback;
   }
+  /**
+   * How many output tokens to actually request.
+   *
+   * `requested <= 0` means AUTO: use the model's documented cap. That is the
+   * entire point of reading models.dev — knowing a model can write 384K and then
+   * asking for 8K regardless is a bug, not caution. An explicit value is honoured
+   * but never exceeds what the model supports, because asking for more is a 400.
+   *
+   * The old hardcoded 8 192 default made every modern model run at 1/47th of its
+   * capability unless the user went looking for this field.
+   */
+  function resolveMaxOutput(provider, modelId, requested, { fallback = 8192 } = {}) {
+    const modelMax = get(provider, modelId)?.output || fallback;
+    const n = Number(requested);
+    // Auto when absent/empty/zero/negative/NaN — the user's intent is "the model's max".
+    const want = Number.isFinite(n) && n > 0 ? n : modelMax;
+    // Never below a usable floor, never above what the model reports.
+    return Math.max(64, Math.min(want, modelMax));
+  }
+
   function contextLength(provider, modelId) {
     return get(provider, modelId)?.context || null;
   }
@@ -232,6 +253,7 @@
     init,
     get,
     maxOutput,
+    resolveMaxOutput,
     contextLength,
     costFor,
     supportsVision,

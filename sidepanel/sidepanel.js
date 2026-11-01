@@ -2810,7 +2810,10 @@
     apiKeys: {},                  // per-provider stored keys
     systemPrompt: '',
     temperature: 0.7,
-    maxTokens: 8192,
+    // 0 = AUTO: use the selected model's documented output cap (see
+    // KyotoModels.resolveMaxOutput). A fixed number here silently capped every
+    // 384K-output model at whatever constant we shipped.
+    maxTokens: 0,
     toolsEnabled: true,
     enabledGroups: ['browser', 'page', 'storage', 'cookies', 'network', 'devtools', 'browser-data', 'misc', 'memory', 'minimax', 'media', 'shell', 'fs', 'meta', 'skill', 'cron', 'platform', 'intercept', 'routine', 'debugger'],
     mcpServers: [],
@@ -3679,11 +3682,26 @@
     const info = model ? window.KyotoModels?.get(provider, model) : null;
     if (!info) return;
     const fmt = window.KyotoModels?.formatN || ((n) => String(n));
-    const req = Number(els.maxTokens?.value) || state.settings.maxTokens;
-    const effective = Math.min(req, info.output || req);
-    els.maxTokensHint.innerHTML =
-      `Selected model supports up to <strong>${fmt(info.output)}</strong> output tokens, context ${fmt(info.context)}. ` +
-      `Your value will be clamped to <strong>${fmt(effective)}</strong> at request time. Source: ${info.source}.`;
+    const req = Number(els.maxTokens?.value) || 0;
+    const modelMax = info.output || null;
+    const head = `Selected model supports up to <strong>${fmt(modelMax)}</strong> output tokens, context ${fmt(info.context)}. `;
+    // Only claim a clamp when one actually happens — previously this said
+    // "will be clamped to 8K" even when 8K was simply what the user (or the old
+    // default) had typed, which read as the extension throttling the model.
+    if (!modelMax) {
+      els.maxTokensHint.innerHTML = head + `Source: ${info.source}.`;
+    } else if (req <= 0) {
+      els.maxTokensHint.innerHTML = head +
+        `<strong>Auto</strong> — requests will ask for the full ${fmt(modelMax)}. ` +
+        `Enter a number to cap it lower. Source: ${info.source}.`;
+    } else if (req > modelMax) {
+      els.maxTokensHint.innerHTML = head +
+        `Your value (${fmt(req)}) is above the model's limit and will be clamped to <strong>${fmt(modelMax)}</strong>. ` +
+        `Source: ${info.source}.`;
+    } else {
+      els.maxTokensHint.innerHTML = head +
+        `Requests will ask for <strong>${fmt(req)}</strong> (up to ${fmt(modelMax)} available). Source: ${info.source}.`;
+    }
   }
 
   function updateSessionsButton() {
@@ -4717,9 +4735,12 @@
     // Clamp max_tokens to whatever models.dev / the live catalogue says this
     // model actually supports, so we don't ask for 32K from a model that
     // maxes at 8K and get a 400.
-    const modelMax = window.KyotoModels?.maxOutput(provider, model, 8192) ?? 8192;
-    const requestedMax = Number(maxTokens) || 8192;
-    const effectiveMax = Math.max(64, Math.min(requestedMax, modelMax));
+    // Auto (0) resolves to the model's documented cap; an explicit value is
+    // still clamped to it, because asking for more than the model supports is a 400.
+    const effectiveMax = window.KyotoModels?.resolveMaxOutput
+      ? window.KyotoModels.resolveMaxOutput(provider, model, maxTokens, { fallback: 8192 })
+      : (Math.max(64, Math.min(Number(maxTokens) || (window.KyotoModels?.maxOutput(provider, model, 8192) ?? 8192),
+          window.KyotoModels?.maxOutput(provider, model, 8192) ?? 8192)));
 
     // Rich providers may rewrite the id on the wire (OpenRouter appends
     // routing variants such as ":exacto" while metadata lookups keep using
@@ -5085,7 +5106,8 @@
     els.apiKey.value = currentApiKey();
     els.systemPrompt.value = state.settings.systemPrompt;
     els.temperature.value = state.settings.temperature;
-    els.maxTokens.value = state.settings.maxTokens;
+    // 0 is rendered as an empty field: the placeholder explains "auto".
+    els.maxTokens.value = state.settings.maxTokens || '';
     els.toolsEnabled.checked = !!state.settings.toolsEnabled;
     if (els.maxAgentSteps) els.maxAgentSteps.value = state.settings.maxAgentSteps ?? 50;
     if (els.maxAutoContinues) els.maxAutoContinues.value = state.settings.maxAutoContinues ?? 2;
@@ -6376,7 +6398,11 @@
       const model = els.model.value;
       const systemPrompt = els.systemPrompt.value.trim();
       const temperature = Math.max(0, Math.min(2, Number(els.temperature.value) || 0.7));
-      const maxTokens = Math.max(64, Math.min(131072, Number(els.maxTokens.value) || 8192));
+      // Empty (or 0) means AUTO — resolved per model at request time.
+      const maxTokensRaw = String(els.maxTokens.value || '').trim();
+      const maxTokens = maxTokensRaw === ''
+        ? 0
+        : Math.max(64, Math.min(1048576, Number(maxTokensRaw) || 0));
       const toolsEnabled = !!els.toolsEnabled.checked;
       const maxAgentSteps = Math.max(1, Math.min(200, Number(els.maxAgentSteps?.value) || 50));
       const maxAutoContinues = Math.max(0, Math.min(10, Number(els.maxAutoContinues?.value) || 2));
