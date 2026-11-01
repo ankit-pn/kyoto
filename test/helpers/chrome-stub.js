@@ -39,6 +39,15 @@ function makeChrome() {
       for (const k of (Array.isArray(keys) ? keys : [keys])) store.delete(k);
     },
     async clear() { calls.push({ ns: 'storage', method: 'clear', args: [] }); store.clear(); },
+    // Chrome reports JSON-ish byte size; exactness is not what matters here.
+    async getBytesInUse(keys) {
+      calls.push({ ns: 'storage', method: 'getBytesInUse', args: [keys] });
+      const list = keys == null ? [...store.keys()]
+        : (Array.isArray(keys) ? keys : [keys]);
+      let total = 0;
+      for (const k of list) if (store.has(k)) total += JSON.stringify(store.get(k)).length;
+      return total;
+    },
     onChanged: { addListener: record('storage', 'onChanged.addListener'), removeListener() {} }
   };
 

@@ -215,6 +215,8 @@
     workspaceZipBtn: $('workspaceZipBtn'),
     workspaceClearBtn: $('workspaceClearBtn'),
     cronSummary: $('cronSummary'),
+    storageSummary: $('storageSummary'),
+    storageRefreshBtn: $('storageRefreshBtn'),
     cronRefreshBtn: $('cronRefreshBtn'),
     cronList: $('cronList'),
     workspaceFolder: $('workspaceFolder'),
@@ -5907,6 +5909,33 @@
     }
   }
 
+  // ── Storage usage ──
+  const STORAGE_LIMIT = 10 * 1024 * 1024;   // chrome.storage.local default quota
+  // NOTE: a function declaration, not a const arrow. openDrawer() runs earlier in
+  // this scope, and calling a const arrow before its initialiser throws a TDZ
+  // ReferenceError — which aborted the rest of openDrawer, including the line
+  // that actually shows the drawer, so Settings silently refused to open.
+  async function updateStorageUsage() {
+    if (!els.storageSummary) return;
+    try {
+      if (typeof chrome.storage.local.getBytesInUse !== 'function') {
+        els.storageSummary.textContent = 'usage unavailable';
+        return;
+      }
+      const bytes = await chrome.storage.local.getBytesInUse(null);
+      const pct = Math.min(100, Math.round((bytes / STORAGE_LIMIT) * 100));
+      els.storageSummary.textContent = `${fmtBytes(bytes)} of ~10 MB (${pct}%)`;
+      // Warn at 80%: low enough to act before a save fails.
+      els.storageSummary.className = pct >= 80 ? 'status err' : pct >= 60 ? 'status warn' : 'status';
+      els.storageSummary.title = pct >= 80
+        ? 'Nearly full. Export or delete old conversations to free space.'
+        : 'Storage used by conversations, settings and cached state.';
+    } catch (e) {
+      els.storageSummary.textContent = `usage unavailable (${e.message})`;
+      els.storageSummary.className = 'status';
+    }
+  }
+
   function openDrawer() {
     // A transient composer autocomplete must not outlive a modal: it used to
     // stay on screen (and, with a higher z-index than the drawer, float OVER the
@@ -5918,6 +5947,8 @@
     els.drawer.classList.remove('hidden');
     els.overlay.classList.remove('hidden');
     refreshModalInert();
+    // Non-essential: must never prevent the drawer from opening.
+    updateStorageUsage().catch(() => {});
     els.provider.value = state.settings.provider;
     els.apiKey.value = currentApiKey();
     els.systemPrompt.value = state.settings.systemPrompt;
@@ -6716,6 +6747,8 @@
       });
     }
 
+    if (els.storageRefreshBtn) els.storageRefreshBtn.addEventListener('click', updateStorageUsage);
+
     if (els.testConnBtn) els.testConnBtn.addEventListener('click', testConnection);
 
     if (els.workspaceZipBtn) els.workspaceZipBtn.addEventListener('click', async () => {
@@ -6735,6 +6768,11 @@
       updateWorkspaceUI();
     });
 
+    // ── Storage usage ──
+    // Conversations live in chrome.storage.local, which has a fixed quota. Until
+    // now the quota was invisible: the first sign of trouble was a failed save and
+    // "storage is full" with no way to have seen it coming. getBytesInUse lets the
+    // panel show the running total and warn before writes start failing.
     // ── Cron jobs panel ──
     async function refreshCronList() {
       if (!els.cronList) return;

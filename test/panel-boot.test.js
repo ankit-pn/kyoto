@@ -2703,3 +2703,45 @@ test('working custom tools show no error', async () => {
   assert.ok(!/cannot run/i.test(doc.getElementById('customToolsList').textContent),
     'no warning when the tools compile');
 });
+
+test('the settings drawer shows storage usage before it becomes a problem', async () => {
+  // chrome.storage.local has a fixed quota, and until now the first sign of trouble
+  // was a failed save plus "storage is full". getBytesInUse makes the risk visible
+  // in advance, with a warning while there is still room to act.
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('kyoto_session_big', {
+    id: 'big', title: 'Big', history: [{ role: 'user', content: 'x'.repeat(8_500_000), _ts: 1 }]
+  });
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  await settle(400);
+  doc.getElementById('settingsBtn').click();
+  await settle(500);
+
+  const sum = doc.getElementById('storageSummary');
+  assert.match(sum.textContent, /MB of ~10 MB/);
+  assert.match(sum.textContent, /%/, 'the percentage is what makes the risk legible');
+  assert.match(sum.className, /err/, '81% should be flagged, not shown as normal');
+  assert.match(sum.title, /free space/i, 'and say what to do about it');
+  assert.deepEqual(p.errors, [], 'opening settings must not throw');
+});
+
+test('opening settings works even if the usage readout fails', async () => {
+  // A non-essential readout must never be able to keep the dialog shut. A first
+  // attempt at this feature threw a ReferenceError inside openDrawer and aborted it
+  // BEFORE the line that reveals the drawer, so Settings silently did nothing.
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.storage.local.getBytesInUse = async () => { throw new Error('bytes unavailable'); };
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  await settle(400);
+  doc.getElementById('settingsBtn').click();
+  await settle(400);
+
+  assert.ok(!doc.getElementById('drawer').classList.contains('hidden'),
+    'the drawer must still open when usage cannot be read');
+  assert.match(doc.getElementById('storageSummary').textContent, /unavailable/i,
+    'and the readout should say so rather than sitting on a placeholder');
+});
