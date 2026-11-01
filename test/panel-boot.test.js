@@ -879,3 +879,105 @@ test('the session picker is keyboard navigable too', async () => {
   kbd(p, search, 'ArrowUp');
   assert.equal(cursor(), 's1');
 });
+
+// ══════════════════════════════════════════════════════
+// Follow-up queue
+// ══════════════════════════════════════════════════════
+// Enter during a streaming reply used to start a SECOND concurrent chat loop on
+// the same session — two streams interleaving into one history. It now queues.
+
+/** Boot with enough config to start a real turn, and a network we control. */
+async function bootWithPendingTurn(fetchImpl) {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('provider', 'openrouter');
+  chrome.__store.set('model', 'test/model');
+  chrome.__store.set('apiKeys', { openrouter: 'test-key' });
+  const p = await bootPanel({ chrome, beforeBoot: (w) => { w.fetch = fetchImpl; } });
+  const doc = p.window.document;
+  const send = (text) => {
+    const input = doc.getElementById('input');
+    input.value = text;
+    input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  };
+  return { p, doc, send };
+}
+
+const hangingFetch = (u, init) => new Promise((_, rej) => {
+  if (init && init.signal) {
+    init.signal.addEventListener('abort', () => {
+      const e = new Error('aborted'); e.name = 'AbortError'; rej(e);
+    });
+  }
+});
+
+test('a message typed mid-stream is queued, not started concurrently', async () => {
+  const { p, doc, send } = await bootWithPendingTurn(hangingFetch);
+  send('first question');
+  await settle(150);
+  assert.ok(!doc.getElementById('stopBtn').classList.contains('hidden'), 'first turn should be in flight');
+
+  send('second question');
+  await settle(150);
+
+  const bar = doc.getElementById('queueBar');
+  assert.ok(!bar.classList.contains('hidden'), 'the queued message should be visible');
+  assert.match(bar.textContent, /second question/);
+  assert.match(bar.textContent, /Queued/i);
+
+  // The user's second message must NOT have been sent as a new turn: it is not
+  // in the transcript as a user bubble yet.
+  const userBubbles = [...doc.querySelectorAll('.msg.user')].map(el => el.textContent);
+  assert.equal(userBubbles.filter(t => t.includes('second question')).length, 0,
+    'a queued message must not be sent until the current turn finishes');
+
+  doc.getElementById('stopBtn').click();   // clean up the hanging turn
+  await settle(120);
+});
+
+test('a queued message can be cancelled before it sends', async () => {
+  const { doc, send } = await bootWithPendingTurn(hangingFetch);
+  send('first');
+  await settle(150);
+  send('cancel me');
+  await settle(150);
+  assert.match(doc.getElementById('queueBar').textContent, /cancel me/);
+
+  doc.querySelector('#queueBar .q-cancel').click();
+  await settle(60);
+  assert.ok(doc.getElementById('queueBar').classList.contains('hidden'),
+    'cancelling the only queued message hides the strip');
+  doc.getElementById('stopBtn').click();
+  await settle(120);
+});
+
+test('stopping the turn discards queued follow-ups instead of firing them', async () => {
+  const { doc, send } = await bootWithPendingTurn(hangingFetch);
+  send('first');
+  await settle(150);
+  send('should be dropped');
+  await settle(150);
+  assert.match(doc.getElementById('queueBar').textContent, /should be dropped/);
+
+  doc.getElementById('stopBtn').click();
+  await settle(250);
+
+  assert.ok(doc.getElementById('queueBar').classList.contains('hidden'), 'stop empties the queue');
+  const userBubbles = [...doc.querySelectorAll('.msg.user')].map(el => el.textContent);
+  assert.equal(userBubbles.filter(t => t.includes('should be dropped')).length, 0,
+    'Stop means stop: the queued message must not be sent afterwards');
+});
+
+test('the queue drains once the running turn finishes', async () => {
+  // Network fails fast, so the first turn ends quickly and the queue drains.
+  const failingFetch = async () => { throw new Error('network down'); };
+  const { doc, send } = await bootWithPendingTurn(failingFetch);
+  send('first');
+  await settle(200);
+  send('second');
+  await settle(400);
+
+  const userBubbles = [...doc.querySelectorAll('.msg.user')].map(el => el.textContent);
+  assert.ok(userBubbles.some(t => t.includes('second')),
+    `the queued message should be sent after the turn ends; saw: ${JSON.stringify(userBubbles)}`);
+});

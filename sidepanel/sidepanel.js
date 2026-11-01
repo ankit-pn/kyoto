@@ -4348,6 +4348,15 @@
       announce('Cannot send: no model selected. Settings opened.');
       openDrawer(); return;
     }
+    // A turn is already running on this session: queue the follow-up rather
+    // than starting a concurrent loop that would interleave two streams.
+    if (state.runtimes?.[session.id]?.busy) {
+      queueFor(session.id).push(text);
+      renderQueueBar();
+      announce('Message queued — it will send when the current reply finishes.');
+      return;
+    }
+
     // Bind to current tab if floating. If another session was previously
     // bound to this tab (e.g. user forked then started typing on the fork),
     // clean its tabId so we don't leave a stale reference.
@@ -4423,6 +4432,58 @@
       changed = true;
     }
     return changed;
+  }
+
+  // ── Follow-up queue ─────────────────────────────────
+  // A turn in flight owns the session: its stream writes into session.history
+  // and the live DOM. Starting a second loop for a message typed mid-stream
+  // interleaves two generators into one conversation (duplicate assistant
+  // messages, malformed requests). So a mid-stream send is QUEUED and drained
+  // when the current turn finishes — which is also what the user typing ahead
+  // actually wants.
+  function queueFor(sessionId) {
+    const rt = (state.runtimes[sessionId] ??= {});
+    if (!Array.isArray(rt.queue)) rt.queue = [];
+    return rt.queue;
+  }
+
+  function renderQueueBar() {
+    const bar = document.getElementById('queueBar');
+    if (!bar) return;
+    const session = state.activeSession;
+    const queue = session ? (state.runtimes?.[session.id]?.queue || []) : [];
+    if (!queue.length) {
+      bar.classList.add('hidden');
+      bar.innerHTML = '';
+      return;
+    }
+    bar.classList.remove('hidden');
+    bar.innerHTML = queue.map((text, i) =>
+      `<div class="queue-chip"><span class="q-label">Queued</span>` +
+      `<span class="q-text" title="${esc(text)}">${esc(text)}</span>` +
+      `<button class="q-cancel" type="button" data-qi="${i}" aria-label="Cancel queued message ${i + 1}" title="Cancel">×</button></div>`
+    ).join('');
+  }
+
+  function cancelQueued(index) {
+    const session = state.activeSession;
+    if (!session) return;
+    const queue = queueFor(session.id);
+    if (index < 0 || index >= queue.length) return;
+    queue.splice(index, 1);
+    renderQueueBar();
+    announce('Queued message cancelled.');
+  }
+
+  async function drainQueue(session) {
+    const queue = state.runtimes?.[session.id]?.queue;
+    if (!Array.isArray(queue) || !queue.length) return;
+    const next = queue.shift();
+    renderQueueBar();
+    if (!next) return;
+    // Defer a tick so the finishing turn has fully unwound (send button state,
+    // banner removal) before the next one starts.
+    setTimeout(() => { sendMessage(next).catch((e) => console.warn('[Kyoto] queued send failed:', e)); }, 0);
   }
 
   async function runChatLoop(session) {
@@ -4709,7 +4770,10 @@
         const banner = document.getElementById('streaming-banner');
         if (banner) banner.remove();
         els.input.focus();
+        renderQueueBar();
       }
+      // Anything typed while this turn ran goes out now.
+      drainQueue(session);
     }
   }
 
@@ -6056,7 +6120,17 @@
     });
     els.stopBtn.addEventListener('click', () => {
       const sid = state.activeSession?.id;
-      if (sid && state.runtimes[sid]?.abort) state.runtimes[sid].abort.abort();
+      if (!sid) return;
+      // Stopping means stop: follow-ups typed during the turn are discarded
+      // rather than immediately firing once the aborted turn unwinds.
+      const queue = state.runtimes[sid]?.queue;
+      if (Array.isArray(queue) && queue.length) {
+        const dropped = queue.length;
+        queue.length = 0;
+        renderQueueBar();
+        announce(`${dropped} queued message${dropped === 1 ? '' : 's'} discarded.`);
+      }
+      if (state.runtimes[sid]?.abort) state.runtimes[sid].abort.abort();
     });
     if (els.visionBtn) els.visionBtn.addEventListener('click', toggleVisionPending);
 
@@ -6892,6 +6966,13 @@
       _stickToBottom = isNearBottom();
       updateJumpLatest();
     }, { passive: true });
+    const queueBar = document.getElementById('queueBar');
+    if (queueBar) {
+      queueBar.addEventListener('click', (e) => {
+        const btn = e.target.closest('.q-cancel');
+        if (btn) cancelQueued(Number(btn.dataset.qi));
+      });
+    }
     if (els.jumpLatestBtn) {
       els.jumpLatestBtn.addEventListener('click', () => {
         scrollToBottom(true);
