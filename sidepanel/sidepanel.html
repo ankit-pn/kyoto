@@ -77,7 +77,7 @@
            always floats just above the input regardless of textarea
            height. -->
       <div id="slashPalette" class="slash-palette hidden" role="listbox" aria-label="Slash commands"></div>
-      <textarea id="input" rows="1" placeholder="Ask about this page… (type / for commands)"></textarea>
+      <textarea id="input" rows="1" placeholder="Ask about this page… (type / for commands)" aria-controls="slashPalette" aria-expanded="false" aria-autocomplete="list" aria-label="Message"></textarea>
       <div class="composer-row">
         <label class="ctx-toggle" title="Include page content as context">
           <input type="checkbox" id="useContext" checked />
@@ -97,9 +97,9 @@
   <!-- Inline model picker popover -->
   <div class="popover hidden" id="modelPopover">
     <div class="popover-hdr">
-      <input type="text" id="popoverSearch" placeholder="Search models…" autocomplete="off" />
+      <input type="text" id="popoverSearch" placeholder="Search models…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="popoverList" aria-autocomplete="list" aria-label="Search models" />
     </div>
-    <div class="popover-body" id="popoverList">
+    <div class="popover-body" id="popoverList" role="listbox" aria-label="Models">
       <p class="popover-empty">No models loaded.</p>
     </div>
   </div>
@@ -107,9 +107,9 @@
   <!-- Sessions popover -->
   <div class="popover hidden popover-right" id="sessionsPopover">
     <div class="popover-hdr">
-      <input type="text" id="sessionsSearch" placeholder="Search sessions…" autocomplete="off" />
+      <input type="text" id="sessionsSearch" placeholder="Search sessions…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="sessionsList" aria-autocomplete="list" aria-label="Search conversations" />
     </div>
-    <div class="popover-body" id="sessionsList">
+    <div class="popover-body" id="sessionsList" role="listbox" aria-label="Conversations">
       <p class="popover-empty">No sessions yet.</p>
     </div>
   </div>
@@ -646,8 +646,8 @@
        sessions, models and settings so 147 tools stay discoverable. -->
   <div class="palette hidden" id="paletteOverlay" role="dialog" aria-label="Command palette">
     <div class="palette-box">
-      <input type="text" id="paletteInput" placeholder="Search actions, tools, sessions, models, settings…" autocomplete="off" spellcheck="false" />
-      <div class="palette-list" id="paletteList"></div>
+      <input type="text" id="paletteInput" placeholder="Search actions, tools, sessions, models, settings…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="paletteList" aria-autocomplete="list" aria-label="Command palette" />
+      <div class="palette-list" id="paletteList" role="listbox" aria-label="Commands and tools"></div>
       <div class="palette-foot"><span>↑↓ navigate</span><span>↵ run</span><span>esc close</span></div>
     </div>
   </div>

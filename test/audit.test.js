@@ -391,3 +391,24 @@ test('the shortcuts help dialog is a labelled modal', () => {
   // And the empty state must advertise it, or nobody finds it.
   assert.match(HTML, /empty-hint[\s\S]{0,120}kbd/, 'the empty state should point at the shortcut help');
 });
+
+test('every listbox is owned by a combobox that can reach it', () => {
+  // A role="listbox" with no combobox wiring is keyboard-discoverable but not
+  // announced. Each combobox must declare aria-controls pointing at a real
+  // listbox in the same document.
+  const boxes = [...HTML.matchAll(/id="([^"]+)"[^>]*role="listbox"/g)].map(m => m[1]);
+  assert.ok(boxes.length >= 3, `expected the pickers to be listboxes, found ${boxes.length}`);
+  // The owner may be a combobox (search inputs) or a textbox (the composer,
+  // which owns the slash-command listbox) — the invariant is the wiring, not the role.
+  const owners = [...HTML.matchAll(/id="([^"]+)"[^>]*aria-controls="([^"]+)"[^>]*/g)];
+  const covered = new Set();
+  for (const [whole, inputId, controls] of owners) {
+    if (!boxes.includes(controls)) continue;
+    covered.add(controls);
+    assert.match(whole, /aria-expanded=/, `${inputId} must expose aria-expanded`);
+    assert.match(whole, /aria-autocomplete=/, `${inputId} should declare aria-autocomplete for a filter box`);
+  }
+  for (const box of boxes) {
+    assert.ok(covered.has(box), `listbox "${box}" has no owner with aria-controls/aria-expanded`);
+  }
+});

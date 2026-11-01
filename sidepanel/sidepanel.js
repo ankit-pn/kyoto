@@ -2743,9 +2743,15 @@
 
     if (!filtered.length) {
       els.slashPalette.classList.add('hidden');
+      els.input.setAttribute('aria-expanded', 'false');
+      els.input.removeAttribute('aria-activedescendant');
       return;
     }
     els.slashPalette.classList.remove('hidden');
+    // The composer textbox owns the slash listbox: announce that the list is
+    // open and point at the highlighted option, exactly like the other pickers.
+    els.input.setAttribute('aria-expanded', 'true');
+    els.input.setAttribute('aria-activedescendant', 'slash-item-0');
     const html = filtered.map((c, i) => {
       let preview = '';
       if (c.action) {
@@ -2756,7 +2762,7 @@
       const tag = c.action ? '<span class="slash-tag">action</span>'
                 : c.builtin ? ''
                 : '<span class="slash-tag">custom</span>';
-      return `<div class="slash-item${i === 0 ? ' active' : ''}" data-name="${esc(c.name)}" data-action="${c.action ? '1' : '0'}" role="option">
+      return `<div class="slash-item${i === 0 ? ' active' : ''}" id="slash-item-${i}" data-name="${esc(c.name)}" data-action="${c.action ? '1' : '0'}" role="option" aria-selected="${i === 0 ? 'true' : 'false'}">
         <span class="slash-name">/${esc(c.name)}</span>
         <span class="slash-preview">${esc(preview)}</span>
         ${tag}
@@ -2774,8 +2780,12 @@
     let idx = -1;
     items.forEach((el, i) => { if (el.classList.contains('active')) idx = i; });
     idx = (idx + delta + items.length) % items.length;
-    items.forEach((el, i) => el.classList.toggle('active', i === idx));
-    items[idx].scrollIntoView({ block: 'nearest' });
+    items.forEach((el, i) => {
+      el.classList.toggle('active', i === idx);
+      el.setAttribute('aria-selected', i === idx ? 'true' : 'false');
+    });
+    items[idx].scrollIntoView?.({ block: 'nearest' });
+    if (items[idx].id) els.input.setAttribute('aria-activedescendant', items[idx].id);
   }
   function fillFromSlashPalette() {
     const active = els.slashPalette?.querySelector('.slash-item.active');
@@ -3996,6 +4006,7 @@
   async function toggleModelPopover() {
     if (!els.modelPopover.classList.contains('hidden')) { closeModelPopover(); return; }
     els.modelPopover.classList.remove('hidden');
+    setComboboxExpanded(els.popoverSearch, true);
     els.popoverSearch.value = '';
     els.popoverList.setAttribute('role', 'listbox');
     els.popoverList.setAttribute('aria-label', 'Models');
@@ -4014,7 +4025,11 @@
     renderPopoverList();
     setTimeout(() => els.popoverSearch.focus(), 0);
   }
-  function closeModelPopover() { els.modelPopover.classList.add('hidden'); }
+  function closeModelPopover() {
+    els.modelPopover.classList.add('hidden');
+    setComboboxExpanded(els.popoverSearch, false);
+    try { els.popoverSearch.removeAttribute('aria-activedescendant'); } catch { /* non-fatal */ }
+  }
 
   // Collect every provider's models (built-in + custom) into a single
   // list with provider attached. Used by the header model picker so
@@ -4073,13 +4088,18 @@
         const active = (m._provider === state.settings.provider && m.id === state.settings.model) ? ' active' : '';
         const info = window.KyotoModels?.get(m._provider, m.id);
         const caps = info ? `<span class="popover-caps" title="ctx ${info.context ?? '?'} / out ${info.output ?? '?'} · ${info.source}">${fmt(info.context)} / ${fmt(info.output)}</span>` : '';
-        parts.push(`<div class="popover-item${active}" role="option" aria-selected="${active ? 'true' : 'false'}" data-model="${esc(m.id)}" data-provider="${esc(m._provider)}"><span class="popover-mname">${esc(m.name)}${esc(modelCapBadges(m))}</span>${caps}<span class="check">✓</span></div>`);
+        parts.push(`<div class="popover-item${active}" id="popover-item-${parts.length}" role="option" aria-selected="${active ? 'true' : 'false'}" data-model="${esc(m.id)}" data-provider="${esc(m._provider)}"><span class="popover-mname">${esc(m.name)}${esc(modelCapBadges(m))}</span>${caps}<span class="check">✓</span></div>`);
       }
     });
     els.popoverList.innerHTML = parts.join('');
     // Highlight the top result so Enter picks the obvious choice immediately.
     const first = els.popoverList.querySelector('.popover-item');
-    if (first) first.classList.add('kbd-active');
+    if (first) {
+      first.classList.add('kbd-active');
+      syncActiveDescendant(els.popoverSearch, [first], 0);
+    } else {
+      els.popoverSearch.removeAttribute('aria-activedescendant');
+    }
   }
 
   // Fetch every provider that has a key in apiKeys. Custom providers
@@ -4107,11 +4127,16 @@
   function toggleSessionsPopover() {
     if (!els.sessionsPopover.classList.contains('hidden')) { closeSessionsPopover(); return; }
     els.sessionsPopover.classList.remove('hidden');
+    setComboboxExpanded(els.sessionsSearch, true);
     els.sessionsSearch.value = '';
     renderSessionsList();
     setTimeout(() => els.sessionsSearch.focus(), 0);
   }
-  function closeSessionsPopover() { els.sessionsPopover.classList.add('hidden'); }
+  function closeSessionsPopover() {
+    els.sessionsPopover.classList.add('hidden');
+    setComboboxExpanded(els.sessionsSearch, false);
+    els.sessionsSearch.removeAttribute('aria-activedescendant');
+  }
   // In-memory cache for content search. Populated lazily.
   const sessionContentCache = new Map();
   let contentHits = new Set(); // session ids whose content matched the last deep search
@@ -6587,6 +6612,7 @@
         items.forEach(el => el.classList.remove('kbd-active'));
         items[next].classList.add('kbd-active');
         items[next].scrollIntoView?.({ block: 'nearest' });
+        syncActiveDescendant(els.popoverSearch, items, next);
       };
       const c = cursorAt();
       if (e.key === 'ArrowDown') { e.preventDefault(); moveTo(c === -1 ? 0 : c + 1); return; }
@@ -6643,6 +6669,7 @@
         items.forEach(el => el.classList.remove('kbd-active'));
         items[next].classList.add('kbd-active');
         items[next].scrollIntoView?.({ block: 'nearest' });
+        syncActiveDescendant(els.sessionsSearch, items, next);
       };
       const c = cursorAt();
       if (e.key === 'ArrowDown') { e.preventDefault(); moveTo(c === -1 ? 0 : c + 1); return; }
@@ -7330,6 +7357,7 @@
     paletteState.index = 0;
     paletteEl.overlay.classList.remove('hidden');
     refreshModalInert();
+    setComboboxExpanded(paletteEl.input, true);
     paletteEl.input.value = '';
     renderPalette();
     paletteEl.input.focus();
@@ -7338,6 +7366,8 @@
     if (!paletteEl.overlay) return;
     paletteState.open = false;
     paletteEl.overlay.classList.add('hidden');
+    setComboboxExpanded(paletteEl.input, false);
+    paletteEl.input.removeAttribute('aria-activedescendant');
     refreshModalInert();
     if (restoreFocus) { try { els.input?.focus(); } catch { /* non-fatal */ } }
   }
@@ -7367,7 +7397,7 @@
         const idx = row++;
         const active = idx === paletteState.index ? ' active' : '';
         html.push(
-          `<div class="palette-item${active}" data-idx="${idx}">` +
+          `<div class="palette-item${active}" id="palette-item-${idx}" role="option" aria-selected="${active ? 'true' : 'false'}" data-idx="${idx}">` +
           `<span class="pi-label">${esc(item.label)}</span>` +
           (item.hint ? `<span class="pi-hint">${esc(item.hint)}</span>` : '') +
           `</div>`
@@ -7377,6 +7407,9 @@
     paletteEl.list.innerHTML = html.join('');
     const activeEl = paletteEl.list.querySelector('.palette-item.active');
     if (activeEl && activeEl.scrollIntoView) activeEl.scrollIntoView({ block: 'nearest' });
+    const rows = [...paletteEl.list.querySelectorAll('.palette-item')];
+    const activeIdx = rows.findIndex(el => el.classList.contains('active'));
+    syncActiveDescendant(paletteEl.input, rows, activeIdx);
   }
   function runPaletteIndex(i) {
     const item = paletteState.filtered[i];
@@ -7405,6 +7438,23 @@
       if (row) runPaletteIndex(Number(row.dataset.idx));
     });
     paletteEl.overlay.addEventListener('click', (e) => { if (e.target === paletteEl.overlay) closePalette(); });
+  }
+
+  // ── Combobox wiring ──────────────────────────────────
+  // The pickers have a visually highlighted row, but nothing told assistive tech
+  // which row that was: `aria-activedescendant` is what connects the focused
+  // input to the option the keyboard cursor is sitting on.
+  function setComboboxExpanded(input, expanded) {
+    if (input) input.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  }
+
+  /** Point the input at whichever option the cursor is on. */
+  function syncActiveDescendant(input, optionEls, index) {
+    if (!input) return;
+    const el = optionEls[index];
+    if (!el) { input.removeAttribute('aria-activedescendant'); return; }
+    if (!el.id) el.id = `${input.id}-opt-${index}`;
+    input.setAttribute('aria-activedescendant', el.id);
   }
 
   // ── Modal focus containment ──────────────────────────

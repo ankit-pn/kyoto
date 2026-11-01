@@ -1265,3 +1265,111 @@ test('Tab is not hijacked when no dialog is open', async () => {
   p.window.document.dispatchEvent(ev);
   assert.equal(ev.defaultPrevented, false, 'normal tabbing must be untouched outside dialogs');
 });
+
+// ══════════════════════════════════════════════════════
+// ARIA combobox wiring
+// ══════════════════════════════════════════════════════
+// The pickers highlight a row visually, but nothing connected that row to the
+// accessibility tree: a screen reader had no idea what the arrow keys selected.
+// `aria-activedescendant` is the link, and `aria-expanded`/`aria-controls` make
+// the input announce itself as a combobox.
+
+test('the command palette is a proper combobox', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const input = doc.getElementById('paletteInput');
+  assert.equal(input.getAttribute('role'), 'combobox');
+  assert.equal(input.getAttribute('aria-controls'), 'paletteList');
+  assert.equal(input.getAttribute('aria-autocomplete'), 'list');
+
+  doc.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+  await settle(40);
+  assert.equal(input.getAttribute('aria-expanded'), 'true');
+
+  const ad = input.getAttribute('aria-activedescendant');
+  assert.ok(ad, 'the palette must expose which row is active');
+  const row = doc.getElementById(ad);
+  assert.ok(row, `aria-activedescendant ${ad} must reference a real element`);
+  assert.ok(row.classList.contains('active'), 'it must point at the visually active row');
+
+  key(p.window, 'ArrowDown');
+  await settle(20);
+  const ad2 = input.getAttribute('aria-activedescendant');
+  assert.notEqual(ad2, ad, 'moving the cursor must move the active descendant');
+  assert.ok(doc.getElementById(ad2).classList.contains('active'));
+
+  key(p.window, 'Escape');
+  await settle(30);
+  assert.equal(input.getAttribute('aria-expanded'), 'false', 'closing must reset aria-expanded');
+});
+
+test('the model picker exposes its keyboard cursor', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('modelBtn').click();
+  await settle(60);
+  const list = seedPopoverItems(p, doc);
+  const input = doc.getElementById('popoverSearch');
+
+  assert.equal(input.getAttribute('role'), 'combobox');
+  assert.equal(input.getAttribute('aria-expanded'), 'true');
+  assert.equal(input.getAttribute('aria-controls'), 'popoverList');
+  assert.equal(list.getAttribute('role'), 'listbox');
+
+  kbd(p, input, 'ArrowDown');
+  await settle(20);
+  const ad = input.getAttribute('aria-activedescendant');
+  assert.ok(ad, 'arrowing must set aria-activedescendant');
+  assert.equal(doc.getElementById(ad), list.querySelector('.kbd-active'),
+    'the active descendant must be the highlighted row');
+});
+
+test('the session picker exposes its keyboard cursor', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('sessionsBtn').click();
+  await settle(80);
+  const list = doc.getElementById('sessionsList');
+  const input = doc.getElementById('sessionsSearch');
+  list.innerHTML = `<div class="sess-item" data-id="s1"><span class="sess-title">one</span></div>
+                    <div class="sess-item" data-id="s2"><span class="sess-title">two</span></div>`;
+
+  assert.equal(input.getAttribute('role'), 'combobox');
+  assert.equal(input.getAttribute('aria-expanded'), 'true');
+  assert.equal(list.getAttribute('role'), 'listbox');
+
+  kbd(p, input, 'ArrowDown');
+  await settle(20);
+  const ad = input.getAttribute('aria-activedescendant');
+  assert.ok(ad, 'arrowing must set aria-activedescendant');
+  assert.equal(doc.getElementById(ad), list.querySelector('.kbd-active'));
+});
+
+test('the composer owns the slash-command listbox', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const input = doc.getElementById('input');
+  assert.equal(input.getAttribute('aria-controls'), 'slashPalette');
+  assert.equal(input.getAttribute('aria-expanded'), 'false');
+
+  // Open the slash palette the way a user does.
+  type(p.window, input, '/');
+  await settle(60);
+  const palette = doc.getElementById('slashPalette');
+  assert.ok(!palette.classList.contains('hidden'), 'typing / should open the slash palette');
+  assert.equal(palette.getAttribute('role'), 'listbox');
+  assert.equal(input.getAttribute('aria-expanded'), 'true');
+
+  const ad = input.getAttribute('aria-activedescendant');
+  assert.ok(ad, 'the composer must expose the highlighted slash command');
+  const row = doc.getElementById(ad);
+  assert.ok(row && palette.contains(row), `aria-activedescendant ${ad} must be a row in the palette`);
+  assert.ok(row.classList.contains('active'), 'it must point at the visually active row');
+
+  // Arrow navigation keeps the relationship in sync.
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+  await settle(20);
+  const ad2 = input.getAttribute('aria-activedescendant');
+  assert.notEqual(ad2, ad, 'moving the highlight must move the active descendant');
+  assert.equal(doc.getElementById(ad2), palette.querySelector('.slash-item.active'));
+});
