@@ -2350,3 +2350,59 @@ test('pinning the panel during a slow load cancels the pending switch', async ()
   assert.ok(!/TAB1 CONTENT/.test(doc.getElementById('chat').textContent),
     'a pinned panel must not be switched by a load that was in flight');
 });
+
+// ══════════════════════════════════════════════════════
+// Impatient clicking must not duplicate things
+// ══════════════════════════════════════════════════════
+// Both handlers were async with no re-entry guard: a double or triple click
+// created several conversations, or opened several popup windows.
+
+test('triple-clicking New chat creates exactly one conversation', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  await settle(250);
+  // Count in storage: the popover list has not been rendered yet, so counting
+  // its rows would measure 0 regardless of how many sessions exist.
+  const before = (p.chrome.__store.get('kyoto_sessions_index') || []).length;
+
+  const btn = doc.getElementById('newChatBtn');
+  btn.click(); btn.click(); btn.click();
+  await settle(700);
+
+  const after = (p.chrome.__store.get('kyoto_sessions_index') || []).length;
+  assert.equal(after - before, 1, `expected exactly one new conversation, got ${after - before}`);
+  assert.ok(!btn.disabled, 'the button must be usable again afterwards');
+});
+
+test('triple-clicking the pop-out button opens one window', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  let created = 0;
+  chrome.windows.create = async () => {
+    created++;
+    await new Promise(r => setTimeout(r, 120));   // a real window takes time
+    return { id: 1 };
+  };
+  const p = await bootPanel({ chrome });
+  await settle(250);
+  const btn = p.window.document.getElementById('popOutBtn');
+  btn.click(); btn.click(); btn.click();
+  await settle(500);
+
+  assert.equal(created, 1, 'three clicks must not open three windows');
+  assert.ok(!btn.disabled, 'and the button is usable again afterwards');
+});
+
+test('a failed pop-out says so instead of doing nothing', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.windows.create = async () => { throw new Error('window blocked by policy'); };
+  const p = await bootPanel({ chrome });
+  await settle(250);
+  p.window.document.getElementById('popOutBtn').click();
+  await settle(300);
+
+  const text = p.window.document.getElementById('chat').textContent;
+  assert.match(text, /could not open the pop-out/i, 'a failure must be visible');
+  assert.match(text, /blocked by policy/, 'and carry the reason');
+});

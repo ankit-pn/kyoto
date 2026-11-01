@@ -6647,13 +6647,32 @@
       if (els.auditStatus) { els.auditStatus.textContent = `Cleared ${n} entries.`; els.auditStatus.className = 'status ok'; }
     });
 
-    if (els.popOutBtn) els.popOutBtn.addEventListener('click', () => {
-      chrome.windows.create({
-        url: chrome.runtime.getURL('sidepanel/sidepanel.html'),
-        type: 'popup',
-        width: 480, height: 720
-      }).catch(() => {});
-    });
+    if (els.popOutBtn) {
+      // Two problems in one small handler: an impatient double-click opened two
+      // popup windows, and a failure was swallowed entirely — the button simply
+      // did nothing with no explanation.
+      let poppingOut = false;
+      els.popOutBtn.addEventListener('click', async () => {
+        if (poppingOut) return;
+        poppingOut = true;
+        els.popOutBtn.disabled = true;
+        try {
+          await chrome.windows.create({
+            url: chrome.runtime.getURL('sidepanel/sidepanel.html'),
+            type: 'popup',
+            width: 480, height: 720
+          });
+        } catch (err) {
+          addMessage('assistant',
+            `**Could not open the pop-out window:** ${err?.message || err}`,
+            { error: true });
+          announce('Could not open the pop-out window.');
+        } finally {
+          poppingOut = false;
+          els.popOutBtn.disabled = false;
+        }
+      });
+    }
 
     if (els.testConnBtn) els.testConnBtn.addEventListener('click', testConnection);
 
@@ -6996,12 +7015,28 @@
       if (file) importSettingsFile(file);
       e.target.value = '';
     });
+    // Creating a conversation is async, so an impatient double/triple click used
+    // to create two or three of them — each one an empty entry in history to
+    // clean up. Ignore clicks while one is already in flight, and disable the
+    // button so the state is visible rather than silently swallowed.
+    let creatingSession = false;
     els.newChatBtn.addEventListener('click', async () => {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      const session = await createSession(tab);
-      state.pinnedToSession = false; // resume follow-tab behavior
-      await switchToSession(session);
-      updateSessionsButton();
+      if (creatingSession) return;
+      creatingSession = true;
+      els.newChatBtn.disabled = true;
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const session = await createSession(tab);
+        state.pinnedToSession = false; // resume follow-tab behavior
+        await switchToSession(session);
+        updateSessionsButton();
+      } catch (err) {
+        // Never leave the button dead: report and re-enable via the finally.
+        addMessage('assistant', `**Could not start a new conversation:** ${err?.message || err}`, { error: true });
+      } finally {
+        creatingSession = false;
+        els.newChatBtn.disabled = false;
+      }
     });
     els.settingsBtn.addEventListener('click', openDrawer);
     els.closeDrawerBtn.addEventListener('click', closeDrawer);
