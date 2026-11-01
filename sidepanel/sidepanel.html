@@ -83,8 +83,8 @@
           <input type="checkbox" id="useContext" checked />
           <span>Page context</span>
         </label>
-                <button id="micBtn" class="btn-mini hidden" type="button" title="Voice input (speech-to-text)" aria-pressed="false">🎤</button>
-        <button id="visionBtn" class="btn-mini btn-vision" type="button" title="Attach a screenshot of the current tab with the next message (requires a vision-capable model)" aria-pressed="false">📸</button>
+                <button id="micBtn" class="btn-mini hidden" type="button" title="Voice input (speech-to-text)" aria-label="Voice input" aria-pressed="false">🎤</button>
+        <button id="visionBtn" class="btn-mini btn-vision" type="button" title="Attach a screenshot of the current tab with the next message (requires a vision-capable model)" aria-label="Attach a screenshot to the next message" aria-pressed="false">📸</button>
         <div class="composer-spacer"></div>
         <button id="stopBtn" class="btn-stop hidden" title="Stop generating">Stop</button>
         <button id="sendBtn" class="btn-send" title="Send (Enter)" aria-label="Send message">
@@ -372,7 +372,7 @@
         <div class="perm-row">
           <span>Debugger (CDP / response bodies)</span>
           <span id="debuggerStatus" class="permstatus">Unknown</span>
-          <button class="btn-mini" id="openExtPageBtn" type="button" title="Open chrome://extensions for this extension">⤴</button>
+          <button class="btn-mini" id="openExtPageBtn" type="button" title="Open chrome://extensions for this extension" aria-label="Open the extensions page">⤴</button>
         </div>
         <p class="hint">Granted at install time. Required for response-body capture, network modification, and full DevTools control via <code>debugger_attach</code> / <code>debugger_send</code>. Chrome shows a yellow banner on the tab while attached. If you see "Not granted", reload the extension on <code>chrome://extensions</code> (the ⤴ button takes you there).</p>
       </div>
@@ -419,7 +419,7 @@
         <label>Your extension ID</label>
         <div class="input-wrap">
           <input type="text" id="shellExtId" readonly />
-          <button class="reveal" id="shellCopyIdBtn" type="button" title="Copy">⧉</button>
+          <button class="reveal" id="shellCopyIdBtn" type="button" title="Copy" aria-label="Copy the bridge id">⧉</button>
         </div>
       </div>
       <div class="field">

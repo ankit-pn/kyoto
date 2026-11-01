@@ -1605,3 +1605,81 @@ test('settings hints are linked to their field', async () => {
   }
   assert.equal(resolved, described.length, 'every aria-describedby must point at real hint text');
 });
+
+// ══════════════════════════════════════════════════════
+// Every control has a real accessible name
+// ══════════════════════════════════════════════════════
+// The panel is full of glyph buttons (⎘ ⇣ ✎ ⌧ × ⤴ ⧉ 🎤 📸). A glyph is not a
+// name: a screen reader announces the character itself, or nothing useful. This
+// is a permanent version of the sweep that found them, so the class cannot come
+// back as new buttons are added.
+
+const GLYPH_ONLY = (name) => !/[a-zA-Z]/.test(name);
+
+async function scanButtonNames(doc) {
+  const offenders = [];
+  for (const btn of doc.querySelectorAll('button')) {
+    const name = (btn.getAttribute('aria-label') || '').trim() || (btn.textContent || '').trim();
+    if (!name) { offenders.push(`${btn.id || btn.className}: <empty>`); continue; }
+    if (GLYPH_ONLY(name)) offenders.push(`${btn.id || btn.className}: ${JSON.stringify(name)}`);
+  }
+  return offenders;
+}
+
+test('no button in the panel is announced as a bare glyph', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  // Render the surfaces that build their buttons lazily.
+  doc.getElementById('settingsBtn').click();
+  await settle(120);
+  doc.getElementById('sessionsBtn').click();
+  await settle(120);
+  doc.getElementById('modelBtn').click();
+  await settle(120);
+
+  const offenders = await scanButtonNames(doc);
+  assert.deepEqual(offenders, [], `buttons with no real accessible name:\n${offenders.join('\n')}`);
+});
+
+test('a rendered transcript has no glyph-only buttons either', async () => {
+  // The message bubble controls (pin ☆/★, edit ✎) only exist once a transcript
+  // is rendered, so the sweep above would miss them.
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('kyoto_sessions_index', [{ id: 'sess_hist', title: 'History', lastActive: Date.now(), tabId: 1, url: 'https://e.test/' }]);
+  chrome.__store.set('kyoto_session_sess_hist', {
+    id: 'sess_hist', title: 'History', lastActive: Date.now(), tabId: 1,
+    history: [
+      { role: 'user', content: 'hi', _ts: Date.now() },
+      { role: 'assistant', content: 'hello there', _ts: Date.now() }
+    ]
+  });
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  doc.getElementById('sessionsBtn').click();
+  await settle(120);
+  const row = [...doc.querySelectorAll('#sessionsList .sess-item')].find(el => el.textContent.includes('History'));
+  assert.ok(row, 'seeded conversation should be listed');
+  row.click();
+  await settle(250);
+
+  assert.ok(doc.querySelector('.msg .pin-btn'), 'the transcript should expose its pin control');
+  const offenders = await scanButtonNames(doc);
+  assert.deepEqual(offenders, [], `transcript buttons with no real accessible name:\n${offenders.join('\n')}`);
+});
+
+test('session actions are named after what they do, not their glyph', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('sessionsBtn').click();
+  await settle(120);
+
+  const acts = [...doc.querySelectorAll('#sessionsList .sess-act')];
+  assert.ok(acts.length >= 5, `expected the session action row, got ${acts.length}`);
+  const names = acts.map(b => b.getAttribute('aria-label'));
+  for (const n of names) assert.ok(n && n.length > 3, `weak label: ${JSON.stringify(n)}`);
+  // Distinct names, so several rows are navigable without ambiguity.
+  assert.equal(new Set(names).size, names.length, `duplicate action labels: ${names.join(', ')}`);
+  // And they say what they act on.
+  for (const n of names) assert.match(n, /conversation/i);
+});

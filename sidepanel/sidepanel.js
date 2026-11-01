@@ -3564,6 +3564,9 @@
       pin.className = 'pin-btn';
       pin.dataset.idx = opts.historyIndex;
       pin.title = opts.pinned ? 'Unpin' : 'Pin this message (always included in context)';
+      // A ★/☆ glyph is not a name; the state-dependent label is.
+      pin.setAttribute('aria-label', opts.pinned ? 'Unpin this message' : 'Pin this message to always include it in context');
+      pin.setAttribute('aria-pressed', opts.pinned ? 'true' : 'false');
       pin.textContent = opts.pinned ? '★' : '☆';
       label.appendChild(pin);
     }
@@ -3631,6 +3634,8 @@
     btn.className = 'pin-btn';
     btn.dataset.idx = String(idx);
     btn.title = pinned ? 'Unpin' : 'Pin this message (always included in context)';
+    btn.setAttribute('aria-label', pinned ? 'Unpin this message' : 'Pin this message to always include it in context');
+    btn.setAttribute('aria-pressed', pinned ? 'true' : 'false');
     btn.textContent = pinned ? '★' : '☆';
     label.appendChild(btn);
     if (pinned) wrap.classList.add('pinned');
@@ -3646,6 +3651,7 @@
     btn.className = 'edit-btn';
     btn.dataset.idx = String(idx);
     btn.title = 'Edit this message and regenerate the rest of the conversation';
+    btn.setAttribute('aria-label', 'Edit this message and regenerate the rest of the conversation');
     btn.textContent = '✎';
     label.appendChild(btn);
   }
@@ -4209,11 +4215,11 @@
           <div class="sess-row sub">
             <span class="sess-url">${esc(url)}</span>
             <span class="sess-actions">
-              <button class="sess-act" data-act="fork" title="Fork (duplicate as new)">⎘</button>
-              <button class="sess-act" data-act="export" title="Export as Markdown">⇣</button>
-              <button class="sess-act" data-act="rename" title="Rename">✎</button>
-              <button class="sess-act" data-act="bind" title="${s.tabId != null ? 'Unbind from tab' : 'Bind to current tab'}">${s.tabId != null ? '⌧' : '⌘'}</button>
-              <button class="sess-act" data-act="delete" title="Delete">×</button>
+              <button class="sess-act" data-act="fork" title="Fork (duplicate as new)" aria-label="Fork conversation">⎘</button>
+              <button class="sess-act" data-act="export" title="Export as Markdown" aria-label="Export conversation as Markdown">⇣</button>
+              <button class="sess-act" data-act="rename" title="Rename" aria-label="Rename conversation">✎</button>
+              <button class="sess-act" data-act="bind" title="${s.tabId != null ? 'Unbind from tab' : 'Bind to current tab'}" aria-label="${s.tabId != null ? 'Unbind conversation from tab' : 'Bind conversation to current tab'}">${s.tabId != null ? '⌧' : '⌘'}</button>
+              <button class="sess-act" data-act="delete" title="Delete" aria-label="Delete conversation">×</button>
             </span>
           </div>
         </div>`;
