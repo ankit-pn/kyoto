@@ -1396,11 +1396,37 @@
       .catch(() => chrome.tabs.create({ url }));
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
+  /**
+   * ISO timestamp that cannot throw.
+   *
+   * `new Date(undefined).toISOString()` throws RangeError("Invalid time value"),
+   * which is how exporting an older or partially-restored conversation died with
+   * an unhandled rejection and no visible error: the button simply did nothing.
+   */
+  function safeIso(value, fallback = 'unknown') {
+    const d = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(d.getTime()) ? fallback : d.toISOString();
+  }
+
   function downloadText(text, filename, mime = 'text/markdown') {
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     chrome.downloads.download({ url, filename, saveAs: true })
-      .catch(() => chrome.tabs.create({ url }));
+      .catch(() => {
+        // Downloads refused (permission, policy, invalid filename): fall back to
+        // opening the content in a tab so the work is not lost...
+        return chrome.tabs.create({ url }).catch(() => {
+          // ...and if that fails too, say so instead of doing nothing at all.
+          URL.revokeObjectURL(url);
+          addMessage('assistant',
+            `**Could not save ${filename}.** The browser blocked the download and a fallback tab could not be opened. ` +
+            `You can still copy the content from the conversation.`,
+            { error: true });
+          announce(`Could not save ${filename}.`);
+          throw new Error('download and fallback both failed');
+        });
+      })
+      .catch(() => { /* already reported above */ });
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
@@ -1409,7 +1435,7 @@
     lines.push(`# ${session.title || 'Untitled session'}`);
     lines.push('');
     lines.push(`- **Session id:** \`${session.id}\``);
-    lines.push(`- **Created:** ${new Date(session.createdAt).toISOString()}`);
+    lines.push(`- **Created:** ${safeIso(session.createdAt)}`);
     if (session.url) lines.push(`- **URL:** ${session.url}`);
     if (session.provider) lines.push(`- **Provider/model:** ${session.provider} · ${session.model || ''}`);
     lines.push('');
@@ -6705,7 +6731,7 @@
             const r = await window.KyotoTools.call('cron_logs', { id, limit: 20 });
             if (r?.error) { alert('Error: ' + r.error); return; }
             const txt = (r.runs || []).map(run =>
-              `[${new Date(run.ts).toISOString()}] ${run.ok ? 'OK' : 'FAIL'} · ${run.ms}ms · ${run.triggeredBy || '-'}` +
+              `[${safeIso(run.ts)}] ${run.ok ? 'OK' : 'FAIL'} · ${run.ms}ms · ${run.triggeredBy || '-'}` +
               (run.error ? '\n  err: ' + run.error : '') +
               (run.stdout ? '\n  stdout: ' + run.stdout.split('\n').join('\n  ') : '') +
               (run.stderr ? '\n  stderr: ' + run.stderr.split('\n').join('\n  ') : '')

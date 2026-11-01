@@ -2161,3 +2161,71 @@ test('a working MCP server produces no warning', async () => {
   const msgs = [...doc.querySelectorAll('.msg')].map(m => m.textContent).filter(t => /MCP/.test(t));
   assert.deepEqual(msgs, [], 'no false alarm when the server connects');
 });
+
+// ══════════════════════════════════════════════════════
+// Export must not fail silently
+// ══════════════════════════════════════════════════════
+// Two independent bugs in one user action: sessionToMarkdown threw
+// RangeError("Invalid time value") for a conversation with no createdAt (an
+// older or partially-restored session), and downloadText's fallback had no
+// handler, so clicking "Export as Markdown" could do nothing at all — no file,
+// no message, just a console line.
+
+async function bootExportable({ downloadImpl, tabImpl } = {}) {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  // Deliberately no createdAt: exercises the legacy-session path.
+  chrome.__store.set('kyoto_sessions_index', [{ id: 's_e', title: 'Expy', lastActive: Date.now(), tabId: 1, url: 'https://e.test/' }]);
+  chrome.__store.set('kyoto_session_s_e', {
+    id: 's_e', title: 'Expy', lastActive: Date.now(), tabId: 1,
+    history: [{ role: 'user', content: 'hi', _ts: Date.now() }]
+  });
+  const calls = { download: 0, tab: 0 };
+  if (downloadImpl) chrome.downloads.download = async (...a) => { calls.download++; return downloadImpl(...a); };
+  if (tabImpl) chrome.tabs.create = async (...a) => { calls.tab++; return tabImpl(...a); };
+
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  await settle(150);
+  doc.getElementById('sessionsBtn').click();
+  await settle(150);
+  const row = [...doc.querySelectorAll('#sessionsList .sess-item')].find(el => (el.textContent || '').includes('Expy'));
+  assert.ok(row, 'seeded conversation should be listed');
+  const trigger = () => row.querySelector('[data-act="export"]').click();
+  return { p, doc, calls, trigger };
+}
+
+test('exporting a conversation without a timestamp does not throw', async () => {
+  const { p, calls, trigger } = await bootExportable({ downloadImpl: async () => 1 });
+  trigger();
+  await settle(300);
+  assert.equal(calls.download, 1, 'the export should still be attempted');
+  const uncaught = p.errors.filter(e => /uncaught|unhandled/i.test(e));
+  assert.deepEqual(uncaught, [], `export must not reject unhandled: ${uncaught.join('; ')}`);
+});
+
+test('a blocked download that cannot fall back says so', async () => {
+  const { doc, trigger } = await bootExportable({
+    downloadImpl: async () => { throw new Error('downloads permission denied'); },
+    tabImpl: async () => { throw new Error('cannot create tab'); }
+  });
+  trigger();
+  await settle(400);
+
+  const text = doc.getElementById('chat').textContent;
+  assert.match(text, /could not save/i, 'the user must be told the file was not written');
+  assert.match(text, /\.md/, 'and which file');
+});
+
+test('a blocked download that falls back to a tab is not an error', async () => {
+  // Opening the content in a tab is a legitimate recovery, not a failure.
+  const { doc, calls, trigger } = await bootExportable({
+    downloadImpl: async () => { throw new Error('downloads permission denied'); },
+    tabImpl: async () => ({ id: 42 })
+  });
+  trigger();
+  await settle(400);
+  assert.equal(calls.tab, 1, 'the fallback should be used');
+  assert.ok(!/could not save/i.test(doc.getElementById('chat').textContent),
+    'a successful fallback must not be reported as an error');
+});
