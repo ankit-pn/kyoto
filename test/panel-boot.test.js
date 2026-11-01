@@ -2611,3 +2611,43 @@ test('the command palette has a visible, clickable entry point', async () => {
     'clicking it must open the palette');
   assert.equal(doc.activeElement?.id, 'paletteInput', 'and focus should move into the palette');
 });
+
+test('the palette can find an entry from every category it advertises', async () => {
+  // The placeholder promises "actions, tools, sessions, models, settings". Only
+  // "more than 20 items" was ever asserted, so a refactor could drop a whole
+  // category and every test would still pass. Each representative below is found
+  // by SEARCHING, which is how a user actually reaches the tail of the list (the
+  // unfiltered view is capped and tools sort last).
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('provider', 'openrouter');
+  chrome.__store.set('model', 'openai/gpt-4o-mini');
+  chrome.__store.set('apiKeys', { openrouter: 'test-key' });
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+
+  await settle(400);
+  doc.getElementById('paletteBtn').click();
+  await settle(300);
+  const input = doc.getElementById('paletteInput');
+
+  const search = async (q) => {
+    input.value = q;
+    input.dispatchEvent(new p.window.Event('input', { bubbles: true }));
+    await settle(200);
+    return [...doc.querySelectorAll('#paletteOverlay .palette-item')].map(el => el.textContent.trim());
+  };
+
+  // action
+  assert.ok((await search('open settings')).some(t => /settings/i.test(t)),
+    'settings should be reachable as a palette action');
+  // tool
+  assert.ok((await search('fs_write')).some(t => /fs_write/.test(t)),
+    'agent tools should be searchable in the palette');
+  // session
+  assert.ok((await search('new chat')).some(t => /new chat/i.test(t)),
+    'sessions should be searchable in the palette');
+  // slash command
+  assert.ok((await search('/help')).some(t => /help/i.test(t)),
+    'slash commands should be searchable in the palette');
+});
