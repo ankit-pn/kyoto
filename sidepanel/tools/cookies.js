@@ -4,6 +4,17 @@
   'use strict';
   const { T, STR, NUM, BOOL, OBJ, activeTab } = window.KyotoTR;
 
+  // Resolve which tab to derive a URL/domain from. A conversation is bound to
+  // one tab and the side panel injects that `tabId`; using `activeTab()`
+  // instead meant that switching tabs mid-turn silently pointed cookie reads at
+  // a page the model never chose.
+  async function tabFor(tabId) {
+    if (tabId != null) {
+      try { return await chrome.tabs.get(tabId); } catch { /* tab closed */ }
+    }
+    return activeTab();
+  }
+
   function classifyCookie(c) {
     const n = c.name.toLowerCase();
     const tags = [];
@@ -23,11 +34,11 @@
     name: 'cookies_list',
     group: 'cookies',
     description: 'List cookies for a URL or domain. Pass exactly one of `url` or `domain`.',
-    parameters: OBJ({ url: STR, domain: STR }),
-    handler: async ({ url, domain } = {}) => {
+    parameters: OBJ({ url: STR, domain: STR, tabId: NUM }),
+    handler: async ({ url, domain, tabId } = {}) => {
       const query = url ? { url } : domain ? { domain } : {};
       if (!url && !domain) {
-        const t = await activeTab();
+        const t = await tabFor(tabId);
         query.url = t.url;
       }
       const cookies = await chrome.cookies.getAll(query);
@@ -53,7 +64,17 @@
       sameSite: { type: 'string', enum: ['no_restriction', 'lax', 'strict', 'unspecified'] },
       expirationDate: NUM
     }, ['url', 'name', 'value']),
-    handler: async (args) => chrome.cookies.set(args)
+    handler: async (args = {}) => {
+      try {
+        if (!args || !args.url || !args.name || args.value === undefined) {
+          return { error: 'url, name and value are required' };
+        }
+        // Return a stable object: the raw chrome result is undefined on success,
+        // which a tool result must never be (the model needs something to read).
+        const r = await chrome.cookies.set(args);
+        return { set: true, name: args.name, url: args.url, cookie: r ?? null };
+      } catch (e) { return { error: e?.message || String(e) }; }
+    }
   });
 
   T({
@@ -61,7 +82,13 @@
     group: 'cookies',
     description: 'Remove a cookie by url + name. WRITE operation.',
     parameters: OBJ({ url: STR, name: STR }, ['url', 'name']),
-    handler: async ({ url, name }) => chrome.cookies.remove({ url, name })
+    handler: async ({ url, name } = {}) => {
+      try {
+        if (!url || !name) return { error: 'url and name are required' };
+        const r = await chrome.cookies.remove({ url, name });
+        return { removed: !!r, url, name, detail: r ?? null };
+      } catch (e) { return { error: e?.message || String(e) }; }
+    }
   });
 
   T({
@@ -69,13 +96,13 @@
     group: 'cookies',
     description: 'Export cookies for cloning a session. Format: "netscape" (cookies.txt), "json" (full), "header" (Cookie: header), or "curl-b" (curl --cookie line).',
     parameters: OBJ({
-      url: STR, domain: STR,
+      url: STR, domain: STR, tabId: NUM,
       format: { type: 'string', enum: ['netscape', 'json', 'header', 'curl-b'] },
       includeHttpOnly: BOOL
     }),
-    handler: async ({ url, domain, format = 'netscape', includeHttpOnly = true } = {}) => {
+    handler: async ({ url, domain, tabId, format = 'netscape', includeHttpOnly = true } = {}) => {
       const query = url ? { url } : domain ? { domain } : {};
-      if (!url && !domain) { query.url = (await activeTab()).url; }
+      if (!url && !domain) { query.url = (await tabFor(tabId)).url; }
       const cookies = await chrome.cookies.getAll(query);
       const filtered = includeHttpOnly ? cookies : cookies.filter(c => !c.httpOnly);
       if (format === 'json') return filtered;
@@ -105,10 +132,10 @@
     name: 'cookies_analyze',
     group: 'cookies',
     description: 'Classify cookies for a URL/domain into session, auth, csrf, tracking, consent. Useful for identifying which cookies matter for session cloning.',
-    parameters: OBJ({ url: STR, domain: STR }),
-    handler: async ({ url, domain } = {}) => {
+    parameters: OBJ({ url: STR, domain: STR, tabId: NUM }),
+    handler: async ({ url, domain, tabId } = {}) => {
       const query = url ? { url } : domain ? { domain } : {};
-      if (!url && !domain) query.url = (await activeTab()).url;
+      if (!url && !domain) query.url = (await tabFor(tabId)).url;
       const cookies = await chrome.cookies.getAll(query);
       const byTag = {};
       const annotated = cookies.map(c => {
@@ -134,10 +161,10 @@
     name: 'cookies_snapshot',
     group: 'cookies',
     description: 'Save the current cookie state for a URL or domain as a snapshot. Use before performing an action (login, logout, accept-cookies banner) so cookies_diff can show what changed.',
-    parameters: OBJ({ url: STR, domain: STR, label: STR }),
-    handler: async ({ url, domain, label = 'default' } = {}) => {
+    parameters: OBJ({ url: STR, domain: STR, label: STR, tabId: NUM }),
+    handler: async ({ url, domain, label = 'default', tabId } = {}) => {
       const query = url ? { url } : domain ? { domain } : {};
-      if (!url && !domain) { const t = await activeTab(); query.url = t.url; }
+      if (!url && !domain) { const t = await tabFor(tabId); query.url = t.url; }
       const cookies = await chrome.cookies.getAll(query);
       const all = (await chrome.storage.local.get(COOKIE_SNAP_KEY))[COOKIE_SNAP_KEY] || {};
       all[label] = { takenAt: Date.now(), query, cookies };

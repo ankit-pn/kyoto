@@ -3,16 +3,23 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch(() => {});
 
+// onInstalled ALSO fires on extension update, when the menu items already
+// exist. Creating them again fails with "Cannot create item with duplicate id"
+// and that lastError is otherwise never checked, so a rename would silently
+// leave the stale items in place. removeAll first makes this idempotent.
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: 'kt-ask-selection',
-    title: 'Ask Kyoto about "%s"',
-    contexts: ['selection']
-  });
-  chrome.contextMenus.create({
-    id: 'kt-ask-page',
-    title: 'Ask Kyoto about this page',
-    contexts: ['page']
+  chrome.contextMenus.removeAll(() => {
+    void chrome.runtime.lastError;   // nothing to remove on first install
+    chrome.contextMenus.create({
+      id: 'kt-ask-selection',
+      title: 'Ask Kyoto about "%s"',
+      contexts: ['selection']
+    }, () => { void chrome.runtime.lastError; });
+    chrome.contextMenus.create({
+      id: 'kt-ask-page',
+      title: 'Ask Kyoto about this page',
+      contexts: ['page']
+    }, () => { void chrome.runtime.lastError; });
   });
 });
 
@@ -25,13 +32,78 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   setTimeout(() => { chrome.runtime.sendMessage(payload).catch(() => {}); }, 250);
 });
 
+// ── Omnibox: type "ky <prompt>" in the address bar ────────────────────
+// Reachable from anywhere without opening the panel first, which is the
+// fastest path to "ask the agent something about this page".
+//
+// The panel is opened for the current tab and the prompt is delivered over
+// runtime messaging. Delivery is retried because sidePanel.open() resolves
+// before the panel document has necessarily registered its listener — a
+// single delayed send is racy on a cold start.
+const OMNIBOX_KEYWORD = 'ky';
+
+chrome.omnibox.setDefaultSuggestion({
+  description: 'Ask Kyoto: %s'
+});
+
+chrome.omnibox.onInputChanged.addListener((text, suggest) => {
+  const t = String(text || '').trim();
+  if (!t) return;
+  suggest([
+    { content: t, description: `Ask Kyoto — <match>${t}</match>` },
+    { content: `summarize: ${t}`, description: `Summarize: <match>${t}</match>` },
+    { content: `explain: ${t}`, description: `Explain: <match>${t}</match>` }
+  ]);
+});
+
+const OMNIBOX_PREFIXES = {
+  summarize: 'Summarize the current page, focusing on: ',
+  explain: 'Explain this page in simple terms, focusing on: '
+};
+
+chrome.omnibox.onInputEntered.addListener(async (text, disposition) => {
+  const raw = String(text || '').trim();
+  if (!raw) return;
+
+  // "summarize: …" / "explain: …" shortcuts expand into a normal prompt.
+  let prompt = raw;
+  const m = raw.match(/^(summarize|explain)\s*:\s*(.*)$/i);
+  if (m) {
+    const prefix = OMNIBOX_PREFIXES[m[1].toLowerCase()];
+    prompt = prefix + (m[2] || 'the page as a whole');
+  }
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id != null) {
+      try { await chrome.sidePanel.open({ tabId: tab.id }); } catch { /* already open */ }
+    }
+    // Retry: on a cold open the panel's listener may not exist yet. A few
+    // spaced attempts covers that without depending on a fixed sleep.
+    const payload = { type: 'ASK_PROMPT', text: prompt, fromOmnibox: true };
+    for (const delay of [0, 200, 600, 1200]) {
+      if (delay) await new Promise(r => setTimeout(r, delay));
+      try {
+        const res = await chrome.runtime.sendMessage(payload);
+        if (res?.delivered !== false) return;
+      } catch { /* panel not listening yet — retry */ }
+    }
+  } catch (e) {
+    console.warn('[Kyoto] omnibox dispatch failed:', e?.message || e);
+  }
+});
+
 // ── Network capture (webRequest, observe-only in MV3) ──
 const RING_MAX = 500;
 const capture = {
   active: false,
   filterTabId: null,
   events: [],   // ring buffer of completed requests
-  inflight: new Map()  // requestId -> partial record
+  inflight: new Map(),  // requestId -> partial record
+  // True when we rehydrated an active capture after a service-worker restart.
+  // The buffer from the previous SW instance is gone, so the caller deserves
+  // to be told rather than silently seeing total:0.
+  restoredAfterRestart: false
 };
 
 function pushEvent(rec) {
@@ -44,6 +116,45 @@ function shouldRecord(details) {
   if (capture.filterTabId != null && details.tabId !== capture.filterTabId) return false;
   return true;
 }
+
+// ── Capture state persistence ──
+// MV3 kills the service worker after ~30 s idle and module state does not
+// survive. Previously `capture.active` silently reset to false on the next
+// wake, so a capture the user believed was running recorded nothing and
+// reported `capturing:false, total:0` with no error. We persist the FLAG (not
+// the buffer — that would burn the session-storage quota) in
+// chrome.storage.session, which survives SW restarts and is cleared when the
+// browser exits, then rehydrate it at boot. webRequest events still wake the
+// worker, so an active capture resumes on its own.
+const CAPTURE_STATE_KEY = 'kyoto.capture.state';
+
+async function persistCaptureState() {
+  try {
+    await chrome.storage.session.set({
+      [CAPTURE_STATE_KEY]: {
+        active: capture.active,
+        filterTabId: capture.filterTabId,
+        startedAt: capture.active ? Date.now() : null
+      }
+    });
+  } catch { /* storage.session unavailable (older Chrome / test stubs) */ }
+}
+
+async function hydrateCaptureState() {
+  try {
+    const got = await chrome.storage.session.get(CAPTURE_STATE_KEY);
+    const st = got?.[CAPTURE_STATE_KEY];
+    if (st?.active) {
+      capture.active = true;
+      capture.filterTabId = st.filterTabId ?? null;
+      capture.restoredAfterRestart = true;
+    }
+  } catch { /* no session storage — capture stays volatile */ }
+}
+// Handlers await this: hydration is async (storage.session read), and without
+// ordering the first capture call after a worker restart could observe the
+// pre-hydration state and report `capturing:false` for a live capture.
+const captureHydrated = hydrateCaptureState();
 
 chrome.webRequest.onBeforeRequest.addListener((d) => {
   if (!shouldRecord(d)) return;
@@ -135,27 +246,35 @@ const HANDLERS = {
 
   // ── network capture ──────────────────
   async NET_CAPTURE_START({ tabId, scope = 'all' } = {}) {
+    await captureHydrated;
     capture.active = true;
     capture.filterTabId = scope === 'tab' ? (tabId ?? await activeTabId()) : null;
-    return { capturing: true, scope, tabId: capture.filterTabId };
+    capture.restoredAfterRestart = false;
+    await persistCaptureState();
+    return { capturing: true, scope, tabId: capture.filterTabId, persistent: true };
   },
-  NET_CAPTURE_STOP() {
+  async NET_CAPTURE_STOP() {
+    await captureHydrated;
     capture.active = false;
+    await persistCaptureState();
     return { capturing: false, kept: capture.events.length };
   },
-  NET_CAPTURE_CLEAR() {
+  async NET_CAPTURE_CLEAR() {
+    await captureHydrated;
     capture.events = [];
     capture.inflight.clear();
+    capture.restoredAfterRestart = false;
     return { cleared: true };
   },
-  NET_CAPTURE_LIST({ filter, limit = 100, sinceMs } = {}) {
+  async NET_CAPTURE_LIST({ filter, limit = 100, sinceMs } = {}) {
+    await captureHydrated;
     let out = capture.events;
     if (sinceMs) out = out.filter(r => r.started >= sinceMs);
     if (filter) {
       const re = new RegExp(filter, 'i');
       out = out.filter(r => re.test(r.url) || re.test(String(r.status || '')));
     }
-    return {
+    const res = {
       capturing: capture.active,
       total: capture.events.length,
       shown: Math.min(out.length, limit),
@@ -165,6 +284,13 @@ const HANDLERS = {
         error: r.error
       }))
     };
+    // Capture survives service-worker suspension, but the buffered events do
+    // not. Say so explicitly instead of returning a silently empty list.
+    if (capture.restoredAfterRestart) {
+      res.notice = 'Capture is still active, but the service worker restarted since it began — events recorded before the restart were lost. Use line-by-line page work, then read the capture in the same step where possible.';
+      res.resumedAfterRestart = true;
+    }
+    return res;
   },
   NET_CAPTURE_DETAIL({ id }) {
     const rec = capture.events.find(r => r.id === id);
@@ -281,24 +407,71 @@ const HANDLERS = {
   },
 
   // ── server-side fetch (replay with cookies) ──
-  async NET_FETCH({ url, method = 'GET', headers = {}, body, includeCookies = true, maxBodyBytes = 65536 }) {
+  async NET_FETCH({ url, method = 'GET', headers = {}, body, includeCookies = true, maxBodyBytes = 65536, timeoutMs = 30000 }) {
     if (!url) throw new Error('url required');
     const init = { method, headers, credentials: includeCookies ? 'include' : 'omit' };
     if (body != null) init.body = typeof body === 'string' ? body : JSON.stringify(body);
-    const res = await fetch(url, init);
-    const ct = res.headers.get('content-type') || '';
-    const isText = /^(text\/|application\/(json|xml|javascript|x-www-form-urlencoded))/.test(ct);
-    let bodyOut;
-    if (isText) {
-      bodyOut = await res.text();
-      if (bodyOut.length > maxBodyBytes) bodyOut = bodyOut.slice(0, maxBodyBytes) + '… [truncated]';
-    } else {
-      const buf = await res.arrayBuffer();
-      bodyOut = `[binary ${buf.byteLength} bytes, content-type=${ct}]`;
+    // Bounded request. The previous version did an unbounded `fetch` followed
+    // by `res.text()`/`res.arrayBuffer()`, which never settles on an
+    // `text/event-stream` response and buffers arbitrarily large bodies in the
+    // service worker.
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    init.signal = ac.signal;
+    try {
+      const res = await fetch(url, init);
+      const ct = res.headers.get('content-type') || '';
+      const isStream = /^text\/event-stream/i.test(ct);
+      const isText = isStream || /^(text\/|application\/(json|xml|javascript|x-www-form-urlencoded))/.test(ct);
+
+      // Read at most `maxBodyBytes`, then cancel the stream. Cancelling is what
+      // makes an SSE endpoint finite.
+      const readCapped = async (r, cap) => {
+        if (!r.body) return { text: await r.text(), truncated: false };
+        const reader = r.body.getReader();
+        const chunks = [];
+        let total = 0;
+        try {
+          while (total < cap) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (!value || !value.byteLength) continue;
+            chunks.push(value);
+            total += value.byteLength;
+          }
+        } finally {
+          try { await reader.cancel(); } catch { /* already closed */ }
+        }
+        const merged = new Uint8Array(total);
+        let off = 0;
+        for (const c of chunks) { merged.set(c, off); off += c.byteLength; }
+        let text = '';
+        try { text = new TextDecoder().decode(merged.subarray(0, Math.min(total, cap))); } catch { text = ''; }
+        return { text, truncated: total > cap };
+      };
+
+      let bodyOut;
+      if (isText) {
+        const { text, truncated } = await readCapped(res, maxBodyBytes);
+        bodyOut = truncated ? text + '… [truncated]' : text;
+        if (isStream) bodyOut = '[event-stream — capture window only, stream cancelled]\n' + bodyOut;
+      } else {
+        // Never buffer binary bodies: they can be arbitrarily large.
+        const declared = res.headers.get('content-length');
+        try { await res.body?.cancel(); } catch { /* ignore */ }
+        bodyOut = `[binary${declared ? ` ${declared} bytes` : ''}, content-type=${ct}; body not buffered]`;
+      }
+      const headersOut = {};
+      res.headers.forEach((v, k) => { headersOut[k] = v; });
+      return { status: res.status, statusText: res.statusText, headers: headersOut, body: bodyOut };
+    } catch (e) {
+      if (ac.signal.aborted) {
+        throw new Error(`network_fetch timed out after ${timeoutMs}ms (or the response body stopped streaming). Raise timeoutMs, or use network_capture_* to observe a long-lived stream.`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-    const headersOut = {};
-    res.headers.forEach((v, k) => { headersOut[k] = v; });
-    return { status: res.status, statusText: res.statusText, headers: headersOut, body: bodyOut };
   },
 
   // ── debugger (optional permission) ──
@@ -572,6 +745,24 @@ const Cron = (() => {
     await chrome.storage.local.set({ [key]: val });
   }
 
+  // ── Serialisation for read-modify-write storage ──
+  // chrome.storage gives atomic single-key writes but no transaction. Several
+  // paths here do load-whole-map → mutate-one-entry → save-whole-map (job
+  // bookkeeping, the K.state KV blob). Fired concurrently — which is exactly
+  // what onAlarm does for every due job in one tick — the last writer wipes
+  // the others' updates: consecutiveFailures never climbs so auto-pause never
+  // triggers, and simultaneous state.set() calls lose keys.
+  //
+  // withLock funnels those sections through a single promise chain. Keep the
+  // critical section short and NEVER nest it: a nested call would queue behind
+  // the chain it is already inside and deadlock.
+  let _rwChain = Promise.resolve();
+  function withLock(fn) {
+    const run = _rwChain.then(fn, fn);
+    _rwChain = run.then(() => {}, () => {});
+    return run;
+  }
+
   // ── State pipe ──
   function _expired(rec) {
     if (!rec || !rec.ttlMs) return false;
@@ -597,33 +788,42 @@ const Cron = (() => {
     if (serialized && serialized.length > MAX_STATE_BYTES) {
       throw new Error(`state value too large (${serialized.length} > ${MAX_STATE_BYTES} bytes). Keep cron state small; put bulk data in KyotoVFS.`);
     }
-    const all = await loadObj(STORAGE_STATE);
-    all[key] = {
+    // Read-modify-write of the shared state blob must be serialised: two
+    // concurrent state.set() calls (parallel tool calls are common) would
+    // otherwise both read the same map and the later write would drop the
+    // earlier key.
+    const rec = {
       value, writtenAt: Date.now(),
       ttlMs: ttlMs || null,
       writtenBy: writtenBy || 'agent',
     };
-    await saveObj(STORAGE_STATE, all);
-    // Aggregate size watch. chrome.storage.local total quota is ~5MB
-    // shared with everything else Kyoto stores. Warn (don't block) at
-    // 80% so the caller / agent has runway to clean up. The actual
-    // QuotaExceededError would surface from saveObj naturally if we
-    // hit the wall.
-    const bytesUsed = JSON.stringify(all).length;
-    const SOFT_CAP = 4 * 1024 * 1024;   // 4MB = ~80% of 5MB
-    const out = { ok: true, writtenAt: all[key].writtenAt, bytesUsed };
+    const bytesUsed = await withLock(async () => {
+      const all = await loadObj(STORAGE_STATE);
+      all[key] = rec;
+      await saveObj(STORAGE_STATE, all);
+      return JSON.stringify(all).length;
+    });
+    // Aggregate size watch. Chrome's `storage.local` quota is ~10MB (not 5MB
+    // as this comment used to claim, which made the warning fire far too
+    // late), shared with cron jobs, sessions, memories and cookie snapshots.
+    // Warn — don't block — at ~80% so the caller has runway to clean up; the
+    // actual QuotaExceededError surfaces from saveObj.
+    const SOFT_CAP = 8 * 1024 * 1024;   // 8MB = ~80% of 10MB
+    const out = { ok: true, writtenAt: rec.writtenAt, bytesUsed };
     if (bytesUsed > SOFT_CAP) {
-      out.sizeWarning = `state store at ${(bytesUsed / 1024 / 1024).toFixed(2)}MB; chrome.storage.local quota is ~5MB total. Consider state_delete on stale keys or move bulk data to KyotoVFS.`;
+      out.sizeWarning = `state store at ${(bytesUsed / 1024 / 1024).toFixed(2)}MB; chrome.storage.local quota is ~10MB in total (shared with sessions, memories and cookie snapshots). Consider state_delete on stale keys or move bulk data to KyotoVFS.`;
     }
     return out;
   }
 
   async function stateDelete(key) {
-    const all = await loadObj(STORAGE_STATE);
-    if (!(key in all)) return { deleted: false };
-    delete all[key];
-    await saveObj(STORAGE_STATE, all);
-    return { deleted: true };
+    return withLock(async () => {
+      const all = await loadObj(STORAGE_STATE);
+      if (!(key in all)) return { deleted: false };
+      delete all[key];
+      await saveObj(STORAGE_STATE, all);
+      return { deleted: true };
+    });
   }
 
   async function stateList(prefix) {
@@ -949,13 +1149,16 @@ const Cron = (() => {
     return j;
   }
 
-  async function runJobNow(id, { async: asyncRun = false } = {}) {
+  async function runJobNow(id, { async: asyncRun = false, force = false } = {}) {
     const j = await getJob(id);
+    // Manual runs still respect the singleton guard and the backoff window —
+    // skipping them let two copies of one job run at once. `force:true` is the
+    // explicit opt-out for "I know it's in backoff, run it anyway".
     if (asyncRun) {
-      executeJob(j, { triggeredBy: 'run_now' }).catch(() => {});
+      executeJob(j, { triggeredBy: 'run_now', force }).catch(() => {});
       return { queued: true, id };
     }
-    return executeJob(j, { triggeredBy: 'run_now' });
+    return executeJob(j, { triggeredBy: 'run_now', force });
   }
 
   async function getJobLogs(id, { limit = 20, sinceMs } = {}) {
@@ -1149,9 +1352,11 @@ const Cron = (() => {
   }
 
   async function persistJob(job) {
-    const jobs = await loadObj(STORAGE_JOBS);
-    jobs[job.id] = job;
-    await saveObj(STORAGE_JOBS, jobs);
+    return withLock(async () => {
+      const jobs = await loadObj(STORAGE_JOBS);
+      jobs[job.id] = job;
+      await saveObj(STORAGE_JOBS, jobs);
+    });
   }
 
   function nextCronTickFrom(fromMs, expr) {
@@ -1267,7 +1472,7 @@ const Cron = (() => {
   }
 
   // ── K sandbox: what job code can call ──
-  function buildSandbox(job, runBuffer) {
+  function buildSandbox(job, runBuffer, signal = null) {
     const log = (...args) => runBuffer.stdout.push(args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '));
     const stderr = (...args) => runBuffer.stderr.push(args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '));
     const tools = {
@@ -1355,57 +1560,86 @@ const Cron = (() => {
       tools,
       chrome,  // escape hatch for anything not in tools
       fetch,
+      // Cooperative cancellation. Aborted when the run exceeds timeoutMs.
+      // Long jobs should check `K.cancelled` (or pass K.signal to fetch and
+      // K.sleep) and bail out — otherwise they keep working long after the
+      // run was recorded as failed.
+      signal,
+      get cancelled() { return !!(signal && signal.aborted); },
     };
   }
 
   // ── Execute one job ──
-  async function executeJob(job, { triggeredBy = 'alarm' } = {}) {
+  async function executeJob(job, { triggeredBy = 'alarm', force = false } = {}) {
     const start = Date.now();
-    // Singleton + backoff skip checks. Re-read the job spec so we see
-    // _runningSince that another concurrent firing wrote. (We pass `job`
-    // by value into onAlarm so the cached copy can be stale.)
-    if (triggeredBy === 'alarm' || triggeredBy === 'cron') {
-      const cur = (await loadObj(STORAGE_JOBS))[job.id];
-      if (!cur) return { ok: false, error: 'job vanished mid-fire' };
-      if (cur._backoffUntil && start < cur._backoffUntil) {
-        const remainingMs = cur._backoffUntil - start;
-        appendRun(job.id, {
-          ts: start, ok: false, ms: 0, stdout: '',
-          stderr: `skipped: in backoff, ~${Math.round(remainingMs / 1000)}s remaining`,
-          error: 'backoff', triggeredBy,
-        }).catch(() => {});
-        return { ok: false, skipped: true, reason: 'backoff', remainingMs };
+    // Singleton + backoff guard, and the run claim.
+    //
+    // This now runs for EVERY trigger, including 'run_now': a manual run is
+    // still a run, and letting it skip the guard meant two concurrent
+    // executions of the same singleton job. `force:true` is the only way to
+    // bypass the *backoff* window; the singleton guard is never bypassable.
+    //
+    // The check-and-claim is a single withLock section so two firings in the
+    // same alarm tick cannot both observe "not running" and both claim.
+    // Re-read the job spec inside the lock because the `job` we were handed
+    // may be a stale copy (onAlarm passes values out of a batch load).
+    const claim = await withLock(async () => {
+      const jobs = await loadObj(STORAGE_JOBS);
+      const cur = jobs[job.id];
+      if (!cur) return { vanished: true };
+      if (!force && cur._backoffUntil && start < cur._backoffUntil) {
+        return { skipped: 'backoff', remainingMs: cur._backoffUntil - start };
       }
       if (cur.singleton && cur._runningSince
           && (start - cur._runningSince) < (cur.timeoutMs || DEFAULT_TIMEOUT_MS)) {
-        const elapsedMs = start - cur._runningSince;
-        appendRun(job.id, {
-          ts: start, ok: false, ms: 0, stdout: '',
-          stderr: `skipped: singleton, previous run still in flight (${Math.round(elapsedMs / 1000)}s elapsed)`,
-          error: 'singleton-skip', triggeredBy,
-        }).catch(() => {});
-        return { ok: false, skipped: true, reason: 'singleton', elapsedMs };
+        return { skipped: 'singleton', elapsedMs: start - cur._runningSince };
       }
-      // Claim the run. Writing _runningSince here closes the race.
       cur._runningSince = start;
-      await persistJob(cur);
+      jobs[job.id] = cur;
+      await saveObj(STORAGE_JOBS, jobs);
+      return { claimed: true };
+    });
+    if (claim.vanished) return { ok: false, error: 'job vanished mid-fire' };
+    if (claim.skipped === 'backoff') {
+      const remainingMs = claim.remainingMs;
+      appendRun(job.id, {
+        ts: start, ok: false, ms: 0, stdout: '',
+        stderr: `skipped: in backoff, ~${Math.round(remainingMs / 1000)}s remaining`,
+        error: 'backoff', triggeredBy,
+      }).catch(() => {});
+      return { ok: false, skipped: true, reason: 'backoff', remainingMs };
+    }
+    if (claim.skipped === 'singleton') {
+      const elapsedMs = claim.elapsedMs;
+      appendRun(job.id, {
+        ts: start, ok: false, ms: 0, stdout: '',
+        stderr: `skipped: singleton, previous run still in flight (${Math.round(elapsedMs / 1000)}s elapsed)`,
+        error: 'singleton-skip', triggeredBy,
+      }).catch(() => {});
+      return { ok: false, skipped: true, reason: 'singleton', elapsedMs };
     }
 
     const runBuf = { stdout: [], stderr: [] };
     let ok = false; let err = null;
-    let timerId;
+    let timerId; let timedOut = false;
+    // Cancellation plumbing. A timeout has to be able to tell the job body to
+    // stop: otherwise it keeps running — and keeps writing state, downloading
+    // files — long after it was recorded as failed.
+    const ac = typeof AbortController === 'function' ? new AbortController() : null;
+    let exec = null;
     try {
-      const K = buildSandbox(job, runBuf);
+      const K = buildSandbox(job, runBuf, ac ? ac.signal : null);
       const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
       const fn = new AsyncFunction('K', '"use strict";\n' + job.code);
-      const exec = fn(K);
+      exec = fn(K);
       // Per-run wall clock cap. Clear the timer whichever side wins
       // the race so a fast job doesn't leak a 5-minute setTimeout.
       const timeoutP = new Promise((_, rej) => {
-        timerId = setTimeout(
-          () => rej(new Error(`job timed out after ${job.timeoutMs}ms`)),
-          job.timeoutMs
-        );
+        timerId = setTimeout(() => {
+          timedOut = true;
+          try { ac?.abort(); } catch {}
+          rej(new Error(`job timed out after ${job.timeoutMs}ms`));
+        }, job.timeoutMs);
       });
       await Promise.race([exec, timeoutP]);
       ok = true;
@@ -1424,12 +1658,20 @@ const Cron = (() => {
     };
     appendRun(job.id, run).catch(() => {});
 
-    // Update job state.
-    const jobs = await loadObj(STORAGE_JOBS);
-    const cur = jobs[job.id];
-    if (cur) {
+    // Update job state. Serialised through withLock: concurrent completions
+    // would each load the whole job map and the last writer would erase the
+    // others' consecutiveFailures/lastError — so auto-pause could never fire
+    // even after N real failures.
+    await withLock(async () => {
+      const jobs = await loadObj(STORAGE_JOBS);
+      const cur = jobs[job.id];
+      if (!cur) return;
       cur.lastRunAt = start;
-      cur._runningSince = null;   // release the singleton claim
+      // Release the singleton claim — unless the run timed out, in which case
+      // the body may still be alive and claiming otherwise would let a second
+      // copy start alongside the orphan.
+      cur._runningSince = timedOut ? start : null;
+      if (timedOut) cur._timedOut = true; else delete cur._timedOut;
       if (ok) {
         cur.consecutiveFailures = 0;
         cur.lastError = null;
@@ -1469,6 +1711,24 @@ const Cron = (() => {
       else if (cur.schedule?.every) cur.nextRunAt = Date.now() + (parseEvery(cur.schedule.every) || 0);
       jobs[job.id] = cur;
       await saveObj(STORAGE_JOBS, jobs);
+    });
+
+    // If the body outlived its timeout, drop the claim when it finally
+    // settles rather than making a singleton job wait out the stale window.
+    if (timedOut && exec) {
+      exec.catch(() => {}).then(async () => {
+        try {
+          await withLock(async () => {
+            const jobs = await loadObj(STORAGE_JOBS);
+            const c = jobs[job.id];
+            if (c && c._runningSince === start) {
+              c._runningSince = null;
+              jobs[job.id] = c;
+              await saveObj(STORAGE_JOBS, jobs);
+            }
+          });
+        } catch {}
+      });
     }
     return { ok, ms, error: err, stdout: run.stdout, stderr: run.stderr };
   }

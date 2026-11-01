@@ -16,6 +16,22 @@
   }
   async function memWriteIndex(idx) { await chrome.storage.local.set({ [MEM_INDEX_KEY]: idx }); }
 
+  // C5: serialise every read-modify-write of the shared memory index.
+  // Tool calls from one assistant turn run concurrently (sidepanel.js
+  // dispatches them with Promise.all), so two `memory_add` calls can both
+  // memLoadIndex() before either memWriteIndex() — the last write wins and
+  // the sibling's index entry is lost, orphaning the record forever (the
+  // per-memory key is unique, so the tool still reports success). A single
+  // in-process promise chain is enough: all tool calls run in this one
+  // extension context. The chain swallows errors so one failed mutation
+  // can't wedge every later one.
+  let memIndexLock = Promise.resolve();
+  function memWithIndexLock(fn) {
+    const run = memIndexLock.then(fn, fn);
+    memIndexLock = run.then(() => {}, () => {});
+    return run;
+  }
+
   T({
     name: 'memory_add',
     group: 'memory',
@@ -23,14 +39,23 @@
     parameters: OBJ({
       title: STR, content: STR, tags: { type: 'array', items: STR }
     }, ['title', 'content']),
-    handler: async ({ title, content, tags = [] }) => {
+    handler: async ({ title, content, tags = [] } = {}) => {
+      // An empty memory is pure storage garbage and will resurface in future
+      // sessions' memory listings — refuse it instead of writing it.
+      if (typeof content !== 'string' || !content.trim()) {
+        return { error: 'content is required (a memory with no content is not saveable)' };
+      }
+      const safeTitle = (typeof title === 'string' && title.trim()) ? title.trim() : content.trim().slice(0, 60);
       const id = memNewId();
+      title = safeTitle;
       const now = Date.now();
       const record = { id, title, content, tags, createdAt: now, updatedAt: now };
       await chrome.storage.local.set({ [MEM_KEY(id)]: record });
-      const idx = await memLoadIndex();
-      idx.unshift({ id, title, tags, createdAt: now, updatedAt: now });
-      await memWriteIndex(idx);
+      await memWithIndexLock(async () => {
+        const idx = await memLoadIndex();
+        idx.unshift({ id, title, tags, createdAt: now, updatedAt: now });
+        await memWriteIndex(idx);
+      });
       return { id, saved: true };
     }
   });
@@ -94,12 +119,14 @@
       if (tags !== undefined) current.tags = tags;
       current.updatedAt = Date.now();
       await chrome.storage.local.set({ [MEM_KEY(id)]: current });
-      const idx = await memLoadIndex();
-      const i = idx.findIndex(m => m.id === id);
-      if (i >= 0) {
-        idx[i] = { id, title: current.title, tags: current.tags, createdAt: current.createdAt, updatedAt: current.updatedAt };
-        await memWriteIndex(idx);
-      }
+      await memWithIndexLock(async () => {
+        const idx = await memLoadIndex();
+        const i = idx.findIndex(m => m.id === id);
+        if (i >= 0) {
+          idx[i] = { id, title: current.title, tags: current.tags, createdAt: current.createdAt, updatedAt: current.updatedAt };
+          await memWriteIndex(idx);
+        }
+      });
       return { id, updated: true };
     }
   });
@@ -111,8 +138,10 @@
     parameters: OBJ({ id: STR }, ['id']),
     handler: async ({ id }) => {
       await chrome.storage.local.remove(MEM_KEY(id));
-      const idx = await memLoadIndex();
-      await memWriteIndex(idx.filter(m => m.id !== id));
+      await memWithIndexLock(async () => {
+        const idx = await memLoadIndex();
+        await memWriteIndex(idx.filter(m => m.id !== id));
+      });
       return { id, deleted: true };
     }
   });
@@ -124,8 +153,30 @@
     if (/^(off|disabled|disable|none|no)$/i.test(raw)) return { url: '', key: '' };
     const def = window.KYOTO_DEFAULT_SKILLS_HUB || { url: '', key: '' };
     const url = ((raw || def.url || '') + '').replace(/\/+$/, '');
-    const key = (g.skillsHubKey || def.key || '') + '';
+    // C15: the shipped default key is a placeholder, never a credential.
+    // sidepanel.js seeds it into Settings defaults, so it can also appear
+    // as a stored `skillsHubKey`; both forms mean "no key configured".
+    const placeholder = def.keyIsPlaceholder ? ((def.key || '') + '') : '';
+    const stored = ((g.skillsHubKey || '') + '').trim();
+    const key = stored && stored !== placeholder
+      ? stored
+      : (placeholder ? '' : ((def.key || '') + ''));
     return { url, key };
+  }
+
+  // C15: the `global` partition is remote content writable through the
+  // (previously baked-in, shared) hub key, and sidepanel.js auto-injects it
+  // into EVERY session's system prompt. That is a prompt-injection supply
+  // chain: whoever can write the hub can steer every Kyoto session. Global
+  // auto-injection is therefore opt-in (`skillsHubAutoInjectGlobal`, default
+  // false). Explicit agent tool calls (skill_list/skill_search/skill_get)
+  // are unaffected — the model decides what to read, on the user's behalf.
+  const GLOBAL_AUTOINJECT_KEY = 'skillsHubAutoInjectGlobal';
+  async function _globalAutoInjectEnabled() {
+    try {
+      const g = await chrome.storage.local.get(GLOBAL_AUTOINJECT_KEY);
+      return g[GLOBAL_AUTOINJECT_KEY] === true;
+    } catch { return false; }
   }
   async function _skillsApi(method, path, { body, query } = {}) {
     const cfg = await _skillsConfig();
@@ -214,7 +265,7 @@
       'To MODIFY an existing skill, use `skill_update` instead (cleaner partial-update semantics). ' +
       'Distill the WORKING APPROACH into a few hundred words: prereqs, the exact steps that succeeded, what *didn\'t* work and why, key gotchas. ' +
       'Pick `domain` deliberately: ' +
-      '"global" for any pattern that doesn\'t depend on a specific site (CLI tricks, code-search recipes, multi-tab orchestration patterns, agent meta-strategies) — these are loaded into EVERY session\'s system prompt regardless of the active tab. ' +
+      '"global" for any pattern that doesn\'t depend on a specific site (CLI tricks, code-search recipes, multi-tab orchestration patterns, agent meta-strategies) — when the user has opted into global-skill auto-injection these are surfaced in EVERY session\'s system prompt regardless of the active tab. ' +
       'A specific host (eTLD+1 like "youtube.com" or "linear.app") for site-bound playbooks — these only surface when the agent is on that domain. ' +
       'If you\'re unsure, prefer "global" — narrow domain skills are easy to add later but hard to discover when buried under a single host. ' +
       'Pass `name` (short), `description` (one line), `content` (markdown), `tags` (2-6 short). ' +
@@ -286,8 +337,17 @@
   window.KyotoSkillHub = {
     config: _skillsConfig,
     api: _skillsApi,
-    search: (domain, query, limit, includeGlobal) =>
-      _skillsApi('POST', '/v1/skills/search', { body: { domain, query, limit, includeGlobal } }),
+    // NOTE: sidepanel.js uses this wrapper only for the automatic
+    // per-domain / global system-prompt refresh (agent tools call
+    // _skillsApi directly). C15 gates the global auto-injection here: the
+    // `global` partition is remote, hub-writable content, so it is not
+    // surfaced automatically unless the user opted in.
+    search: async (domain, query, limit, includeGlobal) => {
+      if (domain === 'global' && !(await _globalAutoInjectEnabled())) {
+        return { items: [], total: 0, autoInjectDisabled: true };
+      }
+      return _skillsApi('POST', '/v1/skills/search', { body: { domain, query, limit, includeGlobal } });
+    },
     save: (body) => _skillsApi('POST', '/v1/skills', { body }),
     get: (skill_id, domain) =>
       _skillsApi('GET', `/v1/skills/${encodeURIComponent(skill_id)}`, { query: { domain } }),

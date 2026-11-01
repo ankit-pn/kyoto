@@ -24,6 +24,9 @@
     let settings = { folder: 'Kyoto', location: 'downloads' };
     let docsRoot = null;
     let docsProbed = false;
+    // Last failure from the documents-mode probe/mkdir, surfaced by
+    // describe() instead of claiming the folder exists.
+    let docsError = null;
 
     function _safeFolder(name) {
       // Strip both filesystem-illegal characters AND shell metacharacters
@@ -41,6 +44,28 @@
         .replace(/[\\:*?"<>|]+/g, '_')
         .replace(/\.\.+/g, '.')
         .replace(/^\/+/, '');
+    }
+
+    // The native host runs commands with `subprocess.run(..., shell=True)`
+    // (install/kyoto-shell.py), so anything interpolated into the command
+    // string is re-parsed by sh — or by cmd.exe on Windows. Nesting a JS
+    // JSON literal into `python3 -c "…"` does not survive that: the quotes
+    // terminate the -c argument and python sees a SyntaxError. Quoting is
+    // also not portable (cmd.exe has no single-quote quoting; sh expands
+    // $ and backticks inside double quotes). So keep the python program
+    // itself inside double quotes (it contains no `"`, `$` or backticks)
+    // and pass every path as an *unquoted* base64 argv token — the base64
+    // alphabet [A-Za-z0-9+/=] needs no quoting under either shell.
+    function _b64utf8(s) {
+      const bytes = new TextEncoder().encode(String(s));
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      return btoa(bin);
+    }
+    function _pyCmd(script, paths) {
+      return `python3 -c "${script}" ${paths.map(_b64utf8).join(' ')}`;
     }
 
     function setFromSettings(s) {
@@ -74,7 +99,12 @@
     async function _detectDocumentsRoot() {
       if (docsProbed) return docsRoot;
       docsProbed = true;
-      if (!window.KyotoShell?.shell) return null;
+      if (!window.KyotoShell?.shell) {
+        // Cheap check (no IPC) — don't cache it, the host may be
+        // installed/connected after this call.
+        docsProbed = false;
+        return null;
+      }
       try {
         // python3 handles Windows + POSIX home expansion uniformly.
         // mkdir(exist_ok) so missing Documents folders are created.
@@ -83,8 +113,18 @@
           15000
         );
         const out = (r?.stdout || '').trim().split(/\r?\n/).pop();
-        if (out && !r.error) docsRoot = out;
-      } catch {}
+        if (r?.error || (typeof r?.exitCode === 'number' && r.exitCode !== 0)) {
+          docsError = String(r.error || r.stderr || `exit ${r.exitCode}`).trim();
+          docsRoot = null;
+          docsProbed = false; // transient failure — allow a later retry
+        } else if (out) {
+          docsRoot = out;
+          docsError = null;
+        }
+      } catch (e) {
+        docsError = e?.message || String(e);
+        docsProbed = false; // transient failure — allow a later retry
+      }
       return docsRoot;
     }
 
@@ -105,11 +145,21 @@
       if (!root) return null;
       const dir = `${root}/${settings.folder}`;
       try {
-        await window.KyotoShell.shell(
-          `python3 -c "import pathlib; pathlib.Path(${JSON.stringify(dir)}).mkdir(parents=True, exist_ok=True)"`,
-          10000
-        );
-      } catch {}
+        const r = await window.KyotoShell.shell(_pyCmd(
+          `import base64,pathlib,sys; p=base64.b64decode(sys.argv[1]).decode('utf-8'); pathlib.Path(p).mkdir(parents=True,exist_ok=True)`,
+          [dir]
+        ), 10000);
+        if (r?.error || (typeof r?.exitCode === 'number' && r.exitCode !== 0)) {
+          // Don't return a path that was never created — describe() and
+          // downloadUrl() must fall back to Downloads instead.
+          docsError = String(r?.error || r?.stderr || `exit ${r?.exitCode}`).trim();
+          return null;
+        }
+        docsError = null;
+      } catch (e) {
+        docsError = e?.message || String(e);
+        return null;
+      }
       return dir;
     }
 
@@ -127,7 +177,9 @@
         } else {
           out.shellHostAvailable = false;
           out.fallback = 'downloads';
-          out.note = 'Shell bridge not installed — using downloads-mode fallback.';
+          out.note = docsError
+            ? `Shell bridge could not set up the Documents workspace: ${docsError} — using downloads-mode fallback.`
+            : 'Shell bridge not installed — using downloads-mode fallback.';
         }
       }
       return out;
@@ -177,13 +229,15 @@
           }
           const baseName = _safeFilename(filename || finalSrc.split(/[\\/]/).pop());
           const dest = `${docsDir}/${baseName}`;
-          const r = await window.KyotoShell.shell(
-            `python3 -c "import shutil, pathlib, sys; src=${JSON.stringify(finalSrc)}; dst=${JSON.stringify(dest)}; pathlib.Path(dst).parent.mkdir(parents=True, exist_ok=True); shutil.move(src, dst); print(dst)"`,
-            20000
-          );
+          const r = await window.KyotoShell.shell(_pyCmd(
+            `import base64,pathlib,shutil,sys; d=lambda i: base64.b64decode(sys.argv[i]).decode('utf-8'); src=d(1); dst=d(2); pathlib.Path(dst).parent.mkdir(parents=True,exist_ok=True); shutil.move(src,dst); print(dst)`,
+            [finalSrc, dest]
+          ), 20000);
           const movedTo = (r?.stdout || '').trim().split(/\r?\n/).pop();
-          if (r?.error || !movedTo) {
-            out.note = 'move to Documents failed: ' + (r?.error || r?.stderr || 'unknown') + ' — file left in Downloads/' + settings.folder + '/';
+          if (r?.error || (typeof r?.exitCode === 'number' && r.exitCode !== 0)) {
+            out.note = 'move to Documents failed: ' + String(r.error || r.stderr || `exit ${r.exitCode}`).trim() + ' — file left in Downloads/' + settings.folder + '/';
+          } else if (!movedTo) {
+            out.note = 'move to Documents failed: no destination path in host output — file left in Downloads/' + settings.folder + '/';
           } else {
             out.path = movedTo;
           }
@@ -209,6 +263,53 @@
   })();
 
   window.KyotoWorkspace = Workspace;
+  // Shared with media.js / fs.js so their blob-URL downloads use the same
+  // download-lifecycle revoke instead of the old fixed 120 s timer.
+  // (Function declarations hoist, so the helper is already defined here.)
+  Workspace._revokeBlobUrlWhenDownloaded = _revokeBlobUrlWhenDownloaded;
+
+  // Keep a blob: object URL alive until Chrome has actually finished
+  // reading it. downloads.download() resolves as soon as the download is
+  // merely queued; with saveAs:true the bytes are fetched only after the
+  // user confirms the Save-As dialog, which can take minutes. Revoking on
+  // a fixed 120 s timer (the old behaviour) therefore broke long save
+  // dialogs / queued downloads with a dead URL. Revoke on the download's
+  // terminal state instead, with a long fallback in case onChanged never
+  // fires for this id.
+  const BLOB_URL_FALLBACK_MS = 30 * 60 * 1000;
+  function _revokeBlobUrlWhenDownloaded(url, downloadId) {
+    const revoke = () => { try { URL.revokeObjectURL(url); } catch {} };
+    let timer = null;
+    let listener = null;
+    const finish = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (listener) {
+        try { chrome.downloads.onChanged.removeListener(listener); } catch {}
+        listener = null;
+      }
+      revoke();
+    };
+    if (downloadId != null && chrome.downloads?.onChanged?.addListener) {
+      listener = (delta) => {
+        if (!delta || delta.id !== downloadId) return;
+        const state = delta.state && delta.state.current;
+        if (state === 'complete' || state === 'interrupted') finish();
+      };
+      try { chrome.downloads.onChanged.addListener(listener); } catch { listener = null; }
+      // Documents mode waits for the download, so it may already have
+      // settled before the listener was attached.
+      try {
+        chrome.downloads.search({ id: downloadId }).then(([d]) => {
+          if (d && (d.state === 'complete' || d.state === 'interrupted')) finish();
+        }).catch(() => {});
+      } catch {}
+      timer = setTimeout(finish, BLOB_URL_FALLBACK_MS);
+    } else {
+      // No download-lifecycle API available (test doubles / older hosts):
+      // keep the old fixed delay rather than leaking the URL forever.
+      timer = setTimeout(finish, 120000);
+    }
+  }
 
   // Register the workspace-introspection + workspace-save tools on the
   // shared registry. KyotoTR is set up by tools/core.js which loads
@@ -268,12 +369,16 @@
         throw new Error('pass vfsPath OR content');
       }
       const url = URL.createObjectURL(blob);
+      let r;
       try {
-        const r = await window.KyotoWorkspace.downloadUrl({ url, filename, saveAs });
-        return { ok: true, bytes: blob.size, ...r };
-      } finally {
-        setTimeout(() => URL.revokeObjectURL(url), 120000);
+        r = await window.KyotoWorkspace.downloadUrl({ url, filename, saveAs });
+      } catch (e) {
+        // The download never started, so nothing will read the blob.
+        try { URL.revokeObjectURL(url); } catch {}
+        throw e;
       }
+      _revokeBlobUrlWhenDownloaded(url, r?.downloadId);
+      return { ok: true, bytes: blob.size, ...r };
     }
   });
 })();

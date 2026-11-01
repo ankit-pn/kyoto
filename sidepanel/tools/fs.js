@@ -99,10 +99,15 @@
       const ts = new Date().toISOString().replace(/[:.]/g, '-').replace(/-Z$/, 'Z');
       const filename = outputName || `kyoto-workspace-${ts}.zip`;
       const url = URL.createObjectURL(blob);
+      // This tool owns the blob URL, so it revokes it once the download has
+      // actually settled — a fixed timer would kill the URL while a Save-As
+      // dialog is still open (audit C18).
+      let downloadId = null;
       try {
         const r = window.KyotoWorkspace
           ? await window.KyotoWorkspace.downloadUrl({ url, filename })
           : { downloadId: await chrome.downloads.download({ url, filename, saveAs: false }), path: filename };
+        downloadId = r.downloadId ?? null;
         const t = await _vfs().total();
         return {
           ok: true, fileCount: t.fileCount, bytes: blob.size,
@@ -110,8 +115,15 @@
           savedTo: r.path, location: r.location, folder: r.folder,
           ...(r.note ? { note: r.note } : {})
         };
+      } catch (e) {
+        try { URL.revokeObjectURL(url); } catch {}
+        throw e;
       } finally {
-        setTimeout(() => URL.revokeObjectURL(url), 120000);
+        if (downloadId != null) {
+          const revokeWhenDone = window.KyotoWorkspace?._revokeBlobUrlWhenDownloaded;
+          if (revokeWhenDone) revokeWhenDone(url, downloadId);
+          else setTimeout(() => URL.revokeObjectURL(url), 120000);
+        }
       }
     }
   });

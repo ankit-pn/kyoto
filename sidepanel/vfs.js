@@ -70,6 +70,21 @@
     return new TextEncoder().encode(String(content ?? ''));
   }
 
+  // btoa() takes a latin1 string. Spreading the whole byte array into
+  // String.fromCharCode(...bytes) pushes one argument per byte and hits
+  // V8's argument limit (~125 k) — RangeError: Maximum call stack size
+  // exceeded for files above ~120 KB. Build the binary string in chunks,
+  // then base64 the complete string once (a single btoa call means the
+  // chunks do not need to be 3-byte aligned).
+  function bytesToBase64(bytes) {
+    const CHUNK = 0x8000; // 32 KB — well below the argument limit
+    let bin = '';
+    for (let i = 0; i < bytes.byteLength; i += CHUNK) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(bin);
+  }
+
   // ── Public API ───────────────────────────────────────
   async function write(path, content, { mime } = {}) {
     const p = normalise(path);
@@ -121,7 +136,7 @@
     const slice = bytes.subarray(offset, sliceEnd);
     if (encoding === 'binary' || encoding === 'bytes') {
       // Don't try to decode binary as text — return base64.
-      return { path: normalise(path), bytes: slice.byteLength, base64: btoa(String.fromCharCode(...slice)), totalSize: bytes.byteLength };
+      return { path: normalise(path), bytes: slice.byteLength, base64: bytesToBase64(slice), totalSize: bytes.byteLength };
     }
     let text;
     try { text = new TextDecoder(encoding).decode(slice); }
