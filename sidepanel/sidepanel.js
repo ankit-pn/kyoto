@@ -159,6 +159,7 @@
     temperature: $('temperature'),
     maxTokens: $('maxTokens'),
     maxTokensHint: $('maxTokensHint'),
+    jumpLatestBtn: $('jumpLatestBtn'),
     saveBtn: $('saveBtn'),
     saveStatus: $('saveStatus'),
     modelBtn: $('modelBtn'),
@@ -3371,6 +3372,49 @@
     refreshPageContext();
   }
 
+  /**
+   * Re-run the last user turn.
+   *
+   * Everything after the final user message is discarded first: a failed turn
+   * often left a half-written assistant message or tool_calls without results,
+   * and replaying that as-is produces a malformed request (the API rejects an
+   * assistant tool_calls message that is not followed by tool results).
+   */
+  async function retryLastTurn() {
+    const session = state.activeSession;
+    if (!session) return;
+    if (!Array.isArray(session.history) || !session.history.length) return;
+
+    let lastUser = -1;
+    for (let i = session.history.length - 1; i >= 0; i--) {
+      if (session.history[i].role === 'user') { lastUser = i; break; }
+    }
+    if (lastUser === -1) {
+      // The failed attempt never made it into history (rejected in preflight),
+      // but we remember the text — so retry is still meaningful: it re-runs the
+      // same request, surfacing the same actionable error rather than nothing.
+      if (_lastAttemptText) { await sendMessage(_lastAttemptText); return; }
+      addMessage('assistant', '_Nothing to retry — no user message in this conversation._', { error: true });
+      return;
+    }
+    // The real in-flight marker the panel already uses (drives the stop button).
+    if (state.runtimes?.[session.id]?.busy) {
+      addMessage('assistant', '_Still working on the previous turn — stop it first, then retry._', { error: true });
+      return;
+    }
+
+    const dropped = session.history.splice(lastUser + 1);
+    // Re-render BEFORE the notice: renderSessionHistoryFresh() clears the log,
+    // so a message added first would be wiped immediately.
+    renderSessionHistoryFresh();
+    addMessage('assistant', dropped.length
+      ? `_Retrying — discarded ${dropped.length} incomplete message${dropped.length === 1 ? '' : 's'} from the failed attempt._`
+      : '_Retrying…_');
+    await persistSession(session);
+    announce('Retrying the last message.');
+    await runChatLoop(session);
+  }
+
   function renderSessionHistoryFresh() {
     els.chat.innerHTML = '';
     els.chat.appendChild(els.empty);
@@ -3446,7 +3490,30 @@
   function ensureEmptyHidden() {
     if (els.empty && !els.empty.classList.contains('hidden')) els.empty.classList.add('hidden');
   }
-  function scrollToBottom() { els.chat.scrollTop = els.chat.scrollHeight; }
+  // ── Stick to bottom ──────────────────────────────────
+  // The log follows new output ONLY while the user is already at the bottom.
+  // Previously every streamed chunk called an unconditional scrollTop = scrollHeight,
+  // which made reading earlier output during a reply impossible.
+  const NEAR_BOTTOM_PX = 48;
+  function isNearBottom() {
+    const c = els.chat;
+    if (!c) return true;
+    // Non-layout DOMs report 0 for all three: treat that as "at the bottom".
+    const distance = c.scrollHeight - c.scrollTop - c.clientHeight;
+    return !Number.isFinite(distance) || distance <= NEAR_BOTTOM_PX;
+  }
+  function updateJumpLatest() {
+    if (!els.jumpLatestBtn) return;
+    const show = !_stickToBottom;
+    els.jumpLatestBtn.classList.toggle('hidden', !show);
+  }
+  function scrollToBottom(force = false) {
+    if (!els.chat) return;
+    if (force) _stickToBottom = true;
+    if (!_stickToBottom) { updateJumpLatest(); return; }
+    els.chat.scrollTop = els.chat.scrollHeight;
+    updateJumpLatest();
+  }
 
   // ── Message rendering primitives ─────────────────────
   function addMessage(role, content, opts = {}) {
@@ -3489,6 +3556,18 @@
     } else {
       body.textContent = content;
     }
+    // A failed turn left the user with nothing to do but retype. Retry re-runs
+    // the last user message after discarding the failed attempt's leftovers.
+    if (opts.error) {
+      const retry = document.createElement('button');
+      retry.className = 'retry-btn';
+      retry.type = 'button';
+      retry.title = 'Retry the last message';
+      retry.setAttribute('aria-label', 'Retry the last message');
+      retry.textContent = '↻ Retry';
+      label.appendChild(retry);
+    }
+
     // Per-message copy. Copying a reply used to mean selecting text by hand;
     // code blocks had a Copy button but prose did not.
     const copyBtn = document.createElement('button');
@@ -4225,6 +4304,12 @@
   async function sendMessage(text) {
     if (!text.trim()) return;
     if (!state.activeSession) return;
+
+    // Sending is an explicit "take me to the bottom" gesture.
+    scrollToBottom(true);
+    // Remembered so Retry works even when the turn never reached the history
+    // (e.g. it was rejected in preflight for a missing key/model).
+    _lastAttemptText = text;
 
     const session = state.activeSession;
     // Provider and model are global (state.settings) — sessions only own
@@ -5118,6 +5203,8 @@
   // ── Screen-reader announcements ──────────────────────
   // Deliberately coarse: one sentence per turn transition. The chat log is not a
   // live region because streaming would re-announce on every token.
+  let _stickToBottom = true;
+  let _lastAttemptText = '';
   let _focusBeforeDrawer = null;
   let _lastAnnounce = '';
   let _announceTimer = null;
@@ -5131,6 +5218,32 @@
     el.textContent = '';
     clearTimeout(_announceTimer);
     _announceTimer = setTimeout(() => { el.textContent = message; }, 30);
+  }
+
+  // ── Settings drawer index ────────────────────────────
+  // Built from the rendered headings rather than hardcoded, so adding or
+  // reordering a section can never desync the nav.
+  function buildDrawerNav() {
+    const nav = document.getElementById('drawerNav');
+    if (!nav || !els.drawer) return;
+    const headings = [...els.drawer.querySelectorAll('.drawer-body .drawer-section')];
+    if (!nav.childElementCount && headings.length) {
+      for (const h of headings) {
+        if (!h.id) {
+          h.id = 'sec-' + h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        }
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'nav-chip';
+        chip.textContent = h.textContent.replace(/\s*\(.*\)$/, '').trim();
+        chip.setAttribute('aria-label', `Jump to ${h.textContent.trim()}`);
+        chip.addEventListener('click', () => {
+          h.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+          announce(`${h.textContent.trim()} section.`);
+        });
+        nav.appendChild(chip);
+      }
+    }
   }
 
   function openDrawer() {
@@ -5235,6 +5348,7 @@
     if (currentApiKey() || getProviderConfig(state.settings.provider)?.isCustom) {
       fetchModels(state.settings.provider, currentApiKey());
     }
+    buildDrawerNav();
     // Move focus into the dialog so keyboard users are not left behind the
     // overlay. The provider select is the first meaningful control.
     try { (els.provider || els.drawer).focus?.(); } catch { /* non-fatal */ }
@@ -6592,6 +6706,19 @@
       setTimeout(() => { els.saveStatus.textContent = ''; closeDrawer(); }, 600);
     });
 
+    // Follow the tail only while the user is at the tail; otherwise offer a pill.
+    els.chat.addEventListener('scroll', () => {
+      _stickToBottom = isNearBottom();
+      updateJumpLatest();
+    }, { passive: true });
+    if (els.jumpLatestBtn) {
+      els.jumpLatestBtn.addEventListener('click', () => {
+        scrollToBottom(true);
+        announce('Jumped to the latest message.');
+        try { els.input?.focus({ preventScroll: true }); } catch { els.input?.focus?.(); }
+      });
+    }
+
     els.chat.addEventListener('click', async (e) => {
       const chip = e.target.closest('.chip');
       if (chip?.dataset.prompt) { sendMessage(chip.dataset.prompt); return; }
@@ -6602,6 +6729,12 @@
           copy.textContent = 'Copied';
           setTimeout(() => { copy.textContent = orig; }, 1200);
         });
+        return;
+      }
+      const retryBtn = e.target.closest('.retry-btn');
+      if (retryBtn) {
+        retryBtn.disabled = true;
+        try { await retryLastTurn(); } finally { retryBtn.disabled = false; }
         return;
       }
       const msgCopy = e.target.closest('.copy-msg-btn');

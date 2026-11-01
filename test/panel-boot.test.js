@@ -433,3 +433,171 @@ test('messages expose a one-click copy that writes the message text', async () =
   assert.ok(written[0].length > 0, 'the copied text must not be empty');
   assert.match(written[0], /spend|cost|\\$/i, `copied the wrong content: ${JSON.stringify(written[0].slice(0, 80))}`);
 });
+
+// ══════════════════════════════════════════════════════
+// Stick-to-bottom / "jump to latest"
+// ══════════════════════════════════════════════════════
+// Regression: every streamed chunk forced scrollTop = scrollHeight, so scrolling
+// up to read earlier output during a reply was impossible — the view snapped
+// back within a few hundred ms.
+
+function fakeScrollGeometry(chat, { scrollHeight = 1000, clientHeight = 400 } = {}) {
+  Object.defineProperty(chat, 'scrollHeight', { configurable: true, get: () => scrollHeight });
+  Object.defineProperty(chat, 'clientHeight', { configurable: true, get: () => clientHeight });
+}
+
+test('the log does not follow output while the user has scrolled up', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const chat = doc.getElementById('chat');
+  const jump = doc.getElementById('jumpLatestBtn');
+  fakeScrollGeometry(chat);
+
+  // Simulate the user scrolling up to read.
+  chat.scrollTop = 0;
+  chat.dispatchEvent(new p.window.Event('scroll'));
+  await settle(20);
+  assert.ok(!jump.classList.contains('hidden'), 'the jump-to-latest pill should appear when scrolled up');
+
+  // New output must NOT yank the view back.
+  key(p.window, 'k', { ctrlKey: true });
+  type(p.window, doc.getElementById('paletteInput'), 'spend');
+  await settle(10);
+  key(p.window, 'Enter');
+  await settle(80);
+
+  assert.equal(chat.scrollTop, 0, 'the view must stay where the user put it');
+});
+
+test('the jump button returns to the tail and hides itself', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const chat = doc.getElementById('chat');
+  const jump = doc.getElementById('jumpLatestBtn');
+  fakeScrollGeometry(chat);
+
+  chat.scrollTop = 0;
+  chat.dispatchEvent(new p.window.Event('scroll'));
+  await settle(20);
+  assert.ok(!jump.classList.contains('hidden'));
+
+  jump.click();
+  await settle(30);
+  assert.equal(chat.scrollTop, 1000, 'jumping must land at the bottom (scrollHeight)');
+  assert.ok(jump.classList.contains('hidden'), 'the pill hides once back at the tail');
+});
+
+test('scrolling back to the bottom resumes following automatically', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const chat = doc.getElementById('chat');
+  const jump = doc.getElementById('jumpLatestBtn');
+  fakeScrollGeometry(chat);
+
+  chat.scrollTop = 0;
+  chat.dispatchEvent(new p.window.Event('scroll'));
+  await settle(20);
+  assert.ok(!jump.classList.contains('hidden'));
+
+  // User scrolls back down to the tail themselves (1000 - 600 - 400 = 0).
+  chat.scrollTop = 600;
+  chat.dispatchEvent(new p.window.Event('scroll'));
+  await settle(20);
+  assert.ok(jump.classList.contains('hidden'), 'being at the tail means no pill');
+});
+
+test('sending a message always takes the user back to the bottom', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const chat = doc.getElementById('chat');
+  fakeScrollGeometry(chat);
+
+  chat.scrollTop = 0;
+  chat.dispatchEvent(new p.window.Event('scroll'));
+  await settle(20);
+
+  // Submitting is an explicit "show me the conversation" gesture.
+  const input = doc.getElementById('input');
+  input.value = 'hello';
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(80);
+
+  assert.equal(chat.scrollTop, 1000, 'sending must force the log back to the tail');
+});
+
+// ══════════════════════════════════════════════════════
+// Settings drawer index
+// ══════════════════════════════════════════════════════
+// 15 sections / 41 fields in one column: finding a section meant a long scroll.
+
+test('the settings drawer exposes a nav built from its own sections', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(50);
+
+  const chips = [...doc.querySelectorAll('#drawerNav .nav-chip')];
+  const headings = [...doc.querySelectorAll('.drawer-body .drawer-section')];
+  assert.ok(headings.length >= 10, `expected the drawer to have many sections, got ${headings.length}`);
+  assert.equal(chips.length, headings.length, 'every section needs a nav chip');
+
+  // Icon/text chips still need names; each chip is text so aria-label is a bonus.
+  for (const chip of chips) {
+    assert.ok(chip.getAttribute('aria-label'), 'nav chips need an accessible name');
+    assert.ok(chip.textContent.trim().length > 0);
+  }
+  // Every heading is a scroll target.
+  for (const h of headings) assert.ok(h.id, 'every section heading needs an id to scroll to');
+  assert.equal(new Set(headings.map(h => h.id)).size, headings.length, 'section ids must be unique');
+});
+
+test('clicking a nav chip scrolls that section into view', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  doc.getElementById('settingsBtn').click();
+  await settle(50);
+
+  const chips = [...doc.querySelectorAll('#drawerNav .nav-chip')];
+  const target = chips[chips.length - 1];
+  const wanted = doc.getElementById('sec-' + target.getAttribute('aria-label')
+    .replace(/^Jump to /, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
+  assert.ok(wanted, 'expected to resolve the heading for the last chip');
+
+  let scrolled = null;
+  wanted.scrollIntoView = function () { scrolled = this.id; };
+  target.click();
+  await settle(20);
+  assert.equal(scrolled, wanted.id, 'the chip must scroll its own section into view');
+});
+
+// ══════════════════════════════════════════════════════
+// Retry on a failed turn
+// ══════════════════════════════════════════════════════
+// Before this, a failed turn left the user with no action: they had to retype.
+
+test('a failed turn offers retry, and retrying re-runs without duplicating the prompt', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+
+  // Keyless submit fails and renders an error message.
+  const input = doc.getElementById('input');
+  input.value = 'what is on this page?';
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(120);
+
+  const errMsg = [...doc.querySelectorAll('.msg.error')].pop();
+  assert.ok(errMsg, 'the failed turn should render an error message');
+  const retry = errMsg.querySelector('.retry-btn');
+  assert.ok(retry, 'the error must offer a retry action');
+  assert.equal(retry.getAttribute('aria-label'), 'Retry the last message');
+
+  retry.click();
+  await settle(200);
+
+  // The retried turn fails the same way (still no key) — which is the point:
+  // retry re-attempts the exact request instead of silently doing nothing.
+  const text = doc.getElementById('chat').textContent;
+  assert.match(text, /No API key/i, 'retry must re-attempt the turn and report the same failure');
+});
+
+

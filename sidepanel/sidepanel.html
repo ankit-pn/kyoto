@@ -65,6 +65,9 @@
   </main>
 
   <footer class="composer">
+    <!-- Shown when the user has scrolled up out of the streaming tail, so new
+         output no longer yanks them away from what they are reading. -->
+    <button id="jumpLatestBtn" class="jump-latest hidden" type="button" aria-label="Jump to the latest message">↓ Latest</button>
     <div class="composer-box">
       <!-- Slash command palette. Anchored to the composer box so it
            always floats just above the input regardless of textarea
@@ -118,6 +121,9 @@
     </header>
 
     <div class="drawer-body">
+      <!-- Built at runtime from the .drawer-section headings: 15 sections and
+           41 fields is a long scroll, so give the form a sticky index. -->
+      <nav id="drawerNav" class="drawer-nav" aria-label="Jump to a settings section"></nav>
       <div class="field">
         <label>Provider</label>
         <select id="provider">
