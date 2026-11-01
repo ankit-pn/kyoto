@@ -4453,6 +4453,47 @@
   function _invalidateGlobalSkills() { _globalSkillsCache = null; state.globalSkills = []; }
   function _invalidateAllSkills() { _skillsDomainCache.clear(); _invalidateGlobalSkills(); state.skillsForCurrentDomain = []; state.skillsForCurrentDomainKey = null; }
 
+  /**
+   * Drop tab bindings whose tab has closed.
+   *
+   * A closed tab left `session.tabId` pointing at nothing: the context bar said
+   * "No access: No tab with id: 999." (leaking an internal id) and the session
+   * row still showed a "bound" dot, so the UI claimed a binding that did not
+   * exist. Checked in one tabs.query rather than a get() per session.
+   */
+  async function pruneStaleTabBindings() {
+    const bound = (state.sessionsIndex || []).filter(s => s.tabId != null);
+    if (!bound.length) return 0;
+    let live;
+    try {
+      const tabs = await chrome.tabs.query({});
+      live = new Set((tabs || []).map(t => t.id));
+    } catch {
+      return 0;   // can't verify: leave bindings alone rather than clearing good ones
+    }
+    let cleared = 0;
+    for (const meta of bound) {
+      if (live.has(meta.tabId)) continue;
+      meta.tabId = null;
+      delete state.tabToSession[meta.tabId];
+      cleared++;
+      // Persist in the background; a failure here must not block start-up.
+      loadFullSession(meta.id).then(full => {
+        if (full && full.tabId != null) { full.tabId = null; return persistSession(full); }
+      }).catch(() => {});
+    }
+    if (cleared) {
+      try { await chrome.storage.local.set({ [INDEX_KEY]: state.sessionsIndex }); } catch { /* reported elsewhere */ }
+    }
+    return cleared;
+  }
+
+  /** Is this session's bound tab still open? */
+  async function isTabAlive(tabId) {
+    if (tabId == null) return false;
+    try { await chrome.tabs.get(tabId); return true; } catch { return false; }
+  }
+
   async function refreshPageContext() {
     els.ctxDot.className = 'dot load';
     els.ctxTxt.textContent = 'Reading page…';
@@ -4465,6 +4506,20 @@
       if (targetTabId == null) {
         const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
         targetTabId = t?.id ?? null;
+      }
+      // A binding to a closed tab is a normal thing to hit (the user closes the
+      // tab they were working in). Say so in human terms, and drop the binding
+      // instead of leaving the session pretending to be attached.
+      if (targetTabId != null && state.activeSession?.tabId === targetTabId && !(await isTabAlive(targetTabId))) {
+        state.activeSession.tabId = null;
+        delete state.tabToSession[targetTabId];
+        persistSession(state.activeSession).catch(() => {});
+        updateSessionsButton();
+        state.page = null;
+        els.ctxDot.className = 'dot err';
+        els.ctxTxt.textContent = 'This conversation\'s tab was closed';
+        els.ctxTxt.title = 'The tab this conversation was attached to is gone. Open or switch to a tab, then use the reload button to re-read a page.';
+        return;
       }
       const res = await chrome.runtime.sendMessage({
         type: 'PAGE_EXTRACT_CONTENT',
@@ -8453,6 +8508,7 @@
       () => chrome.storage.local.get('kyoto_memory_index'), null);
     state.memoryIndex = memGot?.kyoto_memory_index || [];
 
+    await bootStep('tidy closed-tab bindings', pruneStaleTabBindings, 0);
     const tabArr = await bootStep('read the current tab',
       () => chrome.tabs.query({ active: true, currentWindow: true }), []);
     const tab = tabArr?.[0] || null;

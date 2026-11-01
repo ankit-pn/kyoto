@@ -1972,3 +1972,65 @@ test('a healthy start-up shows no warning', async () => {
   assert.ok(bar.classList.contains('hidden'), 'no false alarm on a normal boot');
   assert.deepEqual(p.errors, [], 'a healthy boot logs nothing');
 });
+
+// ══════════════════════════════════════════════════════
+// Closed tabs
+// ══════════════════════════════════════════════════════
+// A closed tab left session.tabId pointing at nothing: the context bar showed
+// "No access: No tab with id: 999." (an internal id, meaningless to the user)
+// and the session row still displayed a "bound" dot for a tab that was gone.
+
+async function bootWithSessionOnTab({ tabId, title, breakTabIds = [] }) {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('kyoto_sessions_index', [{ id: 's_x', title, lastActive: Date.now(), tabId, url: 'https://x.test/' }]);
+  chrome.__store.set('kyoto_session_s_x', { id: 's_x', title, lastActive: Date.now(), tabId, url: 'https://x.test/', history: [] });
+  const realGet = chrome.tabs.get;
+  chrome.tabs.get = async (id) => {
+    if (breakTabIds.includes(id)) throw new Error(`No tab with id: ${id}.`);
+    return realGet.call(chrome.tabs, id);
+  };
+  const p = await bootPanel({ chrome });
+  return { p, chrome, doc: p.window.document };
+}
+
+test('a binding to a closed tab is pruned at start-up', async () => {
+  const { chrome, doc } = await bootWithSessionOnTab({ tabId: 999, title: 'Gone', breakTabIds: [999] });
+  await settle(200);
+
+  const meta = (chrome.__store.get('kyoto_sessions_index') || []).find(s => s.id === 's_x');
+  assert.equal(meta?.tabId, null, 'the index should no longer claim a dead binding');
+  assert.equal(chrome.__store.get('kyoto_session_s_x')?.tabId, null, 'and the stored session too');
+
+  doc.getElementById('sessionsBtn').click();
+  await settle(150);
+  const row = [...doc.querySelectorAll('#sessionsList .sess-item')].find(el => (el.textContent || '').includes('Gone'));
+  assert.ok(row, 'the conversation is still listed');
+  assert.equal(row.querySelector('.sess-dot.bound'), null, 'it must not show a "bound" dot for a closed tab');
+});
+
+test('a live binding is left alone', async () => {
+  // Guard against over-eager pruning: clearing good bindings would silently
+  // detach conversations that are working fine.
+  const { chrome } = await bootWithSessionOnTab({ tabId: 1, title: 'Live' });
+  await settle(200);
+  const meta = (chrome.__store.get('kyoto_sessions_index') || []).find(s => s.id === 's_x');
+  assert.equal(meta?.tabId, 1, 'an open tab must keep its binding');
+});
+
+test('a tab closing mid-session is explained instead of leaking an id', async () => {
+  const { doc, chrome } = await bootWithSessionOnTab({ tabId: 2, title: 'On tab two', breakTabIds: [2] });
+  await settle(150);
+
+  doc.getElementById('sessionsBtn').click();
+  await settle(150);
+  const row = [...doc.querySelectorAll('#sessionsList .sess-item')].find(el => (el.textContent || '').includes('On tab two'));
+  row.click();
+  await settle(300);
+
+  const text = doc.getElementById('ctxTxt').textContent;
+  assert.match(text, /tab was closed/i, `expected a human explanation, got ${JSON.stringify(text)}`);
+  assert.ok(!/No tab with id/i.test(text), 'an internal tab id must not reach the user');
+  assert.ok(doc.getElementById('ctxTxt').title.length > 20, 'the tooltip should say what to do next');
+  assert.equal(chrome.__store.get('kyoto_session_s_x')?.tabId, null, 'the dead binding is cleared');
+});
