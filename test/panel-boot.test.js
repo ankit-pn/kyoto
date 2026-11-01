@@ -2754,7 +2754,10 @@ test('opening settings works even if the usage readout fails', async () => {
 // below were all checked and currently degrade gracefully (the usage chip renders a
 // deliberate "—"), so this pins that property rather than fixing anything.
 
-const RAW_VALUE = /\b(?:undefined|NaN|\[object Object\]|Invalid Date)\b/;
+// Word boundaries are deliberately NOT used: a leak takes shapes like "NaNh",
+// "NaNs" (unit letter glued on) and "[object Object]" (closing bracket), and \b
+// fails against both because the surrounding characters are word characters.
+const RAW_VALUE = /undefined|NaN|\[object Object\]|Invalid Date/;
 
 function leaksIn(text) {
   const m = text.match(RAW_VALUE);
@@ -2830,4 +2833,34 @@ test('missing settings render placeholders, not "undefined"', async () => {
     assert.ok(!RAW_VALUE.test(String(el.value || '')),
       `#${el.id || el.className} holds the raw value "${el.value}"`);
   }
+});
+
+test('the raw-value detector catches values with a unit suffix', async () => {
+  // The first version of this guard used \bNaN\b, which does NOT match "NaNh" or
+  // "NaNs" — a duration formatter leaking NaN appends a unit letter, defeating the
+  // word boundary. That is exactly the shape a leak takes here, so pin the detector.
+  const detector = RAW_VALUE;
+  for (const leak of ['every NaNh', '2 NaNs', 'NaN', 'undefined', 'Invalid Date', '[object Object]']) {
+    assert.ok(detector.test(leak), `should detect: ${leak}`);
+  }
+  for (const clean of ['every 5m', 'just now', '—', '1.5h', 'not a date']) {
+    assert.ok(!detector.test(clean), `should not flag: ${clean}`);
+  }
+});
+
+test('/loop refuses an unparseable interval instead of starting a broken loop', async () => {
+  // The reason fmtDuration could not be reached with a bad value from here: the
+  // command validates first. Pinned so that stays true.
+  const p = await bootPanel();
+  const doc = p.window.document;
+  await settle(300);
+  const input = doc.getElementById('input');
+  input.value = '/loop soon keep going';
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(400);
+
+  const chat = doc.getElementById('chat').textContent;
+  assert.match(chat, /Interval must be at least 5s/i, 'a bad interval should be explained');
+  assert.ok(!/NaN/.test(chat), 'and must never surface NaN');
+  assert.ok(!/Loop active/i.test(chat), 'no loop should be started');
 });

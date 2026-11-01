@@ -1714,6 +1714,13 @@
 
   // ── Goal + loop primitives (inspired by Claude Code) ─────────
   function fmtDuration(ms) {
+    // Same class of bug as fmtTime: a non-finite duration made every comparison
+    // below false and rendered the literal "NaNh" (fmtDuration(undefined|NaN|'abc')
+    // all did). Durations come from stored loop state and parsed user input, so a
+    // bad value is reachable rather than hypothetical.
+    const n = Number(ms);
+    if (!Number.isFinite(n)) return '—';
+    ms = Math.max(0, n);
     if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
     if (ms < 3_600_000) return `${(ms / 60_000).toFixed(ms % 60_000 ? 1 : 0)}m`.replace('.0', '');
     return `${(ms / 3_600_000).toFixed(ms % 3_600_000 ? 1 : 0)}h`.replace('.0', '');
