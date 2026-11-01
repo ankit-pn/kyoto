@@ -1116,3 +1116,49 @@ test('a runtime permission request can only ask for declared optional permission
       'the tool description should say the capability is unavailable');
   }
 });
+
+// ── Document structure ────────────────────────────────
+// The panel had no h1 at all: heading navigation started at h2, so a screen-reader
+// user got a document that reads as a fragment of something else, with no top-level
+// title to jump back to.
+
+test('the document has exactly one h1, and it comes first', () => {
+  const html = read('sidepanel/sidepanel.html');
+  const levels = [...html.matchAll(/<h([1-6])\b[^>]*>/g)].map(m => Number(m[1]));
+  assert.ok(levels.length > 5, 'expected the panel to use headings');
+
+  const h1s = levels.filter(l => l === 1);
+  assert.equal(h1s.length, 1, `expected exactly one h1, found ${h1s.length}`);
+  assert.equal(levels[0], 1, `the first heading must be the h1, got h${levels[0]}`);
+});
+
+test('heading levels never skip', () => {
+  // h2 -> h4 reads as a missing section to assistive tech.
+  const html = read('sidepanel/sidepanel.html');
+  const levels = [...html.matchAll(/<h([1-6])\b[^>]*>/g)].map(m => Number(m[1]));
+  const skips = [];
+  for (let i = 1; i < levels.length; i++) {
+    if (levels[i] - levels[i - 1] > 1) {
+      skips.push(`h${levels[i - 1]} -> h${levels[i]} (heading #${i + 1})`);
+    }
+  }
+  assert.deepEqual(skips, [], `heading levels skip:\n${skips.join('\n')}`);
+});
+
+test('the document declares its language', () => {
+  const html = read('sidepanel/sidepanel.html');
+  const tag = html.match(/<html[^>]*>/)?.[0] || '';
+  assert.match(tag, /lang="[a-zA-Z-]+"/,
+    'without a lang attribute a screen reader may mispronounce the whole panel');
+});
+
+test('the h1 keeps its visual treatment', () => {
+  // Promoting .brand to h1 must not change how it looks: the default h1 margins
+  // have to be zeroed, and size/weight stay explicit.
+  const css = read('sidepanel/sidepanel.css');
+  const rule = css.match(/\.brand\s*\{[^}]*\}/)?.[0] || '';
+  assert.ok(rule, '.brand should have a rule');
+  assert.match(rule, /margin:\s*0/, 'h1 default margins would shift the header');
+  assert.match(rule, /font-size:/, 'size must stay explicit, not the h1 default');
+  assert.match(rule, /font-weight:/, 'weight must stay explicit, not the h1 default');
+});
