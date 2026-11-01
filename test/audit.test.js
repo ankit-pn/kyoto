@@ -301,3 +301,78 @@ test('the drawer keeps Save outside the scrolling region', () => {
   const bodyEnd = HTML.indexOf('</div>', HTML.lastIndexOf('<p class="hint"', footerIdx));
   assert.ok(footerIdx > bodyStart, 'footer must follow the body in source order');
 });
+
+// ── Theme integrity ──────────────────────────────────
+// The panel ships dark, light (manual) and system-light themes. A colour written
+// as a raw value instead of a token is a bug waiting to happen: white-alpha hover
+// surfaces were invisible on the light theme, and the dark-theme greens/reds were
+// too pale to read on white. These guards keep new rules on the token system.
+
+function cssRuleLines() {
+  return read('sidepanel/sidepanel.css').split('\n')
+    .map((line, i) => ({ line, no: i + 1 }))
+    // Token declarations define the theme; they are allowed raw values.
+    .filter(({ line }) => !/^\s*--[a-z0-9-]+\s*:/i.test(line));
+}
+
+test('no rule hardcodes a white-alpha surface (invisible on the light theme)', () => {
+  const offenders = cssRuleLines()
+    .filter(({ line }) => /rgba\(\s*255\s*,\s*255\s*,\s*255\s*,/.test(line) && !/var\(--/.test(line))
+    .map(({ no, line }) => `${no}: ${line.trim()}`);
+  assert.deepEqual(offenders, [],
+    `use var(--hover) / var(--hover-strong) instead of white-alpha:\n${offenders.join('\n')}`);
+});
+
+test('no rule hardcodes a colour value outside the token system', () => {
+  // Allowed: var(--token, #fallback) and pure-black shadows/scrims.
+  const offenders = cssRuleLines().filter(({ line }) => {
+    if (/var\(--[a-z0-9-]+\s*,\s*#/.test(line)) return false;      // defensive fallback
+    if (/rgba\(\s*0\s*,\s*0\s*,\s*0\s*,/.test(line)) return false;  // shadow / scrim
+    return /(color|background|border|fill|stroke)\s*:\s*#[0-9a-fA-F]{3,8}/.test(line);
+  }).map(({ no, line }) => `${no}: ${line.trim()}`);
+  assert.deepEqual(offenders, [],
+    `hardcoded colours bypass the theme:\n${offenders.join('\n')}`);
+});
+
+/**
+ * Extract a CSS rule block by selector, exactly. A naive split() would include
+ * everything AFTER the match, so a token defined in a later scope would satisfy
+ * the assertion — the guard would pass while the theme was broken.
+ */
+function cssBlock(selector) {
+  const css = read('sidepanel/sidepanel.css');
+  const start = css.indexOf(selector + ' {');
+  assert.ok(start > -1, `rule ${selector} not found`);
+  let depth = 0;
+  for (let i = css.indexOf('{', start); i < css.length; i++) {
+    if (css[i] === '{') depth++;
+    else if (css[i] === '}') { depth--; if (depth === 0) return css.slice(start, i + 1); }
+  }
+  throw new Error(`unbalanced braces for ${selector}`);
+}
+
+test('theme-dependent tokens are defined in every theme scope', () => {
+  // These differ per theme, so each scope must set them: :root (dark default),
+  // the manual light/dark overrides, and the system-light media query.
+  const scopes = {
+    ':root': cssBlock(':root'),
+    'body.theme-light': cssBlock('body.theme-light'),
+    'body.theme-dark': cssBlock('body.theme-dark'),
+    'prefers-color-scheme: light': cssBlock('@media (prefers-color-scheme: light)'),
+  };
+  for (const [name, block] of Object.entries(scopes)) {
+    for (const token of ['--hover', '--hover-strong']) {
+      assert.ok(block.includes(token + ':'), `${token} missing from ${name}`);
+    }
+  }
+});
+
+test('semantic colours are themed for contrast on a light background', () => {
+  // The dark-theme red/green/amber are too pale to read on white at 11px.
+  for (const scope of ['body.theme-light', '@media (prefers-color-scheme: light)']) {
+    const block = cssBlock(scope);
+    for (const token of ['--danger', '--ok', '--warn']) {
+      assert.ok(block.includes(token + ':'), `${token} missing from ${scope}`);
+    }
+  }
+});

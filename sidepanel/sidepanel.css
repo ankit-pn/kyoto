@@ -14,6 +14,10 @@
   --danger: #ef5a5a;
   --ok: #2bb673;
   --warn: #d4a72c;
+  /* Surfaces that sit ON a theme background. These were hardcoded white-alpha,
+     which is invisible on the light theme (white on white). */
+  --hover: rgba(255, 255, 255, 0.035);
+  --hover-strong: rgba(255, 255, 255, 0.18);
 }
 
 /* Manual overrides take precedence over prefers-color-scheme. */
@@ -30,6 +34,13 @@ body.theme-light {
   --accent: #2b5fff;
   --accent-hover: #1d4fe6;
   --accent-soft: rgba(43, 95, 255, 0.10);
+  --hover: rgba(0, 0, 0, 0.05);
+  --hover-strong: rgba(0, 0, 0, 0.12);
+  /* Darker semantics: the dark-theme greens/reds/ambers are too light to read
+     on white at 11px. */
+  --danger: #c62828;
+  --ok: #12794a;
+  --warn: #8a6d00;
 }
 body.theme-dark {
   color-scheme: dark;
@@ -44,6 +55,8 @@ body.theme-dark {
   --accent: #5b8cff;
   --accent-hover: #6f9bff;
   --accent-soft: rgba(91, 140, 255, 0.12);
+  --hover: rgba(255, 255, 255, 0.035);
+  --hover-strong: rgba(255, 255, 255, 0.18);
 }
 
 /* Compact density — shrink the largest paddings/font slightly. */
@@ -84,6 +97,11 @@ body.density-compact .drawer-body { padding: 10px 12px 16px; gap: 10px; }
     --accent: #2b5fff;
     --accent-hover: #1d4fe6;
     --accent-soft: rgba(43, 95, 255, 0.10);
+    --hover: rgba(0, 0, 0, 0.05);
+    --hover-strong: rgba(0, 0, 0, 0.12);
+    --danger: #c62828;
+    --ok: #12794a;
+    --warn: #8a6d00;
   }
 }
 
@@ -370,7 +388,7 @@ body {
   padding: 1px 5px; border-radius: 3px;
   background: var(--bg-elev2); color: var(--text-faint);
 }
-.slash-palette .slash-item.active .slash-tag { background: rgba(255,255,255,0.18); color: var(--accent); }
+.slash-palette .slash-item.active .slash-tag { background: var(--hover-strong); color: var(--accent); }
 .slash-palette .slash-hint {
   padding: 6px 8px;
   font-size: 11px; color: var(--text-faint);
@@ -741,14 +759,14 @@ body {
   border-radius: 6px;
 }
 .cron-dot { font-size: 14px; line-height: 1.2; flex-shrink: 0; width: 14px; text-align: center; }
-.cron-dot.ok { color: #4caf50; }
-.cron-dot.err { color: #e57373; }
+.cron-dot.ok { color: var(--ok); }
+.cron-dot.err { color: var(--danger); }
 .cron-dot.paused { color: var(--text-faint); }
 .cron-meta { flex: 1; min-width: 0; font-size: 12px; }
 .cron-name { font-weight: 500; color: var(--text); }
 .cron-name .cron-sched { font-weight: normal; color: var(--text-faint); font-size: 11.5px; }
 .cron-times { color: var(--text-faint); font-size: 11.5px; margin-top: 2px; }
-.cron-err { color: #e57373; font-size: 11.5px; margin-top: 2px; overflow-wrap: anywhere; }
+.cron-err { color: var(--danger); font-size: 11.5px; margin-top: 2px; overflow-wrap: anywhere; }
 .cron-actions { display: flex; gap: 4px; flex-shrink: 0; }
 
 /* ── Reasoning card ─────────────────────── */
@@ -769,7 +787,7 @@ body {
   color: var(--text-faint);
 }
 .reasoning-card > summary::-webkit-details-marker { display: none; }
-.reasoning-card > summary:hover { background: rgba(255, 255, 255, 0.02); }
+.reasoning-card > summary:hover { background: var(--hover); }
 .reasoning-name { font-style: italic; font-size: 11.5px; }
 .reasoning-state {
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
@@ -804,7 +822,7 @@ body {
   user-select: none;
 }
 .tool-card > summary::-webkit-details-marker { display: none; }
-.tool-card > summary:hover { background: rgba(255,255,255,0.02); }
+.tool-card > summary:hover { background: var(--hover); }
 .tool-name {
   font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   font-size: 12px;
@@ -1374,7 +1392,7 @@ body {
   opacity: 0.55;
 }
 /* Mic button: active state while listening. */
-#micBtn.listening { color: #e5484d; animation: kyoto-pulse 1.2s ease-in-out infinite; }
+#micBtn.listening { color: var(--danger); animation: kyoto-pulse 1.2s ease-in-out infinite; }
 @keyframes kyoto-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 /* ══════════════════════════════════════════════════════
