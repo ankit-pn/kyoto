@@ -1668,3 +1668,14 @@ body {
   padding: 0 2px;
 }
 .queue-chip .q-cancel:hover { color: var(--danger); }
+
+/* Message timestamp — quiet by default, exact value on hover. */
+.msg-time {
+  margin-left: 8px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  opacity: 0.75;
+  cursor: default;
+}
+.msg:hover .msg-time { opacity: 1; }

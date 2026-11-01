@@ -3445,7 +3445,7 @@
   function renderHistoryEntry(m, idx) {
     ensureEmptyHidden();
     if (m.role === 'user') {
-      const r = addMessage('user', m.content, { historyIndex: idx, pinned: !!m._pinned });
+      const r = addMessage('user', m.content, { historyIndex: idx, pinned: !!m._pinned, ts: m._ts });
       decorateEditButton(r.wrap, idx);
     } else if (m.role === 'assistant') {
       // reasoning block first (if any). `_reasoning` is the UI-only copy we
@@ -3458,7 +3458,7 @@
         const stateEl = card.summary.querySelector('.reasoning-state');
         if (stateEl) stateEl.textContent = `${rContent.length} chars`;
       }
-      if (m.content) addMessage('assistant', m.content, { error: !!m._error, historyIndex: idx, pinned: !!m._pinned });
+      if (m.content) addMessage('assistant', m.content, { error: !!m._error, historyIndex: idx, pinned: !!m._pinned, ts: m._ts });
       // Token usage chip (replay)
       if (m._usage) renderUsageChip(m._usage, m._cost);
       // Tool calls (then matching tool results follow as separate history entries)
@@ -3524,6 +3524,20 @@
     const label = document.createElement('div');
     label.className = `msg-role ${opts.error ? 'error' : role}`;
     label.textContent = opts.error ? 'Error' : role === 'user' ? 'You' : 'Assistant';
+
+    // Timestamp. `_ts` is underscore-prefixed, so buildMessages() strips it
+    // before the request — it is a UI record, never part of the payload.
+    if (opts.ts) {
+      const time = document.createElement('time');
+      time.className = 'msg-time';
+      const d = new Date(opts.ts);
+      if (!Number.isNaN(d.getTime())) {
+        time.dateTime = d.toISOString();
+        time.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        time.title = d.toLocaleString();
+      }
+      if (time.textContent) label.appendChild(time);
+    }
 
     if (opts.historyIndex != null && !opts.error) {
       const pin = document.createElement('button');
@@ -4395,10 +4409,10 @@
       session.title = (textForTitle.split('\n')[0] || 'New chat').slice(0, 60);
     }
 
-    session.history.push({ role: 'user', content: text });
+    session.history.push({ role: 'user', content: text, _ts: Date.now() });
     const userIdx = session.history.length - 1;
     if (isActive(session.id)) {
-      const { wrap } = addMessage('user', text);
+      const { wrap } = addMessage('user', text, { ts: session.history[userIdx]._ts });
       decoratePinButton(wrap, userIdx, false);
       decorateEditButton(wrap, userIdx);
     }
@@ -4596,6 +4610,7 @@
         }
         if (finishReason) msg._finishReason = finishReason;
         if (typeof msg.content === 'string' && msg.content) lastAssistantText = msg.content;
+        if (!msg._ts) msg._ts = Date.now();
         session.history.push(msg);
         const asstIdx = session.history.length - 1;
         // Decorate the live-streamed assistant message with a pin button.
@@ -4770,10 +4785,10 @@
         sanitiseDanglingToolCalls(session, reason);
       } catch {}
       if (e.name === 'AbortError') {
-        session.history.push({ role: 'assistant', content: '_[stopped]_', _error: true });
+        session.history.push({ role: 'assistant', content: '_[stopped]_', _error: true, _ts: Date.now() });
       } else {
         if (isActive(session.id)) addMessage('assistant', `**Error:** ${e.message}`, { error: true });
-        session.history.push({ role: 'assistant', content: `Error: ${e.message}`, _error: true });
+        session.history.push({ role: 'assistant', content: `Error: ${e.message}`, _error: true, _ts: Date.now() });
       }
       await persistSession(session);
     } finally {
@@ -5084,7 +5099,7 @@
         if (reduced?.textChunk) {
           if (isActive(session.id)) {
             if (!textTarget) {
-              const m = addMessage('assistant', '');
+              const m = addMessage('assistant', '', { ts: acc._startedAt || Date.now() });
               textTarget = m.body;
               textTarget.classList.add('cursor');
             }

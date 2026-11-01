@@ -1039,3 +1039,65 @@ test('retry disappears once the fetch succeeds', async () => {
   await settle(300);
   assert.ok(retry.classList.contains('hidden'), 'after success there is nothing to retry');
 });
+
+// ══════════════════════════════════════════════════════
+// Message timestamps
+// ══════════════════════════════════════════════════════
+// Long sessions had no way to tell when something was said.
+
+test('a sent message shows a timestamp', async () => {
+  const { doc, send } = await bootWithPendingTurn(hangingFetch);
+  send('what time is this');
+  await settle(150);
+
+  const time = doc.querySelector('.msg.user .msg-time');
+  assert.ok(time, 'the user bubble should carry a timestamp');
+  assert.match(time.textContent, /\d{1,2}:\d{2}/, `unexpected format: ${time.textContent}`);
+  assert.ok(time.getAttribute('datetime'), 'use a machine-readable <time datetime>');
+  assert.ok(time.title.length > 0, 'hover should reveal the full date');
+
+  doc.getElementById('stopBtn').click();
+  await settle(120);
+});
+
+test('the timestamp never reaches the API payload', async () => {
+  // `_ts` is underscore-prefixed, which buildMessages() strips. If that ever
+  // regressed, every request would carry a bogus message field.
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('provider', 'openrouter');
+  chrome.__store.set('model', 'test/model');
+  chrome.__store.set('apiKeys', { openrouter: 'test-key' });
+
+  let captured = null;
+  const p = await bootPanel({
+    chrome,
+    beforeBoot: (w) => {
+      w.fetch = (u, init) => {
+        try { captured = JSON.parse(init.body); } catch { /* not JSON */ }
+        return new Promise((_, rej) => {
+          if (init && init.signal) {
+            init.signal.addEventListener('abort', () => {
+              const e = new Error('aborted'); e.name = 'AbortError'; rej(e);
+            });
+          }
+        });
+      };
+    }
+  });
+  const doc = p.window.document;
+  const input = doc.getElementById('input');
+  input.value = 'timestamped';
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(250);
+
+  assert.ok(captured && Array.isArray(captured.messages), 'the request should have been captured');
+  assert.ok(!JSON.stringify(captured).includes('_ts'), 'internal _ts leaked into the request body');
+  for (const m of captured.messages) {
+    for (const k of Object.keys(m)) {
+      assert.ok(!k.startsWith('_'), `internal key ${k} leaked into the wire message`);
+    }
+  }
+  doc.getElementById('stopBtn').click();
+  await settle(120);
+});
