@@ -1921,3 +1921,54 @@ test('a malformed stored conversation is reported, not silently blank', async ()
   assert.ok(!bar.classList.contains('hidden'), 'an unreadable conversation must be reported');
   assert.match(bar.textContent, /could not be read|malformed/i);
 });
+
+// ══════════════════════════════════════════════════════
+// A panel that cannot read storage still starts
+// ══════════════════════════════════════════════════════
+// Boot was a bare async IIFE: one rejected storage read aborted the remaining
+// start-up and left a half-initialised panel — no settings, no session, no
+// explanation (and in Node, an unhandled rejection that kills the process).
+
+test('the panel degrades to a usable state when storage cannot be read', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.storage.local.get = async () => { throw new Error('storage read failed'); };
+
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+
+  // It must still be a working panel, not an empty window.
+  assert.ok(doc.getElementById('sendBtn'), 'the composer must exist');
+  assert.ok(doc.getElementById('input') && !doc.getElementById('input').disabled, 'the user must be able to type');
+  assert.ok(doc.getElementById('chat').children.length > 0, 'a conversation should be rendered');
+  assert.ok(doc.getElementById('sessionsBtn'), 'the session controls must exist');
+
+  // And it must say what happened.
+  const bar = doc.getElementById('persistWarnBar');
+  assert.ok(!bar.classList.contains('hidden'), 'a degraded start must be reported');
+  assert.match(bar.textContent, /could not/i);
+
+  // Nothing may escape as an uncaught error — that is what killed start-up.
+  const uncaught = p.errors.filter(e => /^uncaught|unhandled/i.test(e));
+  assert.deepEqual(uncaught, [], `start-up must not leak unhandled errors: ${uncaught.join('; ')}`);
+});
+
+test('start-up falls back to default settings when they cannot be read', async () => {
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.storage.local.get = async () => { throw new Error('storage read failed'); };
+
+  const p = await bootPanel({ chrome });
+  // The composer works, so the model/settings plumbing must have defaults rather
+  // than being left undefined.
+  const provider = p.window.document.getElementById('provider');
+  assert.ok(provider, 'settings controls exist');
+  assert.match(p.window.document.getElementById('persistWarnBar').textContent, /default settings|could not read/i);
+});
+
+test('a healthy start-up shows no warning', async () => {
+  const p = await bootPanel();
+  const bar = p.window.document.getElementById('persistWarnBar');
+  assert.ok(bar.classList.contains('hidden'), 'no false alarm on a normal boot');
+  assert.deepEqual(p.errors, [], 'a healthy boot logs nothing');
+});

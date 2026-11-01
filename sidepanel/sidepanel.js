@@ -8400,10 +8400,30 @@
   }
 
   // ── Boot ─────────────────────────────────────────────
+  /** Run a boot step, falling back instead of aborting the whole start-up. */
+  async function bootStep(label, fn, fallback) {
+    try {
+      return await fn();
+    } catch (err) {
+      console.error(`[Kyoto] boot step failed (${label}):`, err);
+      warnPersistFailure(`Kyoto could not ${label}`, err, { sticky: true });
+      return fallback;
+    }
+  }
+
   (async () => {
-    await loadSettings();
-    await loadDrafts();
-    await loadSpendTotal();
+    // The boot sequence used to be a bare async IIFE: any rejection (a failed
+    // storage read, a tabs.query error) aborted the rest of start-up and left a
+    // half-initialised panel — no settings, no session, no explanation. Each
+    // critical step now degrades instead, and anything that does fail is
+    // reported through the persistent storage bar.
+    await bootStep('read your settings', loadSettings, null);
+    if (!state.settings) {
+      state.settings = { ...defaults };
+      warnPersistFailure('Kyoto started with default settings (your saved settings could not be read)', new Error('storage'), { sticky: true });
+    }
+    await bootStep('restore unsent drafts', loadDrafts, null);
+    await bootStep('read the spend total', loadSpendTotal, null);
     wirePalette();
     wireVoice();
     wireOverlayDismissal();
@@ -8424,21 +8444,27 @@
     compileCustomTools();
     // Kick off models.dev registry load (cached, non-blocking after first run)
     if (window.KyotoModels) window.KyotoModels.init().catch(() => {});
-    state.sessionsIndex = await loadSessionsIndex();
+    state.sessionsIndex = (await bootStep('read your conversations', loadSessionsIndex, [])) || [];
     state.tabToSession = {};
     state.sessionsIndex.forEach(s => { if (s.tabId != null) state.tabToSession[s.tabId] = s.id; });
 
     // Load memory index so the system prompt can list available memories
-    const memGot = await chrome.storage.local.get('kyoto_memory_index');
-    state.memoryIndex = memGot.kyoto_memory_index || [];
+    const memGot = await bootStep('read your saved memories',
+      () => chrome.storage.local.get('kyoto_memory_index'), null);
+    state.memoryIndex = memGot?.kyoto_memory_index || [];
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tabArr = await bootStep('read the current tab',
+      () => chrome.tabs.query({ active: true, currentWindow: true }), []);
+    const tab = tabArr?.[0] || null;
     let session = null;
     if (tab) {
       const sid = state.tabToSession[tab.id];
       if (sid) session = await loadFullSession(sid);
     }
-    if (!session) session = await createSession(tab);
+    // A session must exist for the panel to be usable at all, even if storage
+    // refused to persist it.
+    if (!session) session = await bootStep('start a conversation', () => createSession(tab), null);
+    if (!session) session = createSessionObject(tab);
     state.activeSession = session;
 
     reflectProvider(state.settings.provider);
@@ -8462,5 +8488,13 @@
     fetchAllProviderModels({ background: true }).catch(() => {});
 
     els.input.focus();
-  })();
+  })().catch((err) => {
+    // Last resort: never die silently. The panel may be partially usable, so
+    // say what happened rather than leaving an empty window.
+    console.error('[Kyoto] start-up failed:', err);
+    try {
+      warnPersistFailure('Kyoto could not finish starting', err, { sticky: true });
+      announce('Kyoto failed to start. Some features may not work.');
+    } catch { /* nothing more we can do */ }
+  });
 })();
