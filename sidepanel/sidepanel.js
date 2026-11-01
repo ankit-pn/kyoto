@@ -3534,6 +3534,13 @@
     ensureEmptyHidden();
     const wrap = document.createElement('div');
     wrap.className = `msg ${role}${opts.error ? ' error' : ''}${opts.pinned ? ' pinned' : ''}`;
+    // Errors are the one thing a screen-reader user must not miss: they are
+    // appended to a log that is otherwise not a live region (streaming would
+    // flood it), so an error would otherwise pass silently.
+    // Only LIVE errors alert. Re-rendering a stored conversation would otherwise
+    // re-announce every historical error each time the user switches sessions —
+    // `historyIndex` is set when rendering from history, absent when live.
+    if (opts.error && opts.historyIndex == null) wrap.setAttribute('role', 'alert');
     const label = document.createElement('div');
     label.className = `msg-role ${opts.error ? 'error' : role}`;
     label.textContent = opts.error ? 'Error' : role === 'user' ? 'You' : 'Assistant';
@@ -4396,13 +4403,15 @@
       );
       // Focus jumps into the drawer here, so a screen-reader user needs to be
       // told why the context changed.
-      announce('Cannot send: no API key configured. Settings opened.');
+      // The error card above is role="alert" and carries the message; only the
+      // context change needs announcing, or the user hears it twice.
+      announce('Settings opened.');
       openDrawer();
       return;
     }
     if (!session.model) {
       addMessage('assistant', 'No model selected. Pick one from the header (or Settings).', { error: true });
-      announce('Cannot send: no model selected. Settings opened.');
+      announce('Settings opened.');
       openDrawer(); return;
     }
     // A turn is already running on this session: queue the follow-up rather

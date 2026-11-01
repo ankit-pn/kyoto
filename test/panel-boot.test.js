@@ -385,10 +385,13 @@ test('the live region receives coarse turn announcements', async () => {
   input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
   await settle(120);
 
-  // A keyless panel cannot start a turn: it explains, opens Settings and
-  // announces — so a screen-reader user is not silently teleported into a dialog.
-  assert.match(status.textContent, /Cannot send|API key/i,
-    `expected a failure announcement, got ${JSON.stringify(status.textContent)}`);
+  // A keyless panel cannot start a turn: it explains via an alert (the error
+  // card) and opens Settings. The status region only mentions the context
+  // change, so the user does not hear the same sentence twice.
+  assert.match(status.textContent, /settings opened/i,
+    `expected a context-change announcement, got ${JSON.stringify(status.textContent)}`);
+  assert.ok(p.window.document.querySelector('.msg.error[role="alert"]'),
+    'the reason itself is carried by the alert');
 });
 
 test('Escape in the palette returns focus to the composer', async () => {
@@ -1454,4 +1457,78 @@ test('the mic reports listening state', async () => {
   mic.click();
   await settle(40);
   assert.equal(mic.getAttribute('aria-pressed'), 'false', 'stopping must clear it');
+});
+
+// ══════════════════════════════════════════════════════
+// Errors are announced
+// ══════════════════════════════════════════════════════
+// Errors land in a log that is deliberately not a live region (streaming would
+// flood it), so without role="alert" a screen-reader user would never learn that
+// a turn failed.
+
+test('a live error is an alert, and normal messages are not', async () => {
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const input = doc.getElementById('input');
+  input.value = 'anything';
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(200);
+
+  const err = doc.querySelector('.msg.error');
+  assert.ok(err, 'the keyless send should render an error');
+  assert.equal(err.getAttribute('role'), 'alert', 'a failure must be announced immediately');
+
+  const normal = [...doc.querySelectorAll('.msg:not(.error)')];
+  assert.ok(normal.every(el => !el.hasAttribute('role')),
+    'normal messages must not be alerts (the log is not a live region)');
+});
+
+test('the error is announced once, not twice', async () => {
+  // The status region previously repeated the same sentence the error card
+  // shows, so a screen-reader user heard it twice. The card (alert) carries the
+  // reason; the status region only mentions the context change.
+  const p = await bootPanel();
+  const doc = p.window.document;
+  const input = doc.getElementById('input');
+  input.value = 'anything';
+  input.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle(200);
+
+  const status = doc.getElementById('srStatus').textContent;
+  const err = doc.querySelector('.msg.error');
+  assert.ok(err);
+  assert.ok(!/no api key/i.test(status),
+    `the status region must not repeat the error text, got ${JSON.stringify(status)}`);
+  assert.match(status, /settings opened/i, 'it should mention the context change instead');
+});
+
+test('replaying history does not re-alert old errors', async () => {
+  // Switching sessions re-renders the transcript; historical errors must not
+  // fire alerts again (that would spam a screen reader on every switch).
+  const { makeChrome } = require('./helpers/chrome-stub');
+  const chrome = makeChrome();
+  chrome.__store.set('kyoto_sessions_index', [{
+    id: 'sess_old', title: 'Old chat', lastActive: Date.now(), tabId: 1, url: 'https://example.test/'
+  }]);
+  chrome.__store.set('kyoto_session_sess_old', {
+    id: 'sess_old', title: 'Old chat', lastActive: Date.now(), tabId: 1,
+    history: [
+      { role: 'user', content: 'hi', _ts: Date.now() },
+      { role: 'assistant', content: 'Error: provider exploded', _error: true, _ts: Date.now() }
+    ]
+  });
+  const p = await bootPanel({ chrome });
+  const doc = p.window.document;
+  doc.getElementById('sessionsBtn').click();
+  await settle(100);
+  const row = [...doc.querySelectorAll('#sessionsList .sess-item')]
+    .find(el => (el.textContent || '').includes('Old chat'));
+  assert.ok(row, 'seeded session should be listed');
+  row.click();
+  await settle(200);
+
+  const errCard = doc.querySelector('.msg.error');
+  assert.ok(errCard, 'the stored error should still render');
+  assert.equal(errCard.getAttribute('role'), null,
+    'a replayed historical error must not be a live alert');
 });
