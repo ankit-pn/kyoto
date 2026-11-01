@@ -50,6 +50,12 @@
       }
     }
     if (typeof m.reasoning === 'string') s += m.reasoning;
+    // OpenRouter's structured reasoning can be large (encrypted blocks are
+    // base64) and it is replayed on every request, so it must be counted or
+    // compaction fires far too late.
+    if (Array.isArray(m.reasoning_details)) {
+      try { s += JSON.stringify(m.reasoning_details); } catch { /* circular */ }
+    }
     return s;
   }
 
@@ -102,12 +108,17 @@
       threshold = 0.75,
       keepTurns = 6,
       force = false,
-      minDropped = 3
+      minDropped = 3,
+      // Fixed per-request overhead that is not part of `history`: the system
+      // prompt, attached page content, tool schemas. Ignoring it made
+      // compaction fire far later than it should.
+      extraTokens = 0
     } = opts;
 
     if (!Array.isArray(history) || history.length < 2) return null;
 
-    const tokensBefore = estimateTokens(history);
+    const overhead = Math.max(0, Number(extraTokens) || 0);
+    const tokensBefore = estimateTokens(history) + overhead;
     const budget = Math.max(1, contextTokens) * Math.max(0.1, Math.min(0.95, threshold));
     if (!force && tokensBefore < budget) return null;
 
@@ -122,9 +133,10 @@
     const pinned = dropped.filter(isPinned);
 
     // Estimate the post-compaction size: kept turns + a summary of roughly
-    // 1/20th of the dropped text, floored at ~120 tokens.
+    // 1/20th of the dropped text, floored at ~120 tokens. The fixed overhead
+    // survives compaction, so it counts on both sides.
     const summaryTokens = Math.max(120, Math.ceil(estimateTokens(dropped) / 20));
-    const tokensAfterEstimate = estimateTokens(kept) + summaryTokens;
+    const tokensAfterEstimate = estimateTokens(kept) + summaryTokens + overhead;
 
     // Refuse a compaction that would not meaningfully help.
     if (!force && tokensAfterEstimate >= tokensBefore * 0.9) return null;
@@ -163,18 +175,34 @@
   function buildCompactedHistory(history, plan, summaryText) {
     if (!plan || plan.cutIndex <= 0) return history;
     const summary = String(summaryText || '').trim() || '(no summary available)';
-    const header =
+    let header =
       `[Earlier conversation compacted: ${plan.droppedCount} messages summarised ` +
       `to stay inside the model's context window. This summary is authoritative ` +
       `for what happened before this point.]`;
+
+    // Pinned messages cannot be re-inserted as separate turns without breaking
+    // role alternation or orphaning a tool group, so their text is folded into
+    // the recap. The UI promises pinned messages are kept — this is how.
+    const pinnedAll = (plan.pinned || []).filter(m => m && m.role !== 'tool' && !hasToolCalls(m));
+    if (pinnedAll.length) {
+      const notes = pinnedAll
+        .map(m => `- (${m.role}) ${messageText(m).replace(/\s+/g, ' ').trim().slice(0, 800)}`)
+        .filter(Boolean);
+      if (notes.length) {
+        header += `\n\n[Pinned messages from earlier — must be preserved]\n${notes.join('\n')}`;
+      }
+    }
     const recapText = `${header}\n\n${summary}\n\n---\n\n`;
 
+    // Nothing from the dropped range is re-inserted as its own turn.
+    // Re-inserting a pinned assistant message would put it next to another
+    // assistant or user turn, and strict gateways disagree about consecutive
+    // same-role turns; re-inserting a pinned `tool`/tool_calls pair would
+    // orphan its counterpart. Folding the text into the recap keeps the content
+    // without any structural risk.
     const tail = history.slice(plan.cutIndex);
-    const pinned = (plan.pinned || []).filter(
-      m => m && m.role !== 'user' && m.role !== 'tool' && !hasToolCalls(m)
-    );
     const mergedFirst = prependToMessage(tail[0], recapText);
-    return [mergedFirst, ...pinned, ...tail.slice(1)];
+    return [mergedFirst, ...tail.slice(1)];
   }
 
   /**
@@ -240,18 +268,28 @@
     const raw = Array.isArray(input) ? input : String(input || '').split('\n');
     const out = [];
     const seen = new Set();
-    for (const line of raw) {
-      const t = String(line || '').trim();
+    const push = (provider, model) => {
+      const p = String(provider || '').trim();
+      const m = String(model || '').trim();
+      if (!p || !m) return;
+      const key = `${p}:${m}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ provider: p, model: m });
+    };
+    for (const entry of raw) {
+      // The saved shape is [{provider, model}]. Re-parsing that array as text
+      // would String() each element to "[object Object]" and silently drop the
+      // whole chain — so objects are accepted directly.
+      if (entry && typeof entry === 'object') {
+        push(entry.provider, entry.model);
+        continue;
+      }
+      const t = String(entry || '').trim();
       if (!t || t.startsWith('#')) continue;
       const idx = t.indexOf(':');
       if (idx <= 0) continue;
-      const provider = t.slice(0, idx).trim();
-      const model = t.slice(idx + 1).trim();
-      if (!provider || !model) continue;
-      const key = `${provider}:${model}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ provider, model });
+      push(t.slice(0, idx), t.slice(idx + 1));
     }
     return out;
   }

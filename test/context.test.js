@@ -176,16 +176,18 @@ test('a pinned assistant turn carrying tool_calls is NOT re-inserted (would orph
 // ── Pinned messages ──────────────────────────────────
 test('pinned messages from the dropped range survive compaction', () => {
   const h = transcript(8, { big: 3000 });
-  // h[3] is the first turn's final assistant message (no tool_calls), so it is
-  // safe to re-insert on its own.
+  // h[3] is the first turn's final assistant message ("done 0").
   h[3]._pinned = true;
   const plan = C.planCompaction(h, { contextTokens: 1500, threshold: 0.5, keepTurns: 2 });
   assert.ok(plan, 'expected a plan');
   eq(plan.pinned.length, 1);
   const next = C.buildCompactedHistory(h, plan, 'S');
-  assert.ok(next.some(m => m._pinned === true), 'pinned message must still be present');
-  // recap is merged into the first kept turn, so the pinned turn follows it
-  eq(next[1]._pinned, true);
+  const recap = String(next[0].content);
+  assert.match(recap, /Pinned messages from earlier/, 'recap must carry a pinned section');
+  assert.match(recap, /done 0/, 'the pinned message text must survive');
+  // Pinned content is FOLDED into the recap rather than re-inserted as its own
+  // turn — re-inserting risks consecutive same-role turns and orphaned tools.
+  assert.ok(!next.some(m => m._pinned), 'pinned messages are folded, not re-inserted');
 });
 
 // ── Guards ───────────────────────────────────────────
@@ -301,4 +303,60 @@ test('parseFallbackChain tolerates non-string input', () => {
   assert.deepEqual(C.parseFallbackChain(null), []);
   assert.deepEqual(C.parseFallbackChain(undefined), []);
   assert.deepEqual(C.parseFallbackChain(''), []);
+});
+
+// REGRESSION (review C1): the chain is persisted as [{provider, model}] and
+// re-read on every turn. Parsing that array as text String()'d each element to
+// "[object Object]", found no colon and dropped every entry — so the saved
+// fallback chain was silently empty and fallback never fired.
+test('parseFallbackChain accepts the persisted object shape', () => {
+  const saved = [
+    { provider: 'openrouter', model: 'openai/gpt-4o-mini' },
+    { provider: 'opencode-go', model: 'glm-5.3' }
+  ];
+  assert.deepEqual(C.parseFallbackChain(saved), saved);
+});
+
+test('parseFallbackChain round-trips save -> load -> save', () => {
+  const first = C.parseFallbackChain('openrouter:openai/gpt-4o-mini\nopencode-go:glm-5.3');
+  eq(first.length, 2);
+  const second = C.parseFallbackChain(first);          // what the next turn does
+  assert.deepEqual(second, first, 're-parsing the saved array must be lossless');
+});
+
+test('parseFallbackChain drops object entries missing a side', () => {
+  assert.deepEqual(C.parseFallbackChain([
+    { provider: 'openrouter' },
+    { model: 'x/y' },
+    {},
+    { provider: 'deepseek', model: 'deepseek-chat' }
+  ]), [{ provider: 'deepseek', model: 'deepseek-chat' }]);
+});
+
+// ── Fixed per-request overhead ───────────────────────
+// The system prompt, page content and tool schemas all consume the same window
+// but are not in `history`. Ignoring them made compaction fire far too late.
+test('extraTokens is folded into the token estimate', () => {
+  const h = transcript(6, { big: 2000 });
+  const a = C.planCompaction(h, { contextTokens: 8000, force: true, keepTurns: 2 });
+  const b = C.planCompaction(h, { contextTokens: 8000, force: true, keepTurns: 2, extraTokens: 1000 });
+  assert.ok(a && b);
+  eq(b.tokensBefore, a.tokensBefore + 1000);
+});
+
+test('a large pinned user message survives compaction as recap text', () => {
+  const h = transcript(8, { big: 3000 });
+  h[0]._pinned = true;                                   // a pinned USER message
+  h[0].content = 'CRITICAL INSTRUCTION: never touch prod';
+  const plan = C.planCompaction(h, { contextTokens: 1500, threshold: 0.5, keepTurns: 2 });
+  assert.ok(plan);
+  assert.ok(plan.pinned.some(m => m.role === 'user'), 'planner should report the pinned user message');
+  const next = C.buildCompactedHistory(h, plan, 'SUMMARY');
+  const recap = String(next[0].content);
+  assert.match(recap, /never touch prod/, 'pinned user text must be preserved in the recap');
+  // ...and it must not be re-inserted as a separate adjacent user turn.
+  assertNoOrphanTools(next, 'pinned-user');
+  for (let i = 1; i < next.length; i++) {
+    assert.ok(!(next[i].role === 'user' && next[i - 1].role === 'user'), `adjacent user turns at ${i}`);
+  }
 });

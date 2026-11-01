@@ -2422,6 +2422,7 @@
     if (action === 'cost') {
       const s = state.activeSession;
       const lines = [];
+      let uncosted = 0;
       if (s) {
         let tin = 0, tout = 0, turns = 0, costed = 0;
         for (const m of (s.history || [])) {
@@ -2430,6 +2431,7 @@
           tout += m._usage.completion_tokens || 0;
           turns++;
           if (m._cost != null) costed += m._cost;
+          else uncosted++;
         }
         lines.push(
           `**This session** — ${fmtUsd(sessionSpend(s))}\n` +
@@ -2445,12 +2447,25 @@
       lines.push(cap > 0
         ? `Cap: ${fmtUsd(cap)} per session — ${Math.max(0, cap - sessionSpend(state.activeSession)).toFixed(4)} USD left.`
         : `No spend cap set — add one in Settings → Spend cap.`);
+      if (cap > 0 && uncosted > 0) {
+        lines.push(
+          `⚠︎ ${uncosted} model turn${uncosted === 1 ? '' : 's'} had no pricing information, so the cap ` +
+          `cannot account for ${uncosted === 1 ? 'it' : 'them'}. OpenRouter and OpenCode Go report real ` +
+          `per-request costs; other providers rely on models.dev's price table.`
+        );
+      }
       addMessage('assistant', lines.join('\n\n'));
       return;
     }
     if (action === 'compact') {
       const s = state.activeSession;
       if (!s) return;
+      // Compacting mid-turn would swap the transcript under a live stream,
+      // wipe the streaming DOM and invalidate message indices.
+      if (runtime.busy) {
+        addMessage('assistant', '_A turn is still running. Stop it (or wait for it to finish) before compacting._');
+        return;
+      }
       const ok = await maybeCompact(s, { force: true });
       if (!ok) {
         addMessage('assistant',
@@ -2950,17 +2965,29 @@
   // is never serialised onto the wire); the all-time total lives in local
   // storage so it survives session deletion.
   const SPEND_TOTAL_KEY = 'kyoto_spend_total';
-  function sessionSpend(session) { return Number(session?._spend || 0) || 0; }
+  function sessionSpend(session) {
+    // Subagent fan-out runs in its own session; its cost is accumulated onto
+    // the parent as `_subagentCostUsd` and must count toward the parent's cap,
+    // otherwise an agent that spawns agents escapes the budget entirely.
+    return (Number(session?._spend || 0) || 0) + (Number(session?._subagentCostUsd || 0) || 0);
+  }
   async function loadSpendTotal() {
     try {
       const got = await chrome.storage.local.get(SPEND_TOTAL_KEY);
       state.spendTotal = Number(got?.[SPEND_TOTAL_KEY]?.usd || 0) || 0;
-    } catch { state.spendTotal = 0; }
+      state.spendLoaded = true;
+    } catch {
+      state.spendTotal = 0;
+      state.spendLoaded = false;
+    }
   }
   async function recordSpend(session, costUsd) {
     if (!(costUsd > 0)) return;
-    session._spend = +(sessionSpend(session) + costUsd).toFixed(6);
+    session._spend = +((Number(session?._spend || 0) || 0) + costUsd).toFixed(6);
     try {
+      // If the boot-time read failed, re-read before writing so the all-time
+      // total is not reset to just this turn's cost.
+      if (!state.spendLoaded) await loadSpendTotal();
       const total = +(Number(state.spendTotal || 0) + costUsd).toFixed(6);
       state.spendTotal = total;
       await chrome.storage.local.set({ [SPEND_TOTAL_KEY]: { usd: total, updatedAt: Date.now() } });
@@ -2979,15 +3006,22 @@
   }
 
   // Candidates to try after the primary provider/model, in order. Entries that
-  // point at a provider with no key configured are dropped: trying them would
-  // just fail again with a confusing error.
+  // could not actually serve a chat request are dropped: trying them just fails
+  // again, and a non-retryable failure aborts the rest of the chain.
   function fallbackCandidates() {
+    const primaryKey = `${state.settings.provider}:${state.settings.model}`;
     const chain = parseFallbackChain(state.settings.fallbackChain || []);
     return chain.filter(c => {
+      // Listing the primary again would just retry the same failing model.
+      if (`${c.provider}:${c.model}` === primaryKey) return false;
       const cfg = getProviderConfig(c.provider);
       if (!cfg) return false;
-      const hasOpenaiOauth = c.provider === 'openai' && !!state.openaiOauth?.accessToken;
-      return !!cfg.isCustom || !!keyFor(c.provider) || hasOpenaiOauth || !!cfg.publicModels;
+      // A readable catalogue (`publicModels`) is not the same as being able to
+      // serve a chat request — require real credentials.
+      const oauthOk = c.provider === 'openai'
+        && isOauthRoutableModel(c.model)
+        && !!state.openaiOauth?.accessToken;
+      return !!cfg.isCustom || !!keyFor(c.provider) || oauthOk;
     });
   }
 
@@ -3026,11 +3060,31 @@
   // Summarise everything before a safe cut point into one recap turn. The cut
   // is chosen by context.js so a `tool_calls` group is never split (that
   // transcript shape is rejected by every OpenAI-compatible server).
+  // Sessions currently being compacted. Kept in memory rather than on the
+  // session object: a session field would be persisted, and if the panel closed
+  // mid-compaction the flag would be saved as `true` forever, permanently
+  // disabling compaction for that session.
+  const compactingSessions = new Set();
+
+  // Fixed per-request overhead that is NOT part of session.history but counts
+  // against the same context window: system prompt, attached page content and
+  // the tool schemas. Ignoring it made compaction fire far too late.
+  function contextOverheadTokens(session) {
+    let chars = (state.settings.systemPrompt || '').length;
+    if (els.useContext?.checked && state.page?.content && isActive(session.id)) {
+      chars += String(state.page.content).length;
+    }
+    // Tool schemas: ~120 tokens each is a fair average for our definitions.
+    const groups = new Set(state.settings.enabledGroups || []);
+    const toolCount = state.settings.toolsEnabled === false ? 0 : groups.size * 6;
+    return Math.ceil(chars / 3.6) + toolCount * 120 + (state.mcpTools?.length || 0) * 120;
+  }
+
   async function maybeCompact(session, { force = false, quiet = false } = {}) {
     if (!session || session._subagent) return false;   // subagents are short-lived by design
     if (!force && !state.settings.autoCompact) return false;
     if (!KC.planCompaction) return false;
-    if (session._compacting) return false;
+    if (compactingSessions.has(session.id)) return false;
 
     const provider = state.settings.provider;
     const model = state.settings.model;
@@ -3039,22 +3093,39 @@
       contextTokens: ctxLen,
       threshold: Number(state.settings.compactThreshold) || 0.75,
       keepTurns: Math.max(2, Number(state.settings.compactKeepTurns) || 6),
-      force
+      force,
+      extraTokens: contextOverheadTokens(session)
     });
     if (!plan) return false;
 
-    session._compacting = true;
+    // The summary is an awaited model call, so the transcript can change while
+    // we wait (/clear, an edit, a concurrent turn). Remember what we planned
+    // against and refuse to apply a stale plan to a different transcript —
+    // applying it blindly can splice out the wrong turns entirely.
+    const anchor = session.history[plan.cutIndex];
+    const expectedLength = session.history.length;
+
+    compactingSessions.add(session.id);
     try {
       if (!quiet && isActive(session.id)) {
         addMessage('assistant', `_Compacting ${plan.droppedCount} earlier messages (${fmtTok(plan.tokensBefore)} tokens) to stay inside the ${fmtTok(ctxLen)}-token window…_`);
       }
       let summary = '';
       try {
-        summary = await oneShotCompletion(KC.summarisePrompt(session.history, plan), {
-          maxTokens: 900, temperature: 0.2
-        });
+        // Bounded so a stalled provider cannot wedge the agent loop. The
+        // underlying fetch is not cancellable here, but the turn continues on
+        // the deterministic fallback instead of hanging.
+        summary = await Promise.race([
+          oneShotCompletion(KC.summarisePrompt(session.history, plan), { maxTokens: 900, temperature: 0.2 }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('compaction summary timed out')), 60000))
+        ]);
       } catch (e) {
         console.warn('[Kyoto] compaction summary failed, using fallback:', e?.message);
+      }
+      // Re-validate: the transcript must still be the one we planned against.
+      if (session.history.length !== expectedLength || session.history[plan.cutIndex] !== anchor) {
+        console.warn('[Kyoto] transcript changed during compaction — discarding the stale plan.');
+        return false;
       }
       // A short/empty summary means the model call went sideways; the
       // deterministic fallback still preserves the user's intent and the tools
@@ -3067,11 +3138,11 @@
       await persistSession(session);
       if (!quiet && isActive(session.id)) {
         renderSessionHistoryFresh();
-        addMessage('assistant', `_…compacted ${plan.droppedCount} messages into a summary — roughly ${fmtTok(plan.tokensBefore)} → ${fmtTok(plan.tokensAfterEstimate)} tokens. Pinned messages were kept._`);
+        addMessage('assistant', `_…compacted ${plan.droppedCount} messages into a summary — roughly ${fmtTok(plan.tokensBefore)} → ${fmtTok(plan.tokensAfterEstimate)} tokens. Pinned messages were folded into the summary rather than dropped._`);
       }
       return true;
     } finally {
-      session._compacting = false;
+      compactingSessions.delete(session.id);
     }
   }
 
@@ -4694,6 +4765,12 @@
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    // Any failure inside the reader loop — including a provider that errors the
+    // stream from inside a wrapper (the Codex path does exactly this) — must be
+    // tagged with whether output already reached the user. The fallback wrapper
+    // refuses to restart a turn that already streamed, so an untagged error
+    // would duplicate the assistant's reply.
+    try {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -4749,6 +4826,12 @@
         }
       }
       if (streamErr) break;
+    }
+    } catch (e) {
+      if (e && typeof e === 'object' && e._emitted === undefined) {
+        e._emitted = !!(acc.text || reasoningDisplay);
+      }
+      throw e;
     }
 
     if (textTarget) textTarget.classList.remove('cursor');
