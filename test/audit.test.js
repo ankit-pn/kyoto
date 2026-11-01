@@ -977,3 +977,39 @@ test('the Escape handler covers every dismissible overlay', () => {
   assert.deepEqual(missing, [],
     `Esc does not close these overlays: ${missing.join(', ')}`);
 });
+
+// ── Dialog semantics and declared shortcuts ───────────
+// The skills drawer was focus-trapped (it is in MODAL_SELECTORS) and had a scrim,
+// so it behaved as a modal dialog while declaring none of it. And no control
+// declared aria-keyshortcuts at all, so a screen-reader user had no way to learn
+// that Escape dismisses these surfaces.
+
+test('every modal surface declares dialog semantics and a name', () => {
+  const html = read('sidepanel/sidepanel.html');
+  const js = read('sidepanel/sidepanel.js');
+  const known = allKnownIds();
+  const list = js.match(/MODAL_SELECTORS = \[([^\]]+)\]/)[1];
+  const ids = [...list.matchAll(/'#([A-Za-z0-9_-]+)'/g)].map(m => m[1]);
+  assert.ok(ids.length >= 4, 'expected the modal list');
+
+  for (const id of ids) {
+    const tag = new RegExp(`<[a-z]+[^>]*id="${id}"[^>]*>`).exec(html)?.[0];
+    assert.ok(tag, `${id} should exist in the markup`);
+    assert.match(tag, /role="dialog"/, `${id} is focus-trapped, so it must declare role="dialog"`);
+    assert.match(tag, /aria-modal="true"/, `${id} must declare aria-modal="true"`);
+    const labelled = tag.match(/aria-labelledby="([^"]+)"/)?.[1];
+    const direct = tag.match(/aria-label="([^"]+)"/)?.[1];
+    assert.ok(labelled || direct, `${id} needs an accessible name`);
+    if (labelled) assert.ok(known.has(labelled), `${id} aria-labelledby="${labelled}" must resolve`);
+  }
+});
+
+test('Escape-dismissible surfaces declare the shortcut', () => {
+  const html = read('sidepanel/sidepanel.html');
+  // Esc closes these (verified by behaviour tests); the markup should say so.
+  for (const id of ['drawer', 'skillsDrawer', 'shortcutsOverlay', 'paletteOverlay', 'modelPopover', 'sessionsPopover']) {
+    const tag = new RegExp(`<[a-z]+[^>]*id="${id}"[^>]*>`).exec(html)?.[0];
+    assert.ok(tag, `${id} should exist`);
+    assert.match(tag, /aria-keyshortcuts="Escape"/, `${id} is closed by Escape; declare aria-keyshortcuts="Escape"`);
+  }
+});

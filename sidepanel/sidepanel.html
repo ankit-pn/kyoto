@@ -99,7 +99,7 @@
   </footer>
 
   <!-- Inline model picker popover -->
-  <div class="popover hidden" id="modelPopover">
+  <div class="popover hidden" id="modelPopover" aria-keyshortcuts="Escape">
     <div class="popover-hdr">
       <input type="text" id="popoverSearch" placeholder="Search models…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="popoverList" aria-autocomplete="list" aria-label="Search models" />
     </div>
@@ -109,7 +109,7 @@
   </div>
 
   <!-- Sessions popover -->
-  <div class="popover hidden popover-right" id="sessionsPopover">
+  <div class="popover hidden popover-right" id="sessionsPopover" aria-keyshortcuts="Escape">
     <div class="popover-hdr">
       <input type="text" id="sessionsSearch" placeholder="Search sessions…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="sessionsList" aria-autocomplete="list" aria-label="Search conversations" />
     </div>
@@ -120,7 +120,7 @@
 
   <!-- Settings drawer -->
   <div class="overlay hidden" id="overlay"></div>
-  <aside class="drawer hidden" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+  <aside class="drawer hidden" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-keyshortcuts="Escape">
     <header class="drawer-hdr">
       <h2 id="drawerTitle">Settings</h2>
       <button class="ibtn" id="closeDrawerBtn" title="Close" aria-label="Close settings">
@@ -564,9 +564,9 @@
 
   <!-- Skills manager (opens over the Settings drawer; own overlay) -->
   <div class="overlay hidden" id="skillsOverlay"></div>
-  <aside class="drawer skills-drawer hidden" id="skillsDrawer">
+  <aside class="drawer skills-drawer hidden" id="skillsDrawer" role="dialog" aria-modal="true" aria-labelledby="skillsDrawerTitle" aria-keyshortcuts="Escape">
     <header class="drawer-hdr">
-      <h2>Skills hub</h2>
+      <h2 id="skillsDrawerTitle">Skills hub</h2>
       <div class="skills-hdr-actions">
         <button class="btn-mini" id="skillsRefreshBtn" type="button" title="Refresh from hub">Refresh</button>
         <button class="ibtn" id="closeSkillsDrawerBtn" title="Close" aria-label="Close skill manager">
@@ -623,7 +623,7 @@
   <script src="sidepanel.js"></script>
   <!-- Keyboard shortcuts. Every shortcut below is wired in sidepanel.js; this
        exists because none of them were discoverable. -->
-  <div class="shortcuts hidden" id="shortcutsOverlay" role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle">
+  <div class="shortcuts hidden" id="shortcutsOverlay" role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle" aria-keyshortcuts="Escape">
     <div class="shortcuts-box">
       <div class="shortcuts-hdr">
         <h2 id="shortcutsTitle">Keyboard shortcuts</h2>
@@ -648,7 +648,7 @@
 
   <!-- Command palette (Ctrl/Cmd+K). Fuzzy launcher over actions, tools,
        sessions, models and settings so 147 tools stay discoverable. -->
-  <div class="palette hidden" id="paletteOverlay" role="dialog" aria-label="Command palette">
+  <div class="palette hidden" id="paletteOverlay" role="dialog" aria-modal="true" aria-label="Command palette" aria-keyshortcuts="Escape">
     <div class="palette-box">
       <input type="text" id="paletteInput" placeholder="Search actions, tools, sessions, models, settings…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="paletteList" aria-autocomplete="list" aria-label="Command palette" />
       <div class="palette-list" id="paletteList" role="listbox" aria-label="Commands and tools"></div>
