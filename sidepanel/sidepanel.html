@@ -16,7 +16,7 @@
       </button>
     </div>
     <div class="hdr-r">
-      <button class="ibtn capture-btn" id="captureBtn" title="Record a skill — capture user actions on this page and save them as a reusable playbook" aria-label="Record page actions" aria-pressed="false">
+      <button class="ibtn capture-btn" id="captureBtn" title="Record page actions and save them as a replayable routine" aria-label="Record page actions" aria-pressed="false">
         <span class="capture-dot"></span>
         <span class="capture-count" id="captureCount"></span>
       </button>
@@ -462,70 +462,6 @@
         <p class="status" id="shellStatus"></p>
       </div>
 
-      <h3 class="drawer-section">Skills hub</h3>
-      <p class="hint">Domain-scoped playbook store the agent searches before tackling tasks and writes to once a <code>/goal</code> completes. The public hub URL (<code>skills.kryvik.com</code>) is filled in as a convenience, but <strong>no credential ships with the extension</strong> — the hub stays disabled until you paste your own hub API key here. Paste your own AWS-deployed hub URL + key (from <code>skills-hub/deploy.py</code>) for a private hub, or type <code>off</code> into the URL field to disable it entirely.</p>
-      <div class="field">
-        <label>Hub URL</label>
-        <input type="text" id="skillsHubUrl" placeholder="https://skills.kryvik.com" autocomplete="off" />
-      </div>
-      <div class="field">
-        <label>API key</label>
-        <input type="password" id="skillsHubKey" placeholder="paste your hub API key…" autocomplete="off" />
-      </div>
-      <div class="field">
-        <label class="check">
-          <input type="checkbox" id="skillsAutoSave" checked />
-          <span>Auto-save a skill when a <code>/goal</code> completes</span>
-        </label>
-      </div>
-      <div class="field">
-        <label class="check">
-          <input type="checkbox" id="skillsHubAutoInjectGlobal" />
-          <span>Inject shared <code>global</code> skills into every session prompt</span>
-        </label>
-        <p class="hint">Off by default. Global skills come from a shared, writable hub, so anyone who can publish there could inject instructions into all of your sessions — only enable this with a hub you control or trust.</p>
-      </div>
-      <div class="mcp-actions">
-        <button class="btn-mini" id="skillsHubTestBtn" type="button">Test connection</button>
-        <button class="btn-mini" id="skillsManageBtn" type="button">Manage skills…</button>
-        <p class="status" id="skillsHubStatus"></p>
-      </div>
-
-      <h3 class="drawer-section">AWS S3 (and S3-compatible)</h3>
-      <p class="hint">Credentials for the <code>s3_upload</code> tool and the <code>uploadToS3</code> option in <code>media_download</code>. Works with native AWS S3, Cloudflare R2, Wasabi, MinIO, Backblaze B2 (S3 API), etc.</p>
-      <div class="field-row">
-        <div class="field">
-          <label>Access Key ID</label>
-          <input type="text" id="s3AccessKeyId" placeholder="AKIA…" autocomplete="off" />
-        </div>
-        <div class="field">
-          <label>Region</label>
-          <input type="text" id="s3Region" placeholder="us-east-1" autocomplete="off" />
-        </div>
-      </div>
-      <div class="field">
-        <label>Secret Access Key</label>
-        <input type="password" id="s3SecretAccessKey" placeholder="…" autocomplete="off" />
-      </div>
-      <div class="field-row">
-        <div class="field">
-          <label>Bucket</label>
-          <input type="text" id="s3Bucket" placeholder="my-bucket" autocomplete="off" />
-        </div>
-        <div class="field">
-          <label>Key prefix (optional)</label>
-          <input type="text" id="s3KeyPrefix" placeholder="kyoto/" autocomplete="off" />
-        </div>
-      </div>
-      <div class="field">
-        <label>Custom endpoint (for R2 / Wasabi / MinIO; leave blank for AWS)</label>
-        <input type="text" id="s3Endpoint" placeholder="https://<acct>.r2.cloudflarestorage.com" autocomplete="off" />
-      </div>
-      <div class="mcp-actions">
-        <button class="btn-mini" id="s3TestBtn" type="button">Test upload</button>
-        <p class="status" id="s3Status"></p>
-      </div>
-
       <h3 class="drawer-section">Custom OpenAI-compatible providers</h3>
       <div id="customProvidersList"></div>
       <div class="mcp-actions">
@@ -576,26 +512,6 @@
     </div>
   </aside>
 
-  <!-- Skills manager (opens over the Settings drawer; own overlay) -->
-  <div class="overlay hidden" id="skillsOverlay"></div>
-  <aside class="drawer skills-drawer hidden" id="skillsDrawer" role="dialog" aria-modal="true" aria-labelledby="skillsDrawerTitle" aria-keyshortcuts="Escape">
-    <header class="drawer-hdr">
-      <h2 id="skillsDrawerTitle">Skills hub</h2>
-      <div class="skills-hdr-actions">
-        <button class="btn-mini" id="skillsRefreshBtn" type="button" title="Refresh from hub">Refresh</button>
-        <button class="ibtn" id="closeSkillsDrawerBtn" title="Close" aria-label="Close skill manager">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </div>
-    </header>
-    <div class="skills-toolbar">
-      <input type="text" id="skillsFilterInput" placeholder="Filter by name, description, tag, domain…" autocomplete="off" />
-      <span class="skills-summary" id="skillsSummary"></span>
-    </div>
-    <div class="drawer-body skills-body" id="skillsList">
-      <p class="hint">Loading…</p>
-    </div>
-  </aside>
 
   <!-- Hidden sandbox iframe for Pyodide / python_exec. Sandboxed page
        (declared in manifest) runs with a CSP that allows unsafe-eval +

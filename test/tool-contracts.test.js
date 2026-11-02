@@ -73,7 +73,7 @@ const MUST_REJECT_EMPTY = [
   'site_data_clear', 'net_rule_block', 'net_rule_redirect', 'net_rule_stub',
   'routine_run', 'routine_save', 'routine_delete',
   'tab_close', 'cookies_set', 'cookies_remove',
-  'fs_delete', 'fs_move', 'memory_add', 'cron_add', 'cron_remove', 's3_upload',
+  'fs_delete', 'fs_move', 'memory_add', 'cron_add', 'cron_remove',
 ];
 
 function withTimeout(promise, ms, label) {

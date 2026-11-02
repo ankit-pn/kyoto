@@ -1,173 +1,8 @@
-// Media + S3 + chat export. AWS SigV4 is self-contained (no SDK).
+// Media download + chat export.
 
 (() => {
   'use strict';
   const { T, STR, NUM, BOOL, OBJ, bg, activeTab, scrip } = window.KyotoTR;
-
-  // ──────── AWS S3 (Signature V4 via WebCrypto) ────────
-  function _bytesFrom(v) {
-    if (v instanceof Uint8Array) return v;
-    if (v instanceof ArrayBuffer) return new Uint8Array(v);
-    if (typeof v === 'string') return new TextEncoder().encode(v);
-    return new TextEncoder().encode(String(v));
-  }
-  async function _sha256Hex(data) {
-    const buf = await crypto.subtle.digest('SHA-256', _bytesFrom(data));
-    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  async function _hmac(key, data) {
-    const k = (key instanceof Uint8Array) ? key : _bytesFrom(key);
-    const ck = await crypto.subtle.importKey('raw', k, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    const sig = await crypto.subtle.sign('HMAC', ck, _bytesFrom(data));
-    return new Uint8Array(sig);
-  }
-  function _hex(bytes) {
-    return [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  async function s3Put({ accessKey, secretKey, region, bucket, key, body, contentType, endpoint }) {
-    const service = 's3';
-    region = region || 'us-east-1';
-    let host, path;
-    if (endpoint) {
-      const ep = new URL(endpoint);
-      host = ep.host;
-      const epPath = (ep.pathname || '').replace(/\/+$/, '');
-      path = `${epPath}/${encodeURIComponent(bucket)}/${key.split('/').map(encodeURIComponent).join('/')}`;
-    } else {
-      host = `${bucket}.s3.${region}.amazonaws.com`;
-      path = '/' + key.split('/').map(encodeURIComponent).join('/');
-    }
-    const now = new Date();
-    const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');
-    const dateStamp = amzDate.slice(0, 8);
-
-    const bodyBytes = _bytesFrom(body);
-    const bodyHash = await _sha256Hex(bodyBytes);
-
-    const canonicalHeaders =
-      `host:${host}\n` +
-      `x-amz-content-sha256:${bodyHash}\n` +
-      `x-amz-date:${amzDate}\n`;
-    const signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
-    const canonicalRequest = [
-      'PUT', path, '', canonicalHeaders, signedHeaders, bodyHash
-    ].join('\n');
-    const scope = `${dateStamp}/${region}/${service}/aws4_request`;
-    const stringToSign = [
-      'AWS4-HMAC-SHA256', amzDate, scope, await _sha256Hex(canonicalRequest)
-    ].join('\n');
-
-    const kDate    = await _hmac('AWS4' + secretKey, dateStamp);
-    const kRegion  = await _hmac(kDate, region);
-    const kService = await _hmac(kRegion, service);
-    const kSigning = await _hmac(kService, 'aws4_request');
-    const sig      = _hex(await _hmac(kSigning, stringToSign));
-
-    const auth = `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, SignedHeaders=${signedHeaders}, Signature=${sig}`;
-    const url = `https://${host}${path}`;
-    const res = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'x-amz-content-sha256': bodyHash,
-        'x-amz-date': amzDate,
-        'Authorization': auth,
-        'Content-Type': contentType || 'application/octet-stream'
-      },
-      body: bodyBytes
-    });
-    return { res, url };
-  }
-  async function _readS3Settings() {
-    const keys = ['s3AccessKeyId', 's3SecretAccessKey', 's3Region', 's3Bucket', 's3KeyPrefix', 's3Endpoint'];
-    const g = await chrome.storage.local.get(keys);
-    return {
-      accessKey:  g.s3AccessKeyId || '',
-      secretKey:  g.s3SecretAccessKey || '',
-      region:     g.s3Region || 'us-east-1',
-      bucket:     g.s3Bucket || '',
-      keyPrefix:  g.s3KeyPrefix || '',
-      endpoint:   g.s3Endpoint || ''
-    };
-  }
-  function _s3PublicUrl(s, key) {
-    if (s.endpoint) {
-      try { return new URL(`${s.bucket}/${key}`, s.endpoint).toString(); } catch { return null; }
-    }
-    return `https://${s.bucket}.s3.${s.region}.amazonaws.com/${key.split('/').map(encodeURIComponent).join('/')}`;
-  }
-  function _guessKeyFromUrl(url) {
-    try {
-      const u = new URL(url);
-      const name = u.pathname.split('/').pop() || ('file-' + Date.now());
-      return decodeURIComponent(name).replace(/[?#].*$/, '') || ('file-' + Date.now());
-    } catch { return 'file-' + Date.now(); }
-  }
-
-  T({
-    name: 's3_upload',
-    group: 'media',
-    description: 'Upload data to AWS S3 or any S3-compatible endpoint (Cloudflare R2, Wasabi, MinIO, Backblaze B2). Credentials come from Settings → AWS S3. Pass `sourceUrl` to upload an external file (Kyoto fetches it first) OR `content` to upload a string directly. `key` overrides the auto-derived filename; `bucket` overrides the default bucket. Returns the resulting object URL.',
-    parameters: OBJ({
-      sourceUrl: STR,
-      content: STR,
-      contentType: STR,
-      key: STR,
-      bucket: STR,
-      keyPrefix: STR
-    }),
-    handler: async (args = {}) => {
-      const s = await _readS3Settings();
-      if (!s.accessKey || !s.secretKey) throw new Error('S3 credentials not configured (Settings → AWS S3).');
-      const bucket = args.bucket || s.bucket;
-      if (!bucket) throw new Error('No S3 bucket configured.');
-      let bytes, contentType;
-      if (args.content != null) {
-        const dm = typeof args.content === 'string' && args.content.startsWith('data:')
-          ? args.content.match(/^data:([^;,]+)?(?:;([^,]+))?,([\s\S]*)$/)
-          : null;
-        if (dm) {
-          contentType = args.contentType || dm[1] || 'application/octet-stream';
-          if (dm[2] === 'base64') {
-            const bin = atob(dm[3]);
-            bytes = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          } else {
-            bytes = new TextEncoder().encode(decodeURIComponent(dm[3]));
-          }
-        } else {
-          bytes = new TextEncoder().encode(args.content);
-          contentType = args.contentType || 'text/plain; charset=utf-8';
-        }
-      } else if (args.sourceUrl) {
-        const r = await fetch(args.sourceUrl, { credentials: 'include' });
-        if (!r.ok) throw new Error(`source fetch ${r.status}`);
-        bytes = new Uint8Array(await r.arrayBuffer());
-        contentType = args.contentType || r.headers.get('content-type') || 'application/octet-stream';
-      } else {
-        throw new Error('Pass `content` or `sourceUrl`.');
-      }
-      const prefix = (args.keyPrefix ?? s.keyPrefix).replace(/^\/+|\/+$/g, '');
-      const baseKey = args.key || _guessKeyFromUrl(args.sourceUrl || '');
-      const fullKey = prefix ? `${prefix}/${baseKey}` : baseKey;
-      const { res, url } = await s3Put({
-        accessKey: s.accessKey, secretKey: s.secretKey,
-        region: s.region, bucket, key: fullKey,
-        endpoint: s.endpoint, body: bytes, contentType
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`S3 PUT ${res.status}: ${text.slice(0, 400)}`);
-      }
-      return {
-        ok: true,
-        url: _s3PublicUrl({ ...s, bucket }, fullKey),
-        key: fullKey,
-        bucket,
-        bytes: bytes.length,
-        contentType
-      };
-    }
-  });
 
   // ──────── MEDIA DETECT + DOWNLOAD ────────
   T({
@@ -246,49 +81,18 @@
     name: 'media_download',
     group: 'media',
     description:
-      'Download a DIRECT media URL (.mp4, .m4a, .mp3, .webm, …) via chrome.downloads (default) or upload it to S3 (uploadToS3: true). ' +
+      'Download a DIRECT media URL (.mp4, .m4a, .mp3, .webm, …) via chrome.downloads. ' +
       'Use this when you already have the direct file URL — e.g. a podcast .mp3 link, a CDN .mp4 from `media_detect`, or any URL `web_fetch_extract` surfaced. ' +
       'NOT the right choice for site URLs like youtube.com / instagram.com / twitter.com — for those, use `yt_dlp_run` instead (handles login cookies, signature ciphers, manifest reassembly, ffmpeg merge automatically). ' +
-      'Pass `filename` (or `s3Key`) to override the auto-derived name.',
+      'Pass `filename` to override the auto-derived name.',
     parameters: OBJ({
       url: STR,
       filename: STR,
-      uploadToS3: BOOL,
-      s3Key: STR,
-      s3Bucket: STR,
       saveAs: BOOL
     }, ['url']),
-    handler: async ({ url, filename, uploadToS3, s3Key, s3Bucket, saveAs = false } = {}) => {
+    handler: async ({ url, filename, saveAs = false } = {}) => {
       if (!/^https?:\/\//i.test(url)) throw new Error('url must start with http(s)://');
       const fname = filename || _guessKeyFromUrl(url);
-
-      if (uploadToS3) {
-        const s = await _readS3Settings();
-        if (!s.accessKey || !s.secretKey) throw new Error('S3 credentials not configured (Settings → AWS S3).');
-        const bucket = s3Bucket || s.bucket;
-        if (!bucket) throw new Error('No S3 bucket configured.');
-        const r = await fetch(url, { credentials: 'include' });
-        if (!r.ok) throw new Error(`source fetch ${r.status}`);
-        const bytes = new Uint8Array(await r.arrayBuffer());
-        const contentType = r.headers.get('content-type') || 'application/octet-stream';
-        const prefix = s.keyPrefix.replace(/^\/+|\/+$/g, '');
-        const key = (prefix ? prefix + '/' : '') + (s3Key || fname);
-        const { res } = await s3Put({
-          accessKey: s.accessKey, secretKey: s.secretKey,
-          region: s.region, bucket, key,
-          endpoint: s.endpoint, body: bytes, contentType
-        });
-        if (!res.ok) {
-          const t = await res.text().catch(() => '');
-          throw new Error(`S3 PUT ${res.status}: ${t.slice(0, 400)}`);
-        }
-        return {
-          ok: true,
-          target: 's3',
-          s3Url: _s3PublicUrl({ ...s, bucket }, key),
-          key, bucket, bytes: bytes.length, contentType
-        };
-      }
 
       if (window.KyotoWorkspace) {
         const r = await window.KyotoWorkspace.downloadUrl({ url, filename: fname, saveAs });

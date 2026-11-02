@@ -89,11 +89,11 @@ test('every expected tool family is registered', () => {
     'network_fetch','web_fetch_extract', // network
     'python_exec',                  // python
     'fs_write','fs_zip',            // fs
-    's3_upload','chat_export',      // media
+    'media_download','chat_export', // media
     'shell_exec',                   // shell
     'yt_dlp_run',                   // youtube
     'json_to_typescript','minimax_describe_tab', // data
-    'memory_add','skill_list','ask_user', // skills
+    'memory_add','ask_user',        // memory + meta
     'agent',                        // subagent
   ];
   for (const n of must) {
@@ -125,20 +125,6 @@ test('agent tool gracefully fails when KyotoSession missing', async () => {
   // than crash.
   const r = await win.KyotoTools.call('agent', { prompt: 'hi' });
   assert.ok(r.error && /subagent runtime/i.test(r.error), `unexpected: ${JSON.stringify(r)}`);
-});
-
-test('skills hub default is exposed for sidepanel.js to consume', () => {
-  const win = loadToolsHarness();
-  assert.ok(win.KYOTO_DEFAULT_SKILLS_HUB);
-  assert.ok(win.KYOTO_DEFAULT_SKILLS_HUB.url.startsWith('https://'));
-  assert.ok(win.KYOTO_DEFAULT_SKILLS_HUB.key);
-});
-
-test('KyotoSkillHub is exposed by tools/skills.js', () => {
-  const win = loadToolsHarness();
-  assert.ok(win.KyotoSkillHub);
-  assert.equal(typeof win.KyotoSkillHub.list, 'function');
-  assert.equal(typeof win.KyotoSkillHub.save, 'function');
 });
 
 test('KyotoShell is exposed by tools/shell.js (so youtube.js can reuse it)', () => {

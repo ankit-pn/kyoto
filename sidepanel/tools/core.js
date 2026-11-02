@@ -7,27 +7,6 @@
 (() => {
   'use strict';
 
-  // ── Skills-hub defaults ──────────────────────────────
-  // The URL of the public Kyoto skills hub, kept as a convenience default.
-  //
-  // No credential ships any more. The old baked-in key granted *write*
-  // access to the public hub for every install, so anyone who extracted it
-  // from the published bundle could publish/overwrite hub skills — and the
-  // `global` partition is auto-surfaced in session prompts, making that a
-  // remote prompt-injection supply chain. Users must now paste their own
-  // hub API key in Settings → Skills hub.
-  //
-  // The object shape is kept because sidepanel.js (separate IIFE) reads
-  // `.url` / `.key` when seeding settings defaults. `.key` is a non-secret
-  // placeholder flagged by `keyIsPlaceholder`; tools/skills.js treats it as
-  // "no credential configured", so nothing is sent and every hub feature
-  // (including global-skill injection) stays off until the user sets a key.
-  window.KYOTO_DEFAULT_SKILLS_HUB = {
-    url: 'https://skills.kryvik.com',
-    key: 'set-your-own-hub-api-key',
-    keyIsPlaceholder: true,
-  };
-
   // ── Helpers ──────────────────────────────────────────
   async function bg(type, args) {
     const res = await chrome.runtime.sendMessage({ type, args });

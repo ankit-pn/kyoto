@@ -141,7 +141,7 @@ Toggle groups on/off in **Settings → Tool groups**.
 | **misc** | `clipboard_write`, `permission_request`, `permission_check` |
 | **memory** | `memory_add`, `memory_list`, `memory_get`, `memory_search`, `memory_update`, `memory_delete` |
 | **minimax** | `minimax_web_search` (Google-grade web), `minimax_understand_image`, `minimax_describe_tab` (capture + analyze in one call) |
-| **media** | `media_detect`, `media_download` (local or S3, for direct file URLs), `s3_upload`, **`yt_dlp_run`** (full-quality download via shell bridge), `youtube_extract`, `youtube_capture_streams`, `yt_dlp_command` |
+| **media** | `media_detect`, `media_download` (direct file URLs), **`yt_dlp_run`** (full-quality download via shell bridge), `youtube_extract`, `youtube_capture_streams`, `yt_dlp_command` |
 | **shell** | `shell_exec` (sync, supports `idleTimeoutMs` — kills only when output goes silent), `shell_exec_bg` + `shell_poll` / `shell_wait` / `shell_kill` / `shell_jobs` (background jobs with idle-based killing), `shell_ping` (reports `jobsSupported`) |
 | **meta** | `ask_user` (interactive chat-card prompt — agent pauses and waits for the user) |
 | **fs** | Virtual workspace (IndexedDB, GB-scale): `fs_write`, `fs_append`, `fs_read` (offset/limit chunks), `fs_list`, `fs_stat`, `fs_delete`, `fs_move`, `fs_total`, `fs_zip` (download as ZIP), `fs_clear` |

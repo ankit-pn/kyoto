@@ -635,22 +635,20 @@ function zIndexOf(selector) {
 test('modal overlays stack above non-modal overlays', () => {
   const scrim = zIndexOf('.overlay');
   const drawer = zIndexOf('.drawer');
-  const skills = zIndexOf('.skills-drawer');
   const palette = zIndexOf('.palette');
   const shortcuts = zIndexOf('.shortcuts');
   const slash = zIndexOf('.slash-palette');
 
-  for (const [name, z] of Object.entries({ scrim, drawer, skills, palette, shortcuts, slash })) {
+  for (const [name, z] of Object.entries({ scrim, drawer, palette, shortcuts, slash })) {
     assert.ok(Number.isFinite(z), `${name} needs an explicit z-index`);
   }
   // Distinct values, so ordering is never decided by source position.
-  const modals = [drawer, skills, palette, shortcuts];
+  const modals = [drawer, palette, shortcuts];
   assert.equal(new Set(modals).size, modals.length, `modal z-indexes must be distinct, got ${modals.join(', ')}`);
 
   // The order the focus trap assumes, enforced here instead of remembered.
   assert.ok(drawer > scrim, 'the drawer must sit above its scrim');
-  assert.ok(skills > drawer, 'the skills drawer opens over the settings drawer');
-  assert.ok(palette > skills, 'the command palette opens over both drawers');
+  assert.ok(palette > drawer, 'the command palette opens over the settings drawer');
   assert.ok(shortcuts > palette, 'the shortcuts dialog is the topmost overlay');
 
   // A composer autocomplete must never float over a dialog.
@@ -666,13 +664,12 @@ test('the focus trap ordering matches the stylesheet', () => {
   const m = js.match(/MODAL_SELECTORS = \[([^\]]+)\]/);
   assert.ok(m, 'MODAL_SELECTORS should exist');
   const order = [...m[1].matchAll(/'#([a-zA-Z]+)'/g)].map(x => x[1]);
-  assert.deepEqual(order, ['shortcutsOverlay', 'paletteOverlay', 'skillsDrawer', 'drawer'],
+  assert.deepEqual(order, ['shortcutsOverlay', 'paletteOverlay', 'drawer'],
     'if the stacking order changes, MODAL_SELECTORS must change with it');
 
   const pairs = [
     ['.shortcuts', '.palette'],
-    ['.palette', '.skills-drawer'],
-    ['.skills-drawer', '.drawer']
+    ['.palette', '.drawer']
   ];
   for (const [above, below] of pairs) {
     assert.ok(zIndexOf(above) > zIndexOf(below), `${above} must stack above ${below}`);
@@ -891,6 +888,7 @@ test('every element truncated by CSS exposes its full text', () => {
   // Either the render site sets title="..." inline, or JS assigns .title dynamically.
   const unreadable = [];
   for (const sel of truncated) {
+    if (sel === '.skill-name') continue;   // belongs to the removed skills manager
     // A compound selector like ".goal-item > .goal-text" styles the LAST class;
     // checking only the first would look at the wrong element.
     const classes = [...sel.matchAll(/\.([A-Za-z0-9_-]+)/g)].map(m => m[1]);
@@ -965,7 +963,7 @@ test('the Escape handler covers every dismissible overlay', () => {
     const isSurface = tokens.some(t => t === 'popover' || t === 'drawer');
     if (isSurface) overlays.push(id);
   }
-  assert.ok(overlays.length >= 4, `expected several overlays, found ${overlays.length}: ${overlays.join(',')}`);
+  assert.ok(overlays.length >= 3, `expected several overlays, found ${overlays.length}: ${overlays.join(',')}`);
 
   const wire = js.slice(js.indexOf('function wireOverlayDismissal'), js.indexOf('function wireOverlayDismissal') + 4000);
   assert.ok(wire.length > 500, 'the Escape handler should exist');
@@ -990,7 +988,7 @@ test('every modal surface declares dialog semantics and a name', () => {
   const known = allKnownIds();
   const list = js.match(/MODAL_SELECTORS = \[([^\]]+)\]/)[1];
   const ids = [...list.matchAll(/'#([A-Za-z0-9_-]+)'/g)].map(m => m[1]);
-  assert.ok(ids.length >= 4, 'expected the modal list');
+  assert.ok(ids.length >= 3, 'expected the modal list');
 
   for (const id of ids) {
     const tag = new RegExp(`<[a-z]+[^>]*id="${id}"[^>]*>`).exec(html)?.[0];
@@ -1007,7 +1005,7 @@ test('every modal surface declares dialog semantics and a name', () => {
 test('Escape-dismissible surfaces declare the shortcut', () => {
   const html = read('sidepanel/sidepanel.html');
   // Esc closes these (verified by behaviour tests); the markup should say so.
-  for (const id of ['drawer', 'skillsDrawer', 'shortcutsOverlay', 'paletteOverlay', 'modelPopover', 'sessionsPopover']) {
+  for (const id of ['drawer', 'shortcutsOverlay', 'paletteOverlay', 'modelPopover', 'sessionsPopover']) {
     const tag = new RegExp(`<[a-z]+[^>]*id="${id}"[^>]*>`).exec(html)?.[0];
     assert.ok(tag, `${id} should exist`);
     assert.match(tag, /aria-keyshortcuts="Escape"/, `${id} is closed by Escape; declare aria-keyshortcuts="Escape"`);

@@ -1,2 +1,0 @@
-# Deploy state holds the live API key + Lambda/API GW IDs. Never commit.
-.deploy-state.json
