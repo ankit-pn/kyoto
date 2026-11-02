@@ -42,6 +42,13 @@
       'MiniMax-Text-01':   { context: 1000000, output: 8192 },
       'abab6.5s-chat':     { context: 245760, output: 8192 },
       _default:            { context: 64000,  output: 8192 }
+    },
+    demonroute: {
+      'glm-5.3-flash-abliterated':                      { context: 1048576, output: 8192 },
+      'huihui-ai/Huihui-gemma-4-31B-it-abliterated-v2': { context: 262144,  output: 8192 },
+      'huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated':   { context: 262144,  output: 8192 },
+      'TheDrummer/Cydonia-24B-v4.1':                    { context: 131072,  output: 8192 },
+      _default:                                         { context: 131072,  output: 8192 }
     }
   };
 
