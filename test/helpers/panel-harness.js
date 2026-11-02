@@ -49,6 +49,11 @@ function baseWindowStubs(window, chrome) {
   window.indexedDB = { open: () => { throw new Error('indexedDB unavailable in jsdom harness'); } };
   window.fetch = async () => ({ ok: false, status: 0, json: async () => ({}), text: async () => '', headers: { get: () => null, forEach() {} } });
   window.scrollTo = () => {};
+  // jsdom implements no layout, so scrollIntoView is missing. Real browsers
+  // always have it; tests spy on this stub to assert scroll targets.
+  if (!window.HTMLElement.prototype.scrollIntoView) {
+    window.HTMLElement.prototype.scrollIntoView = function () {};
+  }
   if (!window.navigator.clipboard) {
     window.navigator.clipboard = { writeText: async () => {}, readText: async () => '' };
   }

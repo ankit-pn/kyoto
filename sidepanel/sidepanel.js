@@ -155,10 +155,12 @@
     model: $('model'),
     modelSearch: $('modelSearch'),
     modelHint: $('modelHint'),
+    modelRetryBtn: $('modelRetryBtn'),
     systemPrompt: $('systemPrompt'),
     temperature: $('temperature'),
     maxTokens: $('maxTokens'),
     maxTokensHint: $('maxTokensHint'),
+    jumpLatestBtn: $('jumpLatestBtn'),
     saveBtn: $('saveBtn'),
     saveStatus: $('saveStatus'),
     modelBtn: $('modelBtn'),
@@ -171,6 +173,7 @@
     reloadCtxBtn: $('reloadCtxBtn'),
     useContext: $('useContext'),
     visionBtn: $('visionBtn'),
+    paletteBtn: $('paletteBtn'),
     slashPalette: $('slashPalette'),
     toolsEnabled: $('toolsEnabled'),
     maxAgentSteps: $('maxAgentSteps'),
@@ -212,6 +215,8 @@
     workspaceZipBtn: $('workspaceZipBtn'),
     workspaceClearBtn: $('workspaceClearBtn'),
     cronSummary: $('cronSummary'),
+    storageSummary: $('storageSummary'),
+    storageRefreshBtn: $('storageRefreshBtn'),
     cronRefreshBtn: $('cronRefreshBtn'),
     cronList: $('cronList'),
     workspaceFolder: $('workspaceFolder'),
@@ -281,6 +286,7 @@
     tabToSession: {},           // tabId -> sessionId
     activeSession: null,        // currently-loaded full session
     runtimes: {},               // sessionId -> { abort, busy }
+    drafts: new Map(),          // sessionId -> unsent composer text
     pinnedToSession: false,     // when true, tab switches do NOT swap session
     page: null,                 // page context for active tab
     allModels: [],               // models for the provider shown in the Settings drawer (legacy alias)
@@ -1136,9 +1142,14 @@
         const f = state.openaiDeviceFlow;
         if (els.openaiUserCode) els.openaiUserCode.textContent = f.user_code || '—';
         if (els.openaiVerifyUrl) {
-          const href = f.verification_uri_complete || f.verification_uri || '#';
-          els.openaiVerifyUrl.href = href;
-          els.openaiVerifyUrl.textContent = href;
+          // Never leave a dead "#" link: if the flow gave us no URI, hide the
+          // anchor rather than rendering something that goes nowhere.
+          const href = f.verification_uri_complete || f.verification_uri || '';
+          els.openaiVerifyUrl.classList.toggle('hidden', !href);
+          if (href) {
+            els.openaiVerifyUrl.href = href;
+            els.openaiVerifyUrl.textContent = href;
+          }
         }
       }
     }
@@ -1393,11 +1404,37 @@
       .catch(() => chrome.tabs.create({ url }));
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
+  /**
+   * ISO timestamp that cannot throw.
+   *
+   * `new Date(undefined).toISOString()` throws RangeError("Invalid time value"),
+   * which is how exporting an older or partially-restored conversation died with
+   * an unhandled rejection and no visible error: the button simply did nothing.
+   */
+  function safeIso(value, fallback = 'unknown') {
+    const d = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(d.getTime()) ? fallback : d.toISOString();
+  }
+
   function downloadText(text, filename, mime = 'text/markdown') {
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     chrome.downloads.download({ url, filename, saveAs: true })
-      .catch(() => chrome.tabs.create({ url }));
+      .catch(() => {
+        // Downloads refused (permission, policy, invalid filename): fall back to
+        // opening the content in a tab so the work is not lost...
+        return chrome.tabs.create({ url }).catch(() => {
+          // ...and if that fails too, say so instead of doing nothing at all.
+          URL.revokeObjectURL(url);
+          addMessage('assistant',
+            `**Could not save ${filename}.** The browser blocked the download and a fallback tab could not be opened. ` +
+            `You can still copy the content from the conversation.`,
+            { error: true });
+          announce(`Could not save ${filename}.`);
+          throw new Error('download and fallback both failed');
+        });
+      })
+      .catch(() => { /* already reported above */ });
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
@@ -1406,7 +1443,7 @@
     lines.push(`# ${session.title || 'Untitled session'}`);
     lines.push('');
     lines.push(`- **Session id:** \`${session.id}\``);
-    lines.push(`- **Created:** ${new Date(session.createdAt).toISOString()}`);
+    lines.push(`- **Created:** ${safeIso(session.createdAt)}`);
     if (session.url) lines.push(`- **URL:** ${session.url}`);
     if (session.provider) lines.push(`- **Provider/model:** ${session.provider} · ${session.model || ''}`);
     lines.push('');
@@ -1589,9 +1626,16 @@
     if (state.auditLog.length > 1000) state.auditLog.splice(0, state.auditLog.length - 1000);
   }
   function fmtTime(ts) {
-    const d = new Date(ts);
+    // A conversation without lastActive (an older or partially-restored record)
+    // used to render the literal string "Invalid Date" in the session list, because
+    // new Date(undefined) makes every comparison below false and falls through to
+    // toLocaleDateString(). Same class as the export crash fixed earlier, in a
+    // different code path — this is the shared formatter, so guard it here.
+    const t = Number(ts);
+    if (!Number.isFinite(t)) return '—';
+    const d = new Date(t);
     const now = Date.now();
-    const diff = (now - ts) / 1000;
+    const diff = (now - t) / 1000;
     if (diff < 60) return 'just now';
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
@@ -1670,6 +1714,13 @@
 
   // ── Goal + loop primitives (inspired by Claude Code) ─────────
   function fmtDuration(ms) {
+    // Same class of bug as fmtTime: a non-finite duration made every comparison
+    // below false and rendered the literal "NaNh" (fmtDuration(undefined|NaN|'abc')
+    // all did). Durations come from stored loop state and parsed user input, so a
+    // bad value is reachable rather than hypothetical.
+    const n = Number(ms);
+    if (!Number.isFinite(n)) return '—';
+    ms = Math.max(0, n);
     if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
     if (ms < 3_600_000) return `${(ms / 60_000).toFixed(ms % 60_000 ? 1 : 0)}m`.replace('.0', '');
     return `${(ms / 3_600_000).toFixed(ms % 3_600_000 ? 1 : 0)}h`.replace('.0', '');
@@ -2079,6 +2130,8 @@
 
   function updateCaptureUI() {
     if (!els.captureBtn) return;
+    // These are toggles; a screen reader needs the state, not just a red dot.
+    els.captureBtn.setAttribute('aria-pressed', state.capture.active ? 'true' : 'false');
     if (state.capture.active) {
       els.captureBtn.classList.add('recording');
       els.captureBtn.title = `Recording on this tab — click to stop (${state.capture.events.length} events)`;
@@ -2381,11 +2434,11 @@
     }
     const items = [];
     if (session.goal) {
-      items.push(`<div class="goal-item">🎯 <strong>Goal:</strong><span class="goal-text">${esc(session.goal)}</span><button class="goal-x" data-act="clear-goal" title="Clear goal">×</button></div>`);
+      items.push(`<div class="goal-item">🎯 <strong>Goal:</strong><span class="goal-text" title="${esc(session.goal)}">${esc(session.goal)}</span><button class="goal-x" data-act="clear-goal" title="Clear goal">×</button></div>`);
     }
     for (const [id, l] of state.activeLoops) {
       if (l.sessionId !== session.id) continue;
-      items.push(`<div class="goal-item">🔁 <strong>Loop:</strong><span class="goal-text">every ${fmtDuration(l.intervalMs)}: ${esc(l.prompt)} (${l.count} fired)</span><button class="goal-x" data-act="stop-loop" data-id="${esc(id)}" title="Stop loop">×</button></div>`);
+      items.push(`<div class="goal-item">🔁 <strong>Loop:</strong><span class="goal-text" title="every ${fmtDuration(l.intervalMs)}: ${esc(l.prompt)} (${l.count} fired)">every ${fmtDuration(l.intervalMs)}: ${esc(l.prompt)} (${l.count} fired)</span><button class="goal-x" data-act="stop-loop" data-id="${esc(id)}" title="Stop loop">×</button></div>`);
     }
     if (!items.length) {
       els.goalBar.classList.add('hidden');
@@ -2741,9 +2794,15 @@
 
     if (!filtered.length) {
       els.slashPalette.classList.add('hidden');
+      els.input.setAttribute('aria-expanded', 'false');
+      els.input.removeAttribute('aria-activedescendant');
       return;
     }
     els.slashPalette.classList.remove('hidden');
+    // The composer textbox owns the slash listbox: announce that the list is
+    // open and point at the highlighted option, exactly like the other pickers.
+    els.input.setAttribute('aria-expanded', 'true');
+    els.input.setAttribute('aria-activedescendant', 'slash-item-0');
     const html = filtered.map((c, i) => {
       let preview = '';
       if (c.action) {
@@ -2754,9 +2813,9 @@
       const tag = c.action ? '<span class="slash-tag">action</span>'
                 : c.builtin ? ''
                 : '<span class="slash-tag">custom</span>';
-      return `<div class="slash-item${i === 0 ? ' active' : ''}" data-name="${esc(c.name)}" data-action="${c.action ? '1' : '0'}" role="option">
+      return `<div class="slash-item${i === 0 ? ' active' : ''}" id="slash-item-${i}" data-name="${esc(c.name)}" data-action="${c.action ? '1' : '0'}" role="option" aria-selected="${i === 0 ? 'true' : 'false'}">
         <span class="slash-name">/${esc(c.name)}</span>
-        <span class="slash-preview">${esc(preview)}</span>
+        <span class="slash-preview" title="${esc(preview)}">${esc(preview)}</span>
         ${tag}
       </div>`;
     }).join('') + '<div class="slash-hint">Tab/Enter → fill · ↑↓ → navigate · Esc → close</div>';
@@ -2772,8 +2831,12 @@
     let idx = -1;
     items.forEach((el, i) => { if (el.classList.contains('active')) idx = i; });
     idx = (idx + delta + items.length) % items.length;
-    items.forEach((el, i) => el.classList.toggle('active', i === idx));
-    items[idx].scrollIntoView({ block: 'nearest' });
+    items.forEach((el, i) => {
+      el.classList.toggle('active', i === idx);
+      el.setAttribute('aria-selected', i === idx ? 'true' : 'false');
+    });
+    items[idx].scrollIntoView?.({ block: 'nearest' });
+    if (items[idx].id) els.input.setAttribute('aria-activedescendant', items[idx].id);
   }
   function fillFromSlashPalette() {
     const active = els.slashPalette?.querySelector('.slash-item.active');
@@ -2797,6 +2860,7 @@
   function updateVisionUI() {
     if (!els.visionBtn) return;
     els.visionBtn.classList.toggle('active', state.visionPending);
+    els.visionBtn.setAttribute('aria-pressed', state.visionPending ? 'true' : 'false');
     els.visionBtn.title = state.visionPending
       ? 'Screenshot will be attached to the next message. Click to cancel.'
       : 'Attach a screenshot of the current tab with the next message (requires a vision-capable model)';
@@ -3181,20 +3245,97 @@
   }
   async function loadFullSession(id) {
     const got = await chrome.storage.local.get(SESS_KEY(id));
-    return got[SESS_KEY(id)] || null;
+    const raw = got?.[SESS_KEY(id)];
+    if (!raw) return null;
+    // Distinguish "gone" from "unreadable": a corrupt record used to look
+    // identical to a missing one, so the panel silently showed an empty chat and
+    // the user could not tell whether their history was lost or never existed.
+    if (typeof raw !== 'object' || !raw.id || !Array.isArray(raw.history)) {
+      warnPersistFailure('this conversation could not be read (the stored record is malformed)', null, { sticky: true });
+      return null;
+    }
+    return raw;
   }
+
+  // ── Storage failures must be visible ─────────────────
+  // persistSession wrote to chrome.storage.local with no error handling. On a
+  // quota failure the write threw into whatever flow happened to be saving, the
+  // in-memory index was updated anyway, and the user was left believing the
+  // conversation was stored. Silent data loss is worse than a loud error.
+  let _persistWarnedAt = 0;
+  let _persistFailed = null;   // { reason, quota } while a save is failing
+  let _storageNotice = null;   // { reason } one-off problem (e.g. unreadable record)
+
+  function renderPersistWarn() {
+    const bar = document.getElementById('persistWarnBar');
+    if (!bar) return;
+    const info = _storageNotice || _persistFailed;
+    if (!info) { bar.classList.add('hidden'); return; }
+    const text = bar.querySelector('.pw-text');
+    if (text) {
+      text.textContent = `Storage problem: ${info.reason}.`
+        + (info.quota ? ' Storage is full — export or delete old conversations to make room.' : '')
+        + (_storageNotice ? '' : ' Anything you do now may be lost when the panel closes.');
+    }
+    bar.classList.remove('hidden');
+  }
+
+  function storageQuotaProblem(err) {
+    const msg = String(err?.message || err || '');
+    return /quota|QUOTA_BYTES|exceeded/i.test(msg);
+  }
+
+  /**
+   * @param {string} reason human-readable
+   * @param {Error|null} err
+   * @param {{sticky?: boolean}} [opts] sticky notices are not cleared by a later
+   *   successful save — a successful write does not make an unreadable record
+   *   readable again.
+   */
+  function warnPersistFailure(reason, err, opts = {}) {
+    // Warn at most once every 30s: a failing write usually fails on every
+    // subsequent turn too, and flooding the transcript helps nobody.
+    const now = Date.now();
+    if (now - _persistWarnedAt < 30000) return;
+    _persistWarnedAt = now;
+    const quota = storageQuotaProblem(err);
+    // A chat line alone is wiped by the next transcript re-render, so the
+    // warning also lives in a bar that survives until a save succeeds.
+    if (opts.sticky) _storageNotice = { reason, quota };
+    else _persistFailed = { reason, quota };
+    renderPersistWarn();
+    addMessage('assistant',
+      `**Could not save ${reason}.**${quota ? ' Storage is full — export or delete old conversations to make room.' : ''} Anything you do now may be lost when the panel closes.`,
+      { error: true });
+    announce('Warning: this conversation could not be saved.');
+  }
+
+  /** @returns {Promise<boolean>} whether the conversation is safely stored */
   async function persistSession(s) {
     s.lastActive = Date.now();
-    await chrome.storage.local.set({ [SESS_KEY(s.id)]: s });
+    try {
+      await chrome.storage.local.set({ [SESS_KEY(s.id)]: s });
+    } catch (err) {
+      // Do NOT update the in-memory index: it would claim a save that failed.
+      warnPersistFailure('this conversation', err);
+      return false;
+    }
     const idx = state.sessionsIndex.findIndex(x => x.id === s.id);
     const meta = { id: s.id, title: s.title, tabId: s.tabId, url: s.url, createdAt: s.createdAt, lastActive: s.lastActive };
     if (idx >= 0) state.sessionsIndex[idx] = meta;
     else state.sessionsIndex.unshift(meta);
     state.sessionsIndex.sort((a, b) => b.lastActive - a.lastActive);
-    await chrome.storage.local.set({ [INDEX_KEY]: state.sessionsIndex });
+    try {
+      await chrome.storage.local.set({ [INDEX_KEY]: state.sessionsIndex });
+    } catch (err) {
+      warnPersistFailure('the conversation list', err);
+      return false;
+    }
     // Invalidate the deep-search content cache so the next search picks
     // up newly-added messages instead of returning stale matches.
     sessionContentCache?.delete?.(s.id);
+    if (_persistFailed) { _persistFailed = null; renderPersistWarn(); }
+    return true;
   }
   async function deleteSession(id) {
     await chrome.storage.local.remove(SESS_KEY(id));
@@ -3360,7 +3501,157 @@
   }
 
   // ── Switch / render whole session ────────────────────
-  async function switchToSession(session, { fromUser = false } = {}) {
+  // ── MCP connection health ────────────────────────────
+  // A configured MCP server that cannot be reached used to vanish silently: its
+  // tools were simply absent from the tool set, and nothing in the panel said
+  // why. The model cannot call what it cannot see, so the user was left
+  // wondering why their server "didn't work".
+  let _mcpErrorsReported = null;
+
+  function surfaceMcpErrors(res) {
+    const errors = Array.isArray(res?.errors) ? res.errors : [];
+    if (!errors.length) { _mcpErrorsReported = null; return; }
+    // De-duplicate across the boot path and the settings-save path.
+    const key = errors.map(e => `${e.name}:${e.error}`).join('|');
+    if (key === _mcpErrorsReported) return;
+    _mcpErrorsReported = key;
+
+    const names = errors.slice(0, 3).map(e => `**${e.name}**`).join(', ');
+    const more = errors.length > 3 ? ` and ${errors.length - 3} more` : '';
+    addMessage('assistant',
+      `⚠ **${errors.length} MCP server${errors.length === 1 ? '' : 's'} could not be reached** — ${names}${more}.\n\n` +
+      `_Their tools are unavailable, so the agent cannot use them. Check the URL and credentials in Settings → MCP servers._`);
+    announce(`${errors.length} MCP server${errors.length === 1 ? '' : 's'} could not be reached.`);
+  }
+
+  // ── Background-job health ────────────────────────────
+  // Failing jobs were only visible inside the Settings drawer, in the Background
+  // jobs section — which is collapsed by default. A job that has been failing, or
+  // that auto-paused itself after repeated failures, was therefore invisible to a
+  // user who never opened that section. Jobs are supposed to run unattended, so
+  // silence is the worst possible feedback.
+  let _cronHealthReported = false;
+
+  async function surfaceCronHealth() {
+    if (_cronHealthReported) return;
+    if (!window.KyotoTools?.call) return;
+    let status;
+    try {
+      status = await window.KyotoTools.call('cron_status', {});
+    } catch {
+      return;   // background worker asleep/unavailable: not worth alarming about
+    }
+    const jobs = Array.isArray(status?.jobs) ? status.jobs : [];
+    if (!jobs.length) return;
+    const failing = jobs.filter(j => (j.consecutiveFailures || 0) > 0 || j.paused);
+    if (!failing.length) return;
+
+    _cronHealthReported = true;
+    const paused = failing.filter(j => j.paused);
+    const names = failing.slice(0, 3).map(j => `${j.name || j.slug || j.id}`).join(', ');
+    const more = failing.length > 3 ? ` and ${failing.length - 3} more` : '';
+    const what = paused.length
+      ? `${paused.length} background job${paused.length === 1 ? ' is' : 's are'} paused after repeated failures`
+      : `${failing.length} background job${failing.length === 1 ? ' is' : 's are'} failing`;
+    addMessage('assistant',
+      `⚠ **${what}** — ${names}${more}.\n\n` +
+      `_Open Settings → Background jobs to see the error and re-enable. Jobs run unattended, so nothing else will tell you._`);
+    announce(`${failing.length} background job${failing.length === 1 ? '' : 's'} need attention.`);
+  }
+
+  // ── Per-conversation drafts ──────────────────────────
+  // The composer is a single shared textarea, and switching sessions never
+  // touched it: a half-written message for one conversation silently followed
+  // you into another, one Enter away from being sent to the wrong place.
+  const DRAFTS_KEY = 'kyoto_drafts';
+  let _draftSaveTimer = null;
+
+  function resizeComposer() {
+    if (!els.input) return;
+    els.input.style.height = 'auto';
+    const max = 160;
+    els.input.style.height = Math.min(els.input.scrollHeight || 22, max) + 'px';
+  }
+
+  function persistDraftsDebounced() {
+    clearTimeout(_draftSaveTimer);
+    _draftSaveTimer = setTimeout(() => {
+      try {
+        chrome.storage.local.set({ [DRAFTS_KEY]: Object.fromEntries(state.drafts) });
+      } catch { /* storage unavailable: drafts stay in memory */ }
+    }, 400);
+  }
+
+  /**
+   * Remember what is in the composer for the session we are leaving.
+   *
+   * Only ever SETS, never deletes. Deletion is already handled by the input
+   * listener (typing then clearing the field fires `input`). Deleting here would
+   * lose the draft after a send that fails in preflight: the Enter handler
+   * empties the composer before it knows whether the turn will be accepted.
+   */
+  function stashDraft(sessionId) {
+    if (!sessionId || !els.input) return;
+    const text = els.input.value;
+    if (text && text.trim()) {
+      state.drafts.set(sessionId, text);
+      persistDraftsDebounced();
+    }
+  }
+
+  function clearDraft(sessionId) {
+    if (!sessionId) return;
+    if (state.drafts.delete(sessionId)) persistDraftsDebounced();
+  }
+
+  /** Put the target session's unsent text (or nothing) back in the composer. */
+  function restoreDraft(sessionId) {
+    if (!els.input) return;
+    const text = (sessionId && state.drafts.get(sessionId)) || '';
+    if (els.input.value === text) return;
+    els.input.value = text;
+    resizeComposer();
+    // Programmatic writes don't fire `input`; the slash palette and autosize
+    // both listen for it.
+    try { els.input.dispatchEvent(new Event('input', { bubbles: true })); } catch { /* non-fatal */ }
+  }
+
+  async function loadDrafts() {
+    try {
+      const got = await chrome.storage.local.get(DRAFTS_KEY);
+      const stored = got?.[DRAFTS_KEY];
+      if (stored && typeof stored === 'object') {
+        for (const [id, text] of Object.entries(stored)) {
+          if (typeof text === 'string' && text.trim()) state.drafts.set(id, text);
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // ── Opening a conversation by id ─────────────────────
+  // Loading is async, so two quick clicks raced: whichever load finished LAST
+  // won, not whichever was clicked last. Clicking A then B would leave you
+  // looking at A. A monotonic token makes the newest intent authoritative and
+  // lets superseded loads be discarded.
+  let _sessionOpenToken = 0;
+  let _tabSwitchToken = 0;   // newest tabs.onActivated wins
+
+  async function openSessionById(id, { closePopover = false } = {}) {
+    const token = ++_sessionOpenToken;
+    const full = await loadFullSession(id);
+    // A newer open request superseded this one — drop it on the floor.
+    if (token !== _sessionOpenToken) return false;
+    if (!full) return false;
+    if (closePopover) closeSessionsPopover();
+    switchToSession(full, { fromUser: true });
+    return true;
+  }
+
+  async function switchToSession(session, { fromUser = false } = { }) {
+    // Stash the outgoing conversation's draft BEFORE the active session moves.
+    const previous = state.activeSession;
+    if (previous && previous.id !== session.id) stashDraft(previous.id);
+
     state.activeSession = session;
     if (fromUser) state.pinnedToSession = true;
     if (session.tabId != null) state.tabToSession[session.tabId] = session.id;
@@ -3369,6 +3660,50 @@
     updateSessionsButton();
     updateGoalUI();
     refreshPageContext();
+    restoreDraft(session.id);
+  }
+
+  /**
+   * Re-run the last user turn.
+   *
+   * Everything after the final user message is discarded first: a failed turn
+   * often left a half-written assistant message or tool_calls without results,
+   * and replaying that as-is produces a malformed request (the API rejects an
+   * assistant tool_calls message that is not followed by tool results).
+   */
+  async function retryLastTurn() {
+    const session = state.activeSession;
+    if (!session) return;
+    if (!Array.isArray(session.history) || !session.history.length) return;
+
+    let lastUser = -1;
+    for (let i = session.history.length - 1; i >= 0; i--) {
+      if (session.history[i].role === 'user') { lastUser = i; break; }
+    }
+    if (lastUser === -1) {
+      // The failed attempt never made it into history (rejected in preflight),
+      // but we remember the text — so retry is still meaningful: it re-runs the
+      // same request, surfacing the same actionable error rather than nothing.
+      if (_lastAttemptText) { await sendMessage(_lastAttemptText); return; }
+      addMessage('assistant', '_Nothing to retry — no user message in this conversation._', { error: true });
+      return;
+    }
+    // The real in-flight marker the panel already uses (drives the stop button).
+    if (state.runtimes?.[session.id]?.busy) {
+      addMessage('assistant', '_Still working on the previous turn — stop it first, then retry._', { error: true });
+      return;
+    }
+
+    const dropped = session.history.splice(lastUser + 1);
+    // Re-render BEFORE the notice: renderSessionHistoryFresh() clears the log,
+    // so a message added first would be wiped immediately.
+    renderSessionHistoryFresh();
+    addMessage('assistant', dropped.length
+      ? `_Retrying — discarded ${dropped.length} incomplete message${dropped.length === 1 ? '' : 's'} from the failed attempt._`
+      : '_Retrying…_');
+    await persistSession(session);
+    announce('Retrying the last message.');
+    await runChatLoop(session);
   }
 
   function renderSessionHistoryFresh() {
@@ -3400,7 +3735,7 @@
   function renderHistoryEntry(m, idx) {
     ensureEmptyHidden();
     if (m.role === 'user') {
-      const r = addMessage('user', m.content, { historyIndex: idx, pinned: !!m._pinned });
+      const r = addMessage('user', m.content, { historyIndex: idx, pinned: !!m._pinned, ts: m._ts });
       decorateEditButton(r.wrap, idx);
     } else if (m.role === 'assistant') {
       // reasoning block first (if any). `_reasoning` is the UI-only copy we
@@ -3413,7 +3748,7 @@
         const stateEl = card.summary.querySelector('.reasoning-state');
         if (stateEl) stateEl.textContent = `${rContent.length} chars`;
       }
-      if (m.content) addMessage('assistant', m.content, { error: !!m._error, historyIndex: idx, pinned: !!m._pinned });
+      if (m.content) addMessage('assistant', m.content, { error: !!m._error, historyIndex: idx, pinned: !!m._pinned, ts: m._ts });
       // Token usage chip (replay)
       if (m._usage) renderUsageChip(m._usage, m._cost);
       // Tool calls (then matching tool results follow as separate history entries)
@@ -3446,22 +3781,69 @@
   function ensureEmptyHidden() {
     if (els.empty && !els.empty.classList.contains('hidden')) els.empty.classList.add('hidden');
   }
-  function scrollToBottom() { els.chat.scrollTop = els.chat.scrollHeight; }
+  // ── Stick to bottom ──────────────────────────────────
+  // The log follows new output ONLY while the user is already at the bottom.
+  // Previously every streamed chunk called an unconditional scrollTop = scrollHeight,
+  // which made reading earlier output during a reply impossible.
+  const NEAR_BOTTOM_PX = 48;
+  function isNearBottom() {
+    const c = els.chat;
+    if (!c) return true;
+    // Non-layout DOMs report 0 for all three: treat that as "at the bottom".
+    const distance = c.scrollHeight - c.scrollTop - c.clientHeight;
+    return !Number.isFinite(distance) || distance <= NEAR_BOTTOM_PX;
+  }
+  function updateJumpLatest() {
+    if (!els.jumpLatestBtn) return;
+    const show = !_stickToBottom;
+    els.jumpLatestBtn.classList.toggle('hidden', !show);
+  }
+  function scrollToBottom(force = false) {
+    if (!els.chat) return;
+    if (force) _stickToBottom = true;
+    if (!_stickToBottom) { updateJumpLatest(); return; }
+    els.chat.scrollTop = els.chat.scrollHeight;
+    updateJumpLatest();
+  }
 
   // ── Message rendering primitives ─────────────────────
   function addMessage(role, content, opts = {}) {
     ensureEmptyHidden();
     const wrap = document.createElement('div');
     wrap.className = `msg ${role}${opts.error ? ' error' : ''}${opts.pinned ? ' pinned' : ''}`;
+    // Errors are the one thing a screen-reader user must not miss: they are
+    // appended to a log that is otherwise not a live region (streaming would
+    // flood it), so an error would otherwise pass silently.
+    // Only LIVE errors alert. Re-rendering a stored conversation would otherwise
+    // re-announce every historical error each time the user switches sessions —
+    // `historyIndex` is set when rendering from history, absent when live.
+    if (opts.error && opts.historyIndex == null) wrap.setAttribute('role', 'alert');
     const label = document.createElement('div');
     label.className = `msg-role ${opts.error ? 'error' : role}`;
     label.textContent = opts.error ? 'Error' : role === 'user' ? 'You' : 'Assistant';
+
+    // Timestamp. `_ts` is underscore-prefixed, so buildMessages() strips it
+    // before the request — it is a UI record, never part of the payload.
+    if (opts.ts) {
+      const time = document.createElement('time');
+      time.className = 'msg-time';
+      const d = new Date(opts.ts);
+      if (!Number.isNaN(d.getTime())) {
+        time.dateTime = d.toISOString();
+        time.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        time.title = d.toLocaleString();
+      }
+      if (time.textContent) label.appendChild(time);
+    }
 
     if (opts.historyIndex != null && !opts.error) {
       const pin = document.createElement('button');
       pin.className = 'pin-btn';
       pin.dataset.idx = opts.historyIndex;
       pin.title = opts.pinned ? 'Unpin' : 'Pin this message (always included in context)';
+      // A ★/☆ glyph is not a name; the state-dependent label is.
+      pin.setAttribute('aria-label', opts.pinned ? 'Unpin this message' : 'Pin this message to always include it in context');
+      pin.setAttribute('aria-pressed', opts.pinned ? 'true' : 'false');
       pin.textContent = opts.pinned ? '★' : '☆';
       label.appendChild(pin);
     }
@@ -3481,6 +3863,17 @@
           img.src = part.image_url.url;
           img.className = 'msg-image';
           img.loading = 'lazy';
+          // Screenshot attachments had no alt at all: a screen reader announced
+          // "image" or read a fragment of the base64 data URL. Describe what it
+          // is instead, and never echo the payload into the name.
+          img.alt = role === 'user' ? 'Screenshot attached to this message' : 'Image in the reply';
+          // A broken image is otherwise a silent blank box.
+          img.addEventListener('error', () => {
+            const note = document.createElement('span');
+            note.className = 'msg-image-fallback';
+            note.textContent = `${img.alt} — could not be displayed`;
+            img.replaceWith(note);
+          });
           body.appendChild(img);
         }
       }
@@ -3489,6 +3882,28 @@
     } else {
       body.textContent = content;
     }
+    // A failed turn left the user with nothing to do but retype. Retry re-runs
+    // the last user message after discarding the failed attempt's leftovers.
+    if (opts.error) {
+      const retry = document.createElement('button');
+      retry.className = 'retry-btn';
+      retry.type = 'button';
+      retry.title = 'Retry the last message';
+      retry.setAttribute('aria-label', 'Retry the last message');
+      retry.textContent = '↻ Retry';
+      label.appendChild(retry);
+    }
+
+    // Per-message copy. Copying a reply used to mean selecting text by hand;
+    // code blocks had a Copy button but prose did not.
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'copy-msg-btn';
+    copyBtn.type = 'button';
+    copyBtn.title = 'Copy this message';
+    copyBtn.setAttribute('aria-label', 'Copy this message');
+    copyBtn.textContent = '⧉';
+    label.appendChild(copyBtn);
+
     wrap.appendChild(label);
     wrap.appendChild(body);
     els.chat.appendChild(wrap);
@@ -3507,6 +3922,8 @@
     btn.className = 'pin-btn';
     btn.dataset.idx = String(idx);
     btn.title = pinned ? 'Unpin' : 'Pin this message (always included in context)';
+    btn.setAttribute('aria-label', pinned ? 'Unpin this message' : 'Pin this message to always include it in context');
+    btn.setAttribute('aria-pressed', pinned ? 'true' : 'false');
     btn.textContent = pinned ? '★' : '☆';
     label.appendChild(btn);
     if (pinned) wrap.classList.add('pinned');
@@ -3522,6 +3939,7 @@
     btn.className = 'edit-btn';
     btn.dataset.idx = String(idx);
     btn.title = 'Edit this message and regenerate the rest of the conversation';
+    btn.setAttribute('aria-label', 'Edit this message and regenerate the rest of the conversation');
     btn.textContent = '✎';
     label.appendChild(btn);
   }
@@ -3725,6 +4143,13 @@
     return state.settings.provider === provider;
   }
 
+  // Retry is only meaningful when the last attempt failed; hide it otherwise so
+  // it never becomes background furniture.
+  function setModelRetryVisible(visible) {
+    if (!els.modelRetryBtn) return;
+    els.modelRetryBtn.classList.toggle('hidden', !visible);
+  }
+
   async function fetchModels(provider, apiKey) {
     const cfg = getProviderConfig(provider);
     if (!cfg) {
@@ -3764,6 +4189,7 @@
     }
     if (isProviderShownInDrawer(provider)) {
       els.modelHint.textContent = 'Loading models…';
+      setModelRetryVisible(false);
     }
     const setModels = (list, statusText) => {
       // Always store into the cross-provider map (so the header picker
@@ -3828,13 +4254,19 @@
           ? ' Badges: 🔧 tools (needed for agent mode) · 👁 vision · 🧠 reasoning.'
           : '';
         setModels(sorted, `${sorted.length} models. Pick one and Save.${legend}`);
+        if (isProviderShownInDrawer(provider)) setModelRetryVisible(false);
       }
     } catch (e) {
       if (cfg.fallbackModels) {
         setModels(cfg.fallbackModels, `${cfg.fallbackModels.length} models (fallback — /models endpoint unreachable: ${e.message}).`);
+        if (isProviderShownInDrawer(provider)) setModelRetryVisible(true);
       } else {
         setModels([], `Failed: ${e.message}`);
-        if (isProviderShownInDrawer(provider)) { state.allModels = []; els.model.innerHTML = ''; }
+        if (isProviderShownInDrawer(provider)) {
+          state.allModels = [];
+          els.model.innerHTML = '';
+          setModelRetryVisible(true);
+        }
       }
     }
   }
@@ -3878,7 +4310,12 @@
   async function toggleModelPopover() {
     if (!els.modelPopover.classList.contains('hidden')) { closeModelPopover(); return; }
     els.modelPopover.classList.remove('hidden');
+    setComboboxExpanded(els.popoverSearch, true);
     els.popoverSearch.value = '';
+    els.popoverList.setAttribute('role', 'listbox');
+    els.popoverList.setAttribute('aria-label', 'Models');
+    // Focus the filter so the picker is usable without the mouse at all.
+    try { els.popoverSearch.focus(); } catch { /* non-fatal */ }
     // Render whatever we already have cached so the user sees something
     // immediately. The background refresh then re-renders when more
     // models arrive.
@@ -3892,7 +4329,11 @@
     renderPopoverList();
     setTimeout(() => els.popoverSearch.focus(), 0);
   }
-  function closeModelPopover() { els.modelPopover.classList.add('hidden'); }
+  function closeModelPopover() {
+    els.modelPopover.classList.add('hidden');
+    setComboboxExpanded(els.popoverSearch, false);
+    try { els.popoverSearch.removeAttribute('aria-activedescendant'); } catch { /* non-fatal */ }
+  }
 
   // Collect every provider's models (built-in + custom) into a single
   // list with provider attached. Used by the header model picker so
@@ -3951,10 +4392,18 @@
         const active = (m._provider === state.settings.provider && m.id === state.settings.model) ? ' active' : '';
         const info = window.KyotoModels?.get(m._provider, m.id);
         const caps = info ? `<span class="popover-caps" title="ctx ${info.context ?? '?'} / out ${info.output ?? '?'} · ${info.source}">${fmt(info.context)} / ${fmt(info.output)}</span>` : '';
-        parts.push(`<div class="popover-item${active}" data-model="${esc(m.id)}" data-provider="${esc(m._provider)}"><span class="popover-mname">${esc(m.name)}${esc(modelCapBadges(m))}</span>${caps}<span class="check">✓</span></div>`);
+        parts.push(`<div class="popover-item${active}" id="popover-item-${parts.length}" role="option" aria-selected="${active ? 'true' : 'false'}" data-model="${esc(m.id)}" data-provider="${esc(m._provider)}"><span class="popover-mname" title="${esc(m.name)}">${esc(m.name)}${esc(modelCapBadges(m))}</span>${caps}<span class="check">✓</span></div>`);
       }
     });
     els.popoverList.innerHTML = parts.join('');
+    // Highlight the top result so Enter picks the obvious choice immediately.
+    const first = els.popoverList.querySelector('.popover-item');
+    if (first) {
+      first.classList.add('kbd-active');
+      syncActiveDescendant(els.popoverSearch, [first], 0);
+    } else {
+      els.popoverSearch.removeAttribute('aria-activedescendant');
+    }
   }
 
   // Fetch every provider that has a key in apiKeys. Custom providers
@@ -3982,11 +4431,16 @@
   function toggleSessionsPopover() {
     if (!els.sessionsPopover.classList.contains('hidden')) { closeSessionsPopover(); return; }
     els.sessionsPopover.classList.remove('hidden');
+    setComboboxExpanded(els.sessionsSearch, true);
     els.sessionsSearch.value = '';
     renderSessionsList();
     setTimeout(() => els.sessionsSearch.focus(), 0);
   }
-  function closeSessionsPopover() { els.sessionsPopover.classList.add('hidden'); }
+  function closeSessionsPopover() {
+    els.sessionsPopover.classList.add('hidden');
+    setComboboxExpanded(els.sessionsSearch, false);
+    els.sessionsSearch.removeAttribute('aria-activedescendant');
+  }
   // In-memory cache for content search. Populated lazily.
   const sessionContentCache = new Map();
   let contentHits = new Set(); // session ids whose content matched the last deep search
@@ -4040,20 +4494,20 @@
       const hitTag = q && contentHits.has(s.id) && !(s.title || '').toLowerCase().includes(q) && !(s.url || '').toLowerCase().includes(q)
         ? ' <span class="hit-tag">content match</span>' : '';
       return `
-        <div class="sess-item${isCurrent ? ' active' : ''}" data-id="${esc(s.id)}">
+        <div class="sess-item${isCurrent ? ' active' : ''}"${isCurrent ? ' aria-current="true"' : ''} role="listitem" data-id="${esc(s.id)}">
           <div class="sess-row">
             ${dot}
-            <span class="sess-title">${esc(s.title || 'Untitled')}${hitTag}</span>
+            <span class="sess-title" title="${esc(s.title || 'Untitled')}">${esc(s.title || 'Untitled')}${hitTag}</span>
             <span class="sess-time">${esc(fmtTime(s.lastActive))}</span>
           </div>
           <div class="sess-row sub">
-            <span class="sess-url">${esc(url)}</span>
+            <span class="sess-url" title="${esc(url)}">${esc(url)}</span>
             <span class="sess-actions">
-              <button class="sess-act" data-act="fork" title="Fork (duplicate as new)">⎘</button>
-              <button class="sess-act" data-act="export" title="Export as Markdown">⇣</button>
-              <button class="sess-act" data-act="rename" title="Rename">✎</button>
-              <button class="sess-act" data-act="bind" title="${s.tabId != null ? 'Unbind from tab' : 'Bind to current tab'}">${s.tabId != null ? '⌧' : '⌘'}</button>
-              <button class="sess-act" data-act="delete" title="Delete">×</button>
+              <button class="sess-act" data-act="fork" title="Fork (duplicate as new)" aria-label="Fork conversation">⎘</button>
+              <button class="sess-act" data-act="export" title="Export as Markdown" aria-label="Export conversation as Markdown">⇣</button>
+              <button class="sess-act" data-act="rename" title="Rename" aria-label="Rename conversation">✎</button>
+              <button class="sess-act" data-act="bind" title="${s.tabId != null ? 'Unbind from tab' : 'Bind to current tab'}" aria-label="${s.tabId != null ? 'Unbind conversation from tab' : 'Bind conversation to current tab'}">${s.tabId != null ? '⌧' : '⌘'}</button>
+              <button class="sess-act" data-act="delete" title="Delete" aria-label="Delete conversation">×</button>
             </span>
           </div>
         </div>`;
@@ -4124,6 +4578,47 @@
   function _invalidateGlobalSkills() { _globalSkillsCache = null; state.globalSkills = []; }
   function _invalidateAllSkills() { _skillsDomainCache.clear(); _invalidateGlobalSkills(); state.skillsForCurrentDomain = []; state.skillsForCurrentDomainKey = null; }
 
+  /**
+   * Drop tab bindings whose tab has closed.
+   *
+   * A closed tab left `session.tabId` pointing at nothing: the context bar said
+   * "No access: No tab with id: 999." (leaking an internal id) and the session
+   * row still showed a "bound" dot, so the UI claimed a binding that did not
+   * exist. Checked in one tabs.query rather than a get() per session.
+   */
+  async function pruneStaleTabBindings() {
+    const bound = (state.sessionsIndex || []).filter(s => s.tabId != null);
+    if (!bound.length) return 0;
+    let live;
+    try {
+      const tabs = await chrome.tabs.query({});
+      live = new Set((tabs || []).map(t => t.id));
+    } catch {
+      return 0;   // can't verify: leave bindings alone rather than clearing good ones
+    }
+    let cleared = 0;
+    for (const meta of bound) {
+      if (live.has(meta.tabId)) continue;
+      meta.tabId = null;
+      delete state.tabToSession[meta.tabId];
+      cleared++;
+      // Persist in the background; a failure here must not block start-up.
+      loadFullSession(meta.id).then(full => {
+        if (full && full.tabId != null) { full.tabId = null; return persistSession(full); }
+      }).catch(() => {});
+    }
+    if (cleared) {
+      try { await chrome.storage.local.set({ [INDEX_KEY]: state.sessionsIndex }); } catch { /* reported elsewhere */ }
+    }
+    return cleared;
+  }
+
+  /** Is this session's bound tab still open? */
+  async function isTabAlive(tabId) {
+    if (tabId == null) return false;
+    try { await chrome.tabs.get(tabId); return true; } catch { return false; }
+  }
+
   async function refreshPageContext() {
     els.ctxDot.className = 'dot load';
     els.ctxTxt.textContent = 'Reading page…';
@@ -4136,6 +4631,20 @@
       if (targetTabId == null) {
         const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
         targetTabId = t?.id ?? null;
+      }
+      // A binding to a closed tab is a normal thing to hit (the user closes the
+      // tab they were working in). Say so in human terms, and drop the binding
+      // instead of leaving the session pretending to be attached.
+      if (targetTabId != null && state.activeSession?.tabId === targetTabId && !(await isTabAlive(targetTabId))) {
+        state.activeSession.tabId = null;
+        delete state.tabToSession[targetTabId];
+        persistSession(state.activeSession).catch(() => {});
+        updateSessionsButton();
+        state.page = null;
+        els.ctxDot.className = 'dot err';
+        els.ctxTxt.textContent = 'This conversation\'s tab was closed';
+        els.ctxTxt.title = 'The tab this conversation was attached to is gone. Open or switch to a tab, then use the reload button to re-read a page.';
+        return;
       }
       const res = await chrome.runtime.sendMessage({
         type: 'PAGE_EXTRACT_CONTENT',
@@ -4216,6 +4725,12 @@
     if (!text.trim()) return;
     if (!state.activeSession) return;
 
+    // Sending is an explicit "take me to the bottom" gesture.
+    scrollToBottom(true);
+    // Remembered so Retry works even when the turn never reached the history
+    // (e.g. it was rejected in preflight for a missing key/model).
+    _lastAttemptText = text;
+
     const session = state.activeSession;
     // Provider and model are global (state.settings) — sessions only own
     // their conversation history. Snapshot them onto the session for
@@ -4235,13 +4750,28 @@
         `No API key for **${sessCfg?.label || session.provider}**. Open Settings, choose that provider, and add a key.`,
         { error: true }
       );
+      // Focus jumps into the drawer here, so a screen-reader user needs to be
+      // told why the context changed.
+      // The error card above is role="alert" and carries the message; only the
+      // context change needs announcing, or the user hears it twice.
+      announce('Settings opened.');
       openDrawer();
       return;
     }
     if (!session.model) {
       addMessage('assistant', 'No model selected. Pick one from the header (or Settings).', { error: true });
+      announce('Settings opened.');
       openDrawer(); return;
     }
+    // A turn is already running on this session: queue the follow-up rather
+    // than starting a concurrent loop that would interleave two streams.
+    if (state.runtimes?.[session.id]?.busy) {
+      queueFor(session.id).push(text);
+      renderQueueBar();
+      announce('Message queued — it will send when the current reply finishes.');
+      return;
+    }
+
     // Bind to current tab if floating. If another session was previously
     // bound to this tab (e.g. user forked then started typing on the fork),
     // clean its tabId so we don't leave a stale reference.
@@ -4265,10 +4795,13 @@
       session.title = (textForTitle.split('\n')[0] || 'New chat').slice(0, 60);
     }
 
-    session.history.push({ role: 'user', content: text });
+    // Only now is the message really sent: clearing earlier would discard the
+    // user's text when the turn is rejected in preflight (e.g. missing key).
+    clearDraft(session.id);
+    session.history.push({ role: 'user', content: text, _ts: Date.now() });
     const userIdx = session.history.length - 1;
     if (isActive(session.id)) {
-      const { wrap } = addMessage('user', text);
+      const { wrap } = addMessage('user', text, { ts: session.history[userIdx]._ts });
       decoratePinButton(wrap, userIdx, false);
       decorateEditButton(wrap, userIdx);
     }
@@ -4319,6 +4852,58 @@
     return changed;
   }
 
+  // ── Follow-up queue ─────────────────────────────────
+  // A turn in flight owns the session: its stream writes into session.history
+  // and the live DOM. Starting a second loop for a message typed mid-stream
+  // interleaves two generators into one conversation (duplicate assistant
+  // messages, malformed requests). So a mid-stream send is QUEUED and drained
+  // when the current turn finishes — which is also what the user typing ahead
+  // actually wants.
+  function queueFor(sessionId) {
+    const rt = (state.runtimes[sessionId] ??= {});
+    if (!Array.isArray(rt.queue)) rt.queue = [];
+    return rt.queue;
+  }
+
+  function renderQueueBar() {
+    const bar = document.getElementById('queueBar');
+    if (!bar) return;
+    const session = state.activeSession;
+    const queue = session ? (state.runtimes?.[session.id]?.queue || []) : [];
+    if (!queue.length) {
+      bar.classList.add('hidden');
+      bar.innerHTML = '';
+      return;
+    }
+    bar.classList.remove('hidden');
+    bar.innerHTML = queue.map((text, i) =>
+      `<div class="queue-chip"><span class="q-label">Queued</span>` +
+      `<span class="q-text" title="${esc(text)}">${esc(text)}</span>` +
+      `<button class="q-cancel" type="button" data-qi="${i}" aria-label="Cancel queued message ${i + 1}" title="Cancel">×</button></div>`
+    ).join('');
+  }
+
+  function cancelQueued(index) {
+    const session = state.activeSession;
+    if (!session) return;
+    const queue = queueFor(session.id);
+    if (index < 0 || index >= queue.length) return;
+    queue.splice(index, 1);
+    renderQueueBar();
+    announce('Queued message cancelled.');
+  }
+
+  async function drainQueue(session) {
+    const queue = state.runtimes?.[session.id]?.queue;
+    if (!Array.isArray(queue) || !queue.length) return;
+    const next = queue.shift();
+    renderQueueBar();
+    if (!next) return;
+    // Defer a tick so the finishing turn has fully unwound (send button state,
+    // banner removal) before the next one starts.
+    setTimeout(() => { sendMessage(next).catch((e) => console.warn('[Kyoto] queued send failed:', e)); }, 0);
+  }
+
   async function runChatLoop(session) {
     const runtime = (state.runtimes[session.id] ??= {});
     runtime.busy = true;
@@ -4342,6 +4927,10 @@
       const maxAutoContinues = Math.max(0, Math.min(10, Number(state.settings.maxAutoContinues) || 2));
       let autoContinues = 0;
       let goalContinues = 0;
+      announce('Working on it.');
+      // Assistive tech should know the transcript is still changing rather than
+      // complete — otherwise a screen reader user reads a half-written reply.
+      if (els.chat) els.chat.setAttribute('aria-busy', 'true');
       let stoppedReason = 'maxSteps'; // overwritten if we break naturally
       let lastAssistantText = '';   // for optional read-aloud at turn end
 
@@ -4413,6 +5002,7 @@
         }
         if (finishReason) msg._finishReason = finishReason;
         if (typeof msg.content === 'string' && msg.content) lastAssistantText = msg.content;
+        if (!msg._ts) msg._ts = Date.now();
         session.history.push(msg);
         const asstIdx = session.history.length - 1;
         // Decorate the live-streamed assistant message with a pin button.
@@ -4577,6 +5167,8 @@
       // Optional read-aloud. Fire-and-forget: speech must never delay or fail
       // the turn, and the synthesizer is stopped if another turn starts.
       try { maybeAutoSpeak(lastAssistantText); } catch { /* ignore */ }
+      if (els.chat) els.chat.removeAttribute('aria-busy');
+      announce('Reply ready.');
     } catch (e) {
       // OpenAI-compat servers reject the next turn with "insufficient
       // tool messages following tool_calls" if any tool_call_id is
@@ -4586,22 +5178,26 @@
         sanitiseDanglingToolCalls(session, reason);
       } catch {}
       if (e.name === 'AbortError') {
-        session.history.push({ role: 'assistant', content: '_[stopped]_', _error: true });
+        session.history.push({ role: 'assistant', content: '_[stopped]_', _error: true, _ts: Date.now() });
       } else {
         if (isActive(session.id)) addMessage('assistant', `**Error:** ${e.message}`, { error: true });
-        session.history.push({ role: 'assistant', content: `Error: ${e.message}`, _error: true });
+        session.history.push({ role: 'assistant', content: `Error: ${e.message}`, _error: true, _ts: Date.now() });
       }
       await persistSession(session);
     } finally {
       runtime.busy = false;
       runtime.abort = null;
+      if (els.chat) els.chat.removeAttribute('aria-busy');
       if (isActive(session.id)) {
         els.sendBtn.disabled = false;
         els.stopBtn.classList.add('hidden');
         const banner = document.getElementById('streaming-banner');
         if (banner) banner.remove();
         els.input.focus();
+        renderQueueBar();
       }
+      // Anything typed while this turn ran goes out now.
+      drainQueue(session);
     }
   }
 
@@ -4661,6 +5257,7 @@
   function compileCustomTools() {
     state.customToolHandlers = new Map();
     state.customToolSchemas = [];
+    state.customToolErrors = new Map();
     for (const t of (state.settings?.customTools || [])) {
       if (!t.name || !t.code) continue;
       let params;
@@ -4668,11 +5265,16 @@
       catch { params = { type: 'object', properties: {}, additionalProperties: false }; }
       let fn;
       try {
-        // The function body runs in the side-panel context with full chrome.*
-        // and fetch access. The user wrote it; the user trusts it.
+        // NOTE: MV3 forbids 'unsafe-eval' for extension pages — Chrome enforces a
+        // minimum CSP and rejects the manifest at install if you try to relax it —
+        // so new Function() throws here in the real browser. It only works under
+        // the test harness (jsdom), which is exactly why this went unnoticed: every
+        // user-defined tool was silently dropped. Record the reason so the UI can
+        // say so instead of leaving an empty list and a console line.
         fn = new Function('args', `return (async () => { ${t.code} })();`);
       } catch (e) {
         console.warn('[Kyoto] custom tool compile failed:', t.name, e.message);
+        (state.customToolErrors ||= new Map()).set(t.name || '(unnamed)', e.message || String(e));
         continue;
       }
       const name = t.name.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 60);
@@ -4897,7 +5499,7 @@
         if (reduced?.textChunk) {
           if (isActive(session.id)) {
             if (!textTarget) {
-              const m = addMessage('assistant', '');
+              const m = addMessage('assistant', '', { ts: acc._startedAt || Date.now() });
               textTarget = m.body;
               textTarget.classList.add('cursor');
             }
@@ -5099,9 +5701,268 @@
   }
 
   // ── Drawer / settings ────────────────────────────────
+  // ── Screen-reader announcements ──────────────────────
+  // Deliberately coarse: one sentence per turn transition. The chat log is not a
+  // live region because streaming would re-announce on every token.
+  let _stickToBottom = true;
+  let _lastAttemptText = '';
+  let _focusBeforeDrawer = null;
+  let _lastAnnounce = '';
+  let _announceTimer = null;
+  function announce(message) {
+    const el = document.getElementById('srStatus');
+    if (!el || !message) return;
+    if (message === _lastAnnounce) return;
+    _lastAnnounce = message;
+    // Clear then set on the next tick so a repeated identical phrase in a later
+    // turn is still spoken (assistive tech ignores an unchanged text node).
+    el.textContent = '';
+    clearTimeout(_announceTimer);
+    _announceTimer = setTimeout(() => { el.textContent = message; }, 30);
+  }
+
+  // ── Form field labelling ─────────────────────────────
+  // Every settings control sits next to a <label>, but none of those labels were
+  // associated with their control: no `for`, and they do not wrap the input. A
+  // screen reader therefore announced the drawer's fields as bare "combobox" /
+  // "edit text" with no name at all.
+  //
+  // Done programmatically rather than by hand-editing 30+ fields so it stays
+  // correct as the drawer grows, and so fields added later are covered too.
+  const LABELABLE = 'input:not([type="hidden"]), select, textarea';
+
+  /** The guidance paragraph that belongs to a .field, wherever it sits. */
+  function hintForField(field) {
+    const inside = field.querySelector('.hint');
+    if (inside) return inside;
+    const next = field.nextElementSibling;
+    if (next && next.classList && next.classList.contains('hint')) return next;
+    // Some fields live inside a .field-row whose following sibling is the hint.
+    const row = field.parentElement;
+    if (row && row.classList.contains('field-row')) {
+      const after = row.nextElementSibling;
+      if (after && after.classList.contains('hint')) return after;
+    }
+    return null;
+  }
+
+  function wireFieldLabels() {
+    if (!els.drawer) return;
+    let counter = 0;
+    for (const field of els.drawer.querySelectorAll('.field')) {
+      const label = field.querySelector('label');
+      if (!label) continue;
+      if (label.classList.contains('check-row')) continue;   // wraps its own input
+      const labelText = label.textContent.trim();
+      if (!labelText) continue;
+
+      const controls = [...field.querySelectorAll(LABELABLE)];
+      if (!controls.length) continue;
+
+      // First control: a real <label for>, so the name is announced natively.
+      const primary = controls[0];
+      if (!primary.id) primary.id = `field-${++counter}`;
+      if (!label.getAttribute('for')) label.setAttribute('for', primary.id);
+
+      // Any further control in the same field (e.g. a search box beside a list)
+      // still needs a name of its own.
+      for (const extra of controls.slice(1)) {
+        if (extra.getAttribute('aria-label') || extra.getAttribute('aria-labelledby')) continue;
+        if (extra.id && els.drawer.querySelector(`label[for="${extra.id}"]`)) continue;
+        extra.setAttribute('aria-label', labelText);
+      }
+
+      // Link the guidance text: a hint nobody hears is dead text.
+      const hint = hintForField(field);
+      if (hint && !primary.hasAttribute('aria-describedby')) {
+        if (!hint.id) hint.id = `hint-${++counter}`;
+        primary.setAttribute('aria-describedby', hint.id);
+      }
+    }
+  }
+
+  // ── Collapsible settings sections ────────────────────
+  // The drawer grew to 15 sections / 41 fields. Most of it is configured once
+  // (cron, workspace, shell bridge, S3, MCP, backup) and gets in the way every
+  // other time, so the advanced half starts collapsed.
+  const COLLAPSED_KEY = 'kyoto_collapsed_sections';
+  const ADVANCED_SECTIONS = [
+    'background-jobs-cron', 'workspace-virtual-files', 'workspace-folder-on-disk',
+    'shell-bridge-native-messaging', 'skills-hub', 'aws-s3-and-s3-compatible',
+    'custom-openai-compatible-providers', 'custom-slash-commands', 'custom-js-tools',
+    'mcp-servers', 'backup'
+  ];
+  let _collapsedSections = null;   // Set of section ids, loaded once
+
+  // Stable key for a section, WITHOUT the 'sec-' id prefix, so it can be
+  // compared against the persisted list. (buildDrawerNav stores ids as
+  // 'sec-<slug>'; the two must agree.)
+  function sectionSlug(h) {
+    if (h.id) return h.id.replace(/^sec-/, '');
+    return h.textContent.toLowerCase()
+      .replace(/&/g, ' and ')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+
+  /** The elements a section owns: every following sibling up to the next heading. */
+  function sectionBodies(h) {
+    const out = [];
+    let el = h.nextElementSibling;
+    while (el && !(el.tagName === 'H3' && el.classList.contains('drawer-section'))) {
+      out.push(el);
+      el = el.nextElementSibling;
+    }
+    return out;
+  }
+
+  async function loadCollapsedSections() {
+    if (_collapsedSections) return _collapsedSections;
+    let ids = null;
+    try {
+      const got = await chrome.storage.local.get(COLLAPSED_KEY);
+      ids = got?.[COLLAPSED_KEY];
+    } catch { /* storage unavailable: fall back to defaults */ }
+    _collapsedSections = new Set(Array.isArray(ids) ? ids : ADVANCED_SECTIONS);
+    return _collapsedSections;
+  }
+
+  function persistCollapsedSections() {
+    if (!_collapsedSections) return;
+    try { chrome.storage.local.set({ [COLLAPSED_KEY]: [..._collapsedSections] }); } catch { /* non-fatal */ }
+  }
+
+  function applySectionState(h, collapsed) {
+    h.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    for (const el of sectionBodies(h)) el.hidden = collapsed;
+  }
+
+  function wireDrawerSections() {
+    if (!els.drawer) return;
+    for (const h of els.drawer.querySelectorAll('.drawer-body .drawer-section')) {
+      if (h.dataset.collapsible === '1') continue;
+      h.dataset.collapsible = '1';
+      h.classList.add('toggle');
+      h.setAttribute('role', 'button');
+      h.setAttribute('tabindex', '0');
+      const slug = sectionSlug(h);
+      if (!h.id) h.id = 'sec-' + slug;
+
+      const toggle = () => {
+        const next = h.getAttribute('aria-expanded') !== 'false'; // true -> collapse
+        applySectionState(h, next);
+        if (!_collapsedSections) _collapsedSections = new Set(ADVANCED_SECTIONS);
+        if (next) _collapsedSections.add(slug); else _collapsedSections.delete(slug);
+        persistCollapsedSections();
+        announce(`${h.textContent.trim()} ${next ? 'collapsed' : 'expanded'}.`);
+      };
+      h.addEventListener('click', toggle);
+      h.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      });
+    }
+  }
+
+  async function refreshSectionCollapse() {
+    if (!els.drawer) return;
+    const collapsed = await loadCollapsedSections();
+    for (const h of els.drawer.querySelectorAll('.drawer-body .drawer-section')) {
+      applySectionState(h, collapsed.has(sectionSlug(h)));
+    }
+  }
+
+  // ── Settings drawer index ────────────────────────────
+  // Built from the rendered headings rather than hardcoded, so adding or
+  // reordering a section can never desync the nav.
+  // ── Unsaved-changes indicator ────────────────────────
+  // Closing the drawer discards edits silently. An always-visible Save plus a
+  // dot on it makes "I changed something and haven't saved" visible without
+  // interrupting with a confirm() dialog on every close.
+  function markDrawerDirty(dirty) {
+    if (!els.saveBtn) return;
+    els.saveBtn.classList.toggle('dirty', !!dirty);
+    els.saveBtn.setAttribute('aria-label', dirty ? 'Save changes (unsaved changes)' : 'Save changes');
+    if (els.saveBtn.title !== undefined) {
+      els.saveBtn.title = dirty ? 'You have unsaved changes' : 'Save settings';
+    }
+  }
+
+  function wireDrawerDirtyTracking() {
+    if (!els.drawer || els.drawer.dataset.dirtyWired === '1') return;
+    els.drawer.dataset.dirtyWired = '1';
+    const onChange = (e) => {
+      // Ignore the chat/other surfaces that may bubble through.
+      if (!e.target || !els.drawer.contains(e.target)) return;
+      if (e.target.closest('.drawer-nav')) return;      // navigation is not an edit
+      markDrawerDirty(true);
+    };
+    els.drawer.addEventListener('input', onChange);
+    els.drawer.addEventListener('change', onChange);
+  }
+
+  function buildDrawerNav() {
+    const nav = document.getElementById('drawerNav');
+    if (!nav || !els.drawer) return;
+    const headings = [...els.drawer.querySelectorAll('.drawer-body .drawer-section')];
+    if (!nav.childElementCount && headings.length) {
+      for (const h of headings) {
+        if (!h.id) {
+          h.id = 'sec-' + h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        }
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'nav-chip';
+        chip.textContent = h.textContent.replace(/\s*\(.*\)$/, '').trim();
+        chip.setAttribute('aria-label', `Jump to ${h.textContent.trim()}`);
+        chip.addEventListener('click', () => {
+          h.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+          announce(`${h.textContent.trim()} section.`);
+        });
+        nav.appendChild(chip);
+      }
+    }
+  }
+
+  // ── Storage usage ──
+  const STORAGE_LIMIT = 10 * 1024 * 1024;   // chrome.storage.local default quota
+  // NOTE: a function declaration, not a const arrow. openDrawer() runs earlier in
+  // this scope, and calling a const arrow before its initialiser throws a TDZ
+  // ReferenceError — which aborted the rest of openDrawer, including the line
+  // that actually shows the drawer, so Settings silently refused to open.
+  async function updateStorageUsage() {
+    if (!els.storageSummary) return;
+    try {
+      if (typeof chrome.storage.local.getBytesInUse !== 'function') {
+        els.storageSummary.textContent = 'usage unavailable';
+        return;
+      }
+      const bytes = await chrome.storage.local.getBytesInUse(null);
+      const pct = Math.min(100, Math.round((bytes / STORAGE_LIMIT) * 100));
+      els.storageSummary.textContent = `${fmtBytes(bytes)} of ~10 MB (${pct}%)`;
+      // Warn at 80%: low enough to act before a save fails.
+      els.storageSummary.className = pct >= 80 ? 'status err' : pct >= 60 ? 'status warn' : 'status';
+      els.storageSummary.title = pct >= 80
+        ? 'Nearly full. Export or delete old conversations to free space.'
+        : 'Storage used by conversations, settings and cached state.';
+    } catch (e) {
+      els.storageSummary.textContent = `usage unavailable (${e.message})`;
+      els.storageSummary.className = 'status';
+    }
+  }
+
   function openDrawer() {
+    // A transient composer autocomplete must not outlive a modal: it used to
+    // stay on screen (and, with a higher z-index than the drawer, float OVER the
+    // settings form) if the user typed "/" and then opened Settings.
+    dismissComposerOverlays();
+    // Remember what had focus so closing the dialog puts the user back where
+    // they were instead of dumping focus at the top of the document.
+    _focusBeforeDrawer = document.activeElement;
     els.drawer.classList.remove('hidden');
     els.overlay.classList.remove('hidden');
+    refreshModalInert();
+    // Non-essential: must never prevent the drawer from opening.
+    updateStorageUsage().catch(() => {});
     els.provider.value = state.settings.provider;
     els.apiKey.value = currentApiKey();
     els.systemPrompt.value = state.settings.systemPrompt;
@@ -5198,10 +6059,29 @@
     if (currentApiKey() || getProviderConfig(state.settings.provider)?.isCustom) {
       fetchModels(state.settings.provider, currentApiKey());
     }
+    wireFieldLabels();
+    buildDrawerNav();
+    refreshSectionCollapse();
+    markDrawerDirty(false);
+    // Move focus into the dialog so keyboard users are not left behind the
+    // overlay. The provider select is the first meaningful control.
+    try { (els.provider || els.drawer).focus?.(); } catch { /* non-fatal */ }
   }
   function closeDrawer() {
     els.drawer.classList.add('hidden');
     els.overlay.classList.add('hidden');
+    refreshModalInert();
+    restoreFocusAfterDrawer();
+  }
+
+  function restoreFocusAfterDrawer() {
+    const prev = _focusBeforeDrawer;
+    _focusBeforeDrawer = null;
+    if (prev && typeof prev.focus === 'function' && document.contains(prev)) {
+      prev.focus();
+    } else if (els.input) {
+      els.input.focus();
+    }
   }
 
   // ── Skills manager ───────────────────────────────────
@@ -5227,14 +6107,21 @@
   async function openSkillsManager() {
     if (!window.KyotoSkillHub) { addMessage('assistant', '_Skill hub not loaded._', { error: true }); return; }
     const cfg = await window.KyotoSkillHub.config();
-    if (!cfg.url || !cfg.key) {
-      addMessage('assistant', '_Skills hub not configured. Open Settings → Skills hub to paste your URL + API key._', { error: true });
-      return;
-    }
+    dismissComposerOverlays();
     els.skillsDrawer.classList.remove('hidden');
     els.skillsOverlay.classList.remove('hidden');
     els.skillsFilterInput.value = '';
     _skillsManager.filter = '';
+    if (!cfg.url || !cfg.key) {
+      // Clicking "Manage skills" used to do nothing visible: it appended a chat
+      // message to a transcript the user may not be looking at and left the
+      // drawer shut. Open the drawer and explain the fix where the fix lives.
+      els.skillsSummary.textContent = 'not configured';
+      els.skillsList.innerHTML =
+        '<p class="hint">The skills hub is not configured yet, so there are no skills to manage.</p>' +
+        '<p class="hint">Set the hub URL and API key in <strong>Settings → Skills hub</strong>.</p>';
+      return;
+    }
     await refreshSkillsManager();
   }
 
@@ -5340,7 +6227,10 @@
     const name = document.createElement('span');
     name.className = 'skill-name';
     name.textContent = s.name || '(untitled)';
-    name.title = s.skill_id;
+    // The element truncates with an ellipsis, so the tooltip must reveal the
+    // full NAME (it previously showed the skill id, which does not help read a
+    // clipped title). The id is still on the row's dataset.
+    name.title = s.name || '(untitled)';
     const meta = document.createElement('span');
     meta.className = 'skill-meta';
     const parts = [];
@@ -5680,7 +6570,14 @@
       els.customToolsList.innerHTML = '<p class="hint">No custom tools yet. Click + to define one. Example body: <code>return { ok: true, ts: Date.now() };</code></p>';
       return;
     }
-    els.customToolsList.innerHTML = list.map((t, i) => `
+    const errors = state.customToolErrors || new Map();
+    const anyFailed = list.some(t => errors.has(t.name));
+    const banner = anyFailed
+      ? `<p class="status err">These tools cannot run: Manifest V3 content-security policy forbids
+         <code>eval</code> in extension pages, so the code body cannot be compiled. Chrome rejects any
+         attempt to relax that policy, so this is not a setting you can change.</p>`
+      : '';
+    els.customToolsList.innerHTML = banner + list.map((t, i) => `
       <div class="ct-row" data-idx="${i}">
         <div class="ct-head">
           <input type="text" class="ct-name" placeholder="tool_name (snake_case)" value="${esc(t.name || '')}" />
@@ -5689,6 +6586,7 @@
         <input type="text" class="ct-desc" placeholder="What does this tool do? (model sees this)" value="${esc(t.description || '')}" />
         <textarea class="ct-params" rows="2" placeholder='JSON schema for args, e.g. { "type":"object", "properties":{ "q":{"type":"string"} }, "required":["q"] }'>${esc(t.parameters || '')}</textarea>
         <textarea class="ct-code" rows="5" placeholder="// Body of an async function. Receives args. Return a JSON-serialisable value.">${esc(t.code || '')}</textarea>
+        ${errors.has(t.name) ? `<p class="status err">Did not compile: ${esc(errors.get(t.name))}</p>` : ''}
       </div>
     `).join('');
   }
@@ -5718,6 +6616,13 @@
   // ── Event wiring ─────────────────────────────────────
   function wireEvents() {
     els.input.addEventListener('input', () => {
+      // Keep the active conversation's draft in sync as the user types.
+      if (state.activeSession?.id) {
+        const text = els.input.value;
+        if (text && text.trim()) state.drafts.set(state.activeSession.id, text);
+        else state.drafts.delete(state.activeSession.id);
+        persistDraftsDebounced();
+      }
       els.input.style.height = 'auto';
       els.input.style.height = Math.min(els.input.scrollHeight, 160) + 'px';
       refreshSlashPalette();
@@ -5766,7 +6671,17 @@
     });
     els.stopBtn.addEventListener('click', () => {
       const sid = state.activeSession?.id;
-      if (sid && state.runtimes[sid]?.abort) state.runtimes[sid].abort.abort();
+      if (!sid) return;
+      // Stopping means stop: follow-ups typed during the turn are discarded
+      // rather than immediately firing once the aborted turn unwinds.
+      const queue = state.runtimes[sid]?.queue;
+      if (Array.isArray(queue) && queue.length) {
+        const dropped = queue.length;
+        queue.length = 0;
+        renderQueueBar();
+        announce(`${dropped} queued message${dropped === 1 ? '' : 's'} discarded.`);
+      }
+      if (state.runtimes[sid]?.abort) state.runtimes[sid].abort.abort();
     });
     if (els.visionBtn) els.visionBtn.addEventListener('click', toggleVisionPending);
 
@@ -5811,13 +6726,42 @@
       if (els.auditStatus) { els.auditStatus.textContent = `Cleared ${n} entries.`; els.auditStatus.className = 'status ok'; }
     });
 
-    if (els.popOutBtn) els.popOutBtn.addEventListener('click', () => {
-      chrome.windows.create({
-        url: chrome.runtime.getURL('sidepanel/sidepanel.html'),
-        type: 'popup',
-        width: 480, height: 720
-      }).catch(() => {});
-    });
+    if (els.popOutBtn) {
+      // Two problems in one small handler: an impatient double-click opened two
+      // popup windows, and a failure was swallowed entirely — the button simply
+      // did nothing with no explanation.
+      let poppingOut = false;
+      els.popOutBtn.addEventListener('click', async () => {
+        if (poppingOut) return;
+        poppingOut = true;
+        els.popOutBtn.disabled = true;
+        try {
+          await chrome.windows.create({
+            url: chrome.runtime.getURL('sidepanel/sidepanel.html'),
+            type: 'popup',
+            width: 480, height: 720
+          });
+        } catch (err) {
+          addMessage('assistant',
+            `**Could not open the pop-out window:** ${err?.message || err}`,
+            { error: true });
+          announce('Could not open the pop-out window.');
+        } finally {
+          poppingOut = false;
+          els.popOutBtn.disabled = false;
+        }
+      });
+    }
+
+    if (els.paletteBtn) {
+      els.paletteBtn.addEventListener('click', () => {
+        // Clicking must not leave the button focused behind the palette; the
+        // palette itself manages focus and restores it on close.
+        openPalette();
+      });
+    }
+
+    if (els.storageRefreshBtn) els.storageRefreshBtn.addEventListener('click', updateStorageUsage);
 
     if (els.testConnBtn) els.testConnBtn.addEventListener('click', testConnection);
 
@@ -5838,6 +6782,11 @@
       updateWorkspaceUI();
     });
 
+    // ── Storage usage ──
+    // Conversations live in chrome.storage.local, which has a fixed quota. Until
+    // now the quota was invisible: the first sign of trouble was a failed save and
+    // "storage is full" with no way to have seen it coming. getBytesInUse lets the
+    // panel show the running total and warn before writes start failing.
     // ── Cron jobs panel ──
     async function refreshCronList() {
       if (!els.cronList) return;
@@ -5914,7 +6863,7 @@
             const r = await window.KyotoTools.call('cron_logs', { id, limit: 20 });
             if (r?.error) { alert('Error: ' + r.error); return; }
             const txt = (r.runs || []).map(run =>
-              `[${new Date(run.ts).toISOString()}] ${run.ok ? 'OK' : 'FAIL'} · ${run.ms}ms · ${run.triggeredBy || '-'}` +
+              `[${safeIso(run.ts)}] ${run.ok ? 'OK' : 'FAIL'} · ${run.ms}ms · ${run.triggeredBy || '-'}` +
               (run.error ? '\n  err: ' + run.error : '') +
               (run.stdout ? '\n  stdout: ' + run.stdout.split('\n').join('\n  ') : '') +
               (run.stderr ? '\n  stderr: ' + run.stderr.split('\n').join('\n  ') : '')
@@ -5997,16 +6946,16 @@
     if (els.shellInstallCopyAltBtn) els.shellInstallCopyAltBtn.addEventListener('click', () => {
       copyToClipboard(els.shellInstallCmdAlt.value, els.shellInstallCopyAltBtn);
     });
-    if (els.shellInstallToggleAltBtn) els.shellInstallToggleAltBtn.addEventListener('click', (e) => {
-      e.preventDefault();
+    if (els.shellInstallToggleAltBtn) els.shellInstallToggleAltBtn.addEventListener('click', () => {
       const wrap = els.shellInstallAltWrap;
       if (!wrap) return;
       const showing = wrap.classList.toggle('hidden');
       // toggle returns the new state of "is class present" — if it just
-      // ADDED .hidden, we're hiding. Flip the label accordingly.
+      // ADDED .hidden, we're hiding. Flip the label and the expanded state.
       els.shellInstallToggleAltBtn.textContent = showing
         ? 'Show command for a different OS'
         : 'Hide command for the other OS';
+      els.shellInstallToggleAltBtn.setAttribute('aria-expanded', showing ? 'false' : 'true');
     });
 
     if (els.shellCopyIdBtn) els.shellCopyIdBtn.addEventListener('click', () => {
@@ -6160,12 +7109,28 @@
       if (file) importSettingsFile(file);
       e.target.value = '';
     });
+    // Creating a conversation is async, so an impatient double/triple click used
+    // to create two or three of them — each one an empty entry in history to
+    // clean up. Ignore clicks while one is already in flight, and disable the
+    // button so the state is visible rather than silently swallowed.
+    let creatingSession = false;
     els.newChatBtn.addEventListener('click', async () => {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      const session = await createSession(tab);
-      state.pinnedToSession = false; // resume follow-tab behavior
-      await switchToSession(session);
-      updateSessionsButton();
+      if (creatingSession) return;
+      creatingSession = true;
+      els.newChatBtn.disabled = true;
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const session = await createSession(tab);
+        state.pinnedToSession = false; // resume follow-tab behavior
+        await switchToSession(session);
+        updateSessionsButton();
+      } catch (err) {
+        // Never leave the button dead: report and re-enable via the finally.
+        addMessage('assistant', `**Could not start a new conversation:** ${err?.message || err}`, { error: true });
+      } finally {
+        creatingSession = false;
+        els.newChatBtn.disabled = false;
+      }
     });
     els.settingsBtn.addEventListener('click', openDrawer);
     els.closeDrawerBtn.addEventListener('click', closeDrawer);
@@ -6176,6 +7141,36 @@
     els.popoverSearch.addEventListener('input', renderPopoverList);
     els.popoverList.addEventListener('click', async (e) => {
       const item = e.target.closest('.popover-item');
+      if (!item?.dataset.model) return;
+      await pickPopoverModel(item);
+    });
+
+    // Keyboard navigation. Typing filters the list, so requiring the mouse to
+    // choose a result defeated the purpose — especially with ~450 models.
+    els.popoverSearch.addEventListener('keydown', async (e) => {
+      const items = [...els.popoverList.querySelectorAll('.popover-item')];
+      if (!items.length) return;
+      const cursorAt = () => items.findIndex(el => el.classList.contains('kbd-active'));
+      const moveTo = (to) => {
+        const next = Math.max(0, Math.min(items.length - 1, to));
+        items.forEach(el => el.classList.remove('kbd-active'));
+        items[next].classList.add('kbd-active');
+        items[next].scrollIntoView?.({ block: 'nearest' });
+        syncActiveDescendant(els.popoverSearch, items, next);
+      };
+      const c = cursorAt();
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveTo(c === -1 ? 0 : c + 1); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); moveTo(c === -1 ? items.length - 1 : c - 1); return; }
+      if (e.key === 'Home')      { e.preventDefault(); moveTo(0); return; }
+      if (e.key === 'End')       { e.preventDefault(); moveTo(items.length - 1); return; }
+      if (e.key === 'Enter') {
+        if (c === -1) return;           // nothing highlighted: no surprise selection
+        e.preventDefault();
+        await pickPopoverModel(items[c]);
+      }
+    });
+
+    async function pickPopoverModel(item) {
       if (!item?.dataset.model) return;
       const patch = { model: item.dataset.model };
       // The header picker shows cross-provider models — if the user
@@ -6195,7 +7190,7 @@
       updateModelLine();
       updateMaxTokensHint();
       closeModelPopover();
-    });
+    }
 
     els.sessionsBtn.addEventListener('click', toggleSessionsPopover);
     let searchDebounce;
@@ -6205,6 +7200,33 @@
       const q = els.sessionsSearch.value.trim();
       searchDebounce = setTimeout(() => deepSearchSessions(q), 250);
     });
+    // Keyboard navigation for the session list, matching the model picker.
+    // Enter is dispatched as a plain row click so it takes exactly the same
+    // path as the mouse (including the nested fork/rename/delete buttons being
+    // skipped, because the event target is the row itself).
+    els.sessionsSearch.addEventListener('keydown', (e) => {
+      const items = [...els.sessionsList.querySelectorAll('.sess-item')];
+      if (!items.length) return;
+      const cursorAt = () => items.findIndex(el => el.classList.contains('kbd-active'));
+      const moveTo = (to) => {
+        const next = Math.max(0, Math.min(items.length - 1, to));
+        items.forEach(el => el.classList.remove('kbd-active'));
+        items[next].classList.add('kbd-active');
+        items[next].scrollIntoView?.({ block: 'nearest' });
+        syncActiveDescendant(els.sessionsSearch, items, next);
+      };
+      const c = cursorAt();
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveTo(c === -1 ? 0 : c + 1); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); moveTo(c === -1 ? items.length - 1 : c - 1); return; }
+      if (e.key === 'Home')      { e.preventDefault(); moveTo(0); return; }
+      if (e.key === 'End')       { e.preventDefault(); moveTo(items.length - 1); return; }
+      if (e.key === 'Enter') {
+        if (c === -1) return;
+        e.preventDefault();
+        items[c].click();
+      }
+    });
+
     els.sessionsList.addEventListener('click', async (e) => {
       const act = e.target.closest('.sess-act');
       const item = e.target.closest('.sess-item');
@@ -6253,11 +7275,9 @@
         }
         return;
       }
-      // Click on row → open that session
-      const full = await loadFullSession(id);
-      if (!full) return;
-      closeSessionsPopover();
-      switchToSession(full, { fromUser: true });
+      // Click on row → open that session (newest click wins, even if an earlier
+      // load is still in flight).
+      await openSessionById(id, { closePopover: true });
     });
     document.addEventListener('click', (e) => {
       if (!els.modelPopover.classList.contains('hidden')) {
@@ -6267,6 +7287,21 @@
         if (!els.sessionsPopover.contains(e.target) && !els.sessionsBtn.contains(e.target)) closeSessionsPopover();
       }
     });
+
+    if (els.modelRetryBtn) {
+      els.modelRetryBtn.addEventListener('click', async () => {
+        // Use what the drawer is actually showing: the provider dropdown may
+        // hold an unsaved choice, and the key field may hold a pasted key that
+        // has not been saved yet. Falling back to the saved provider's key would
+        // retry with credentials the user is no longer looking at.
+        const shownProvider = els.provider.value;
+        const shownKey = (els.apiKey.value || '').trim();
+        const provider = isProviderShownInDrawer(shownProvider) ? shownProvider : state.settings.provider;
+        els.modelHint.textContent = 'Retrying…';
+        setModelRetryVisible(false);
+        await fetchModels(provider, shownKey || currentApiKey());
+      });
+    }
 
     els.revealBtn.addEventListener('click', () => {
       els.apiKey.type = els.apiKey.type === 'password' ? 'text' : 'password';
@@ -6528,6 +7563,7 @@
       els.mcpStatus.textContent = 'Reconnecting MCP servers…';
       const mcpRes = await window.KyotoMCP.init(mcpServers);
       state.mcpTools = mcpRes.tools;
+      surfaceMcpErrors(mcpRes);
       els.mcpStatus.textContent = `MCP: ${mcpRes.connected}/${mcpRes.total} servers, ${state.mcpTools.length} tools`;
       els.mcpStatus.className = `status ${mcpRes.connected ? 'ok' : ''}`;
 
@@ -6536,10 +7572,31 @@
       fetchAllProviderModels({ background: true }).catch(() => {});
 
       updateModelLine();
+      markDrawerDirty(false);
       els.saveStatus.textContent = 'Saved.';
       els.saveStatus.className = 'status ok';
       setTimeout(() => { els.saveStatus.textContent = ''; closeDrawer(); }, 600);
     });
+
+    // Follow the tail only while the user is at the tail; otherwise offer a pill.
+    els.chat.addEventListener('scroll', () => {
+      _stickToBottom = isNearBottom();
+      updateJumpLatest();
+    }, { passive: true });
+    const queueBar = document.getElementById('queueBar');
+    if (queueBar) {
+      queueBar.addEventListener('click', (e) => {
+        const btn = e.target.closest('.q-cancel');
+        if (btn) cancelQueued(Number(btn.dataset.qi));
+      });
+    }
+    if (els.jumpLatestBtn) {
+      els.jumpLatestBtn.addEventListener('click', () => {
+        scrollToBottom(true);
+        announce('Jumped to the latest message.');
+        try { els.input?.focus({ preventScroll: true }); } catch { els.input?.focus?.(); }
+      });
+    }
 
     els.chat.addEventListener('click', async (e) => {
       const chip = e.target.closest('.chip');
@@ -6551,6 +7608,35 @@
           copy.textContent = 'Copied';
           setTimeout(() => { copy.textContent = orig; }, 1200);
         });
+        return;
+      }
+      const retryBtn = e.target.closest('.retry-btn');
+      if (retryBtn) {
+        retryBtn.disabled = true;
+        try { await retryLastTurn(); } finally { retryBtn.disabled = false; }
+        return;
+      }
+      const msgCopy = e.target.closest('.copy-msg-btn');
+      if (msgCopy) {
+        const wrap = msgCopy.closest('.msg');
+        // innerText needs layout (and is absent in non-browser DOMs); textContent
+        // always works, so prefer the former but never depend on it.
+        const bodyEl = wrap?.querySelector('.msg-body');
+        const text = String(bodyEl?.innerText ?? bodyEl?.textContent ?? '').trim();
+        if (text) {
+          try {
+            await navigator.clipboard.writeText(text);
+            const orig = msgCopy.textContent;
+            msgCopy.textContent = '✓';
+            msgCopy.classList.add('copied');
+            announce('Message copied.');
+            setTimeout(() => { msgCopy.textContent = orig; msgCopy.classList.remove('copied'); }, 1200);
+          } catch (err) {
+            announce('Copy failed.');
+            msgCopy.textContent = '✕';
+            setTimeout(() => { msgCopy.textContent = '⧉'; }, 1200);
+          }
+        }
         return;
       }
       const editBtn = e.target.closest('.edit-btn');
@@ -6655,14 +7741,24 @@
 
     chrome.tabs.onActivated.addListener(async ({ tabId }) => {
       if (state.pinnedToSession) { refreshPageContext(); return; }
+      // Rapid tab switching raced here: the handler awaits the session load, so
+      // whichever load finished LAST won, not the tab you ended up on — the panel
+      // then showed a different tab's conversation, which is exactly the "tab
+      // drift" this panel exists to avoid. Newest activation is authoritative.
+      const token = ++_tabSwitchToken;
       const sid = state.tabToSession[tabId];
       let session;
       if (sid) {
         session = await loadFullSession(sid);
+        if (token !== _tabSwitchToken) return;
         if (!session) session = await createSession(await getTab(tabId));
       } else {
         session = await createSession(await getTab(tabId));
       }
+      // Superseded while we were loading, or the user pinned the panel in the
+      // meantime — either way this switch must not be applied.
+      if (token !== _tabSwitchToken) return;
+      if (state.pinnedToSession) return;
       await switchToSession(session);
     });
     // Refresh page context when the user-visible tab navigates. The
@@ -6742,6 +7838,7 @@
     action('routine-save', 'Save recording as routine', 'replay without a model', () => { closePalette(); saveRoutineFromCapture(); });
     action('routine-list', 'List routines', '', () => { closePalette(); listRoutines(); });
     action('stop', 'Stop the running turn', '', () => { closePalette(); els.stopBtn?.click(); });
+    action('shortcuts', 'Keyboard shortcuts', 'press ? anywhere', () => { closePalette(); openShortcuts(); });
 
     // Slash commands (built-in + user-defined).
     for (const [cmd, tmpl] of Object.entries(BUILTIN_SLASH)) {
@@ -6764,8 +7861,7 @@
         hint: sess.url || '', source: 'session',
         run: async () => {
           closePalette();
-          const full = await loadFullSession(sess.id);
-          if (full) switchToSession(full, { fromUser: true });
+          await openSessionById(sess.id);
         }
       });
     }
@@ -6811,15 +7907,22 @@
     if (!paletteEl.overlay || !KPAL.rank) return;
     paletteState.open = true;
     paletteState.index = 0;
+    dismissComposerOverlays();
     paletteEl.overlay.classList.remove('hidden');
+    refreshModalInert();
+    setComboboxExpanded(paletteEl.input, true);
     paletteEl.input.value = '';
     renderPalette();
     paletteEl.input.focus();
   }
-  function closePalette() {
+  function closePalette({ restoreFocus = false } = {}) {
     if (!paletteEl.overlay) return;
     paletteState.open = false;
     paletteEl.overlay.classList.add('hidden');
+    setComboboxExpanded(paletteEl.input, false);
+    paletteEl.input.removeAttribute('aria-activedescendant');
+    refreshModalInert();
+    if (restoreFocus) { try { els.input?.focus(); } catch { /* non-fatal */ } }
   }
   function renderPalette() {
     if (!paletteEl.list) return;
@@ -6847,9 +7950,9 @@
         const idx = row++;
         const active = idx === paletteState.index ? ' active' : '';
         html.push(
-          `<div class="palette-item${active}" data-idx="${idx}">` +
+          `<div class="palette-item${active}" id="palette-item-${idx}" role="option" aria-selected="${active ? 'true' : 'false'}" data-idx="${idx}">` +
           `<span class="pi-label">${esc(item.label)}</span>` +
-          (item.hint ? `<span class="pi-hint">${esc(item.hint)}</span>` : '') +
+          (item.hint ? `<span class="pi-hint" title="${esc(item.hint)}">${esc(item.hint)}</span>` : '') +
           `</div>`
         );
       }
@@ -6857,6 +7960,9 @@
     paletteEl.list.innerHTML = html.join('');
     const activeEl = paletteEl.list.querySelector('.palette-item.active');
     if (activeEl && activeEl.scrollIntoView) activeEl.scrollIntoView({ block: 'nearest' });
+    const rows = [...paletteEl.list.querySelectorAll('.palette-item')];
+    const activeIdx = rows.findIndex(el => el.classList.contains('active'));
+    syncActiveDescendant(paletteEl.input, rows, activeIdx);
   }
   function runPaletteIndex(i) {
     const item = paletteState.filtered[i];
@@ -6874,7 +7980,7 @@
       const mod = e.ctrlKey || e.metaKey;
       if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); paletteState.open ? closePalette() : openPalette(); return; }
       if (!paletteState.open) return;
-      if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+      if (e.key === 'Escape') { e.preventDefault(); closePalette({ restoreFocus: true }); }
       else if (e.key === 'ArrowDown') { e.preventDefault(); paletteState.index = KPAL.moveIndex(paletteState.index, 1, paletteState.filtered.length); renderPalette(); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); paletteState.index = KPAL.moveIndex(paletteState.index, -1, paletteState.filtered.length); renderPalette(); }
       else if (e.key === 'Enter') { e.preventDefault(); runPaletteIndex(paletteState.index); }
@@ -6885,6 +7991,203 @@
       if (row) runPaletteIndex(Number(row.dataset.idx));
     });
     paletteEl.overlay.addEventListener('click', (e) => { if (e.target === paletteEl.overlay) closePalette(); });
+  }
+
+  // ── Combobox wiring ──────────────────────────────────
+  // The pickers have a visually highlighted row, but nothing told assistive tech
+  // which row that was: `aria-activedescendant` is what connects the focused
+  // input to the option the keyboard cursor is sitting on.
+  function setComboboxExpanded(input, expanded) {
+    if (input) input.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  }
+
+  /** Point the input at whichever option the cursor is on. */
+  function syncActiveDescendant(input, optionEls, index) {
+    if (!input) return;
+    const el = optionEls[index];
+    if (!el) { input.removeAttribute('aria-activedescendant'); return; }
+    if (!el.id) el.id = `${input.id}-opt-${index}`;
+    input.setAttribute('aria-activedescendant', el.id);
+  }
+
+  /** Close transient things that hang off the composer (slash autocomplete). */
+  function dismissComposerOverlays() {
+    try {
+      els.slashPalette?.classList.add('hidden');
+      els.input?.setAttribute('aria-expanded', 'false');
+      els.input?.removeAttribute('aria-activedescendant');
+    } catch { /* non-fatal */ }
+  }
+
+  // ── Modal focus containment ──────────────────────────
+  // The drawers and dialogs declare aria-modal="true", but without trapping
+  // focus Tab walks straight out into the panel behind the scrim: a keyboard
+  // user ends up operating controls they cannot see. `inert` also stops the
+  // obscured background from being clicked or reached at all.
+  // Ordered by stacking order (highest z-index first) so the topmost dialog is
+  // the one that traps focus when several are open.
+  const MODAL_SELECTORS = ['#shortcutsOverlay', '#paletteOverlay', '#skillsDrawer', '#drawer'];
+  // Scrims must stay interactive: clicking one is how the user dismisses the
+  // dialog, and `inert` would swallow that click.
+  const SCRIM_IDS = new Set(['overlay', 'skillsOverlay']);
+  const FOCUSABLE_SELECTOR = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  function openModalEl() {
+    for (const sel of MODAL_SELECTORS) {
+      const el = document.querySelector(sel);
+      if (el && !el.classList.contains('hidden')) return el;
+    }
+    return null;
+  }
+
+  /** Focusable, visible-ish descendants in DOM order. */
+  function focusableWithin(root) {
+    return [...root.querySelectorAll(FOCUSABLE_SELECTOR)].filter(el => {
+      if (el.hidden) return false;
+      if (el.closest('[hidden]')) return false;
+      // `offsetParent` is null for display:none, but also for position:fixed in
+      // some DOMs — treat it as advisory rather than a hard requirement.
+      return true;
+    });
+  }
+
+  /** Everything except the open modal becomes inert (unfocusable + unclickable). */
+  function setBackgroundInert(modal) {
+    for (const el of document.body.children) {
+      if (el === modal) continue;
+      if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+      if (SCRIM_IDS.has(el.id)) continue;           // keep click-to-dismiss working
+      const shouldBeInert = !!modal && !el.contains(modal);
+      if (!shouldBeInert) continue;
+      try { el.inert = true; } catch { el.setAttribute('inert', ''); }
+    }
+  }
+
+  function clearBackgroundInert() {
+    for (const el of document.body.children) {
+      try { el.inert = false; } catch { /* ignore */ }
+      el.removeAttribute?.('inert');
+    }
+  }
+
+  /** Re-evaluate inertness for whatever modal is currently open. */
+  function refreshModalInert() {
+    const modal = openModalEl();
+    if (modal) setBackgroundInert(modal);
+    else clearBackgroundInert();
+  }
+
+  function wireModalFocusTrap() {
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Tab') return;
+      const modal = openModalEl();
+      if (!modal) return;
+      const items = focusableWithin(modal);
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      // Focus outside the modal (e.g. it was just opened): pull it back in.
+      if (!modal.contains(active)) { e.preventDefault(); first.focus(); return; }
+      if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    });
+  }
+
+  // ── Keyboard shortcuts help ──────────────────────────
+  // The panel had shortcuts (palette, pickers, slash completion) and advertised
+  // none of them. `?` opens a list of the ones that actually exist.
+  let _focusBeforeShortcuts = null;
+
+  function shortcutsOpen() {
+    const el = document.getElementById('shortcutsOverlay');
+    return !!el && !el.classList.contains('hidden');
+  }
+
+  function openShortcuts() {
+    const el = document.getElementById('shortcutsOverlay');
+    if (!el || shortcutsOpen()) return;
+    _focusBeforeShortcuts = document.activeElement;
+    dismissComposerOverlays();
+    el.classList.remove('hidden');
+    refreshModalInert();
+    // Move focus into the dialog, as with the settings drawer.
+    try { document.getElementById('closeShortcutsBtn')?.focus(); } catch { /* non-fatal */ }
+    announce('Keyboard shortcuts opened.');
+  }
+
+  function closeShortcuts() {
+    const el = document.getElementById('shortcutsOverlay');
+    if (!el || !shortcutsOpen()) return;
+    el.classList.add('hidden');
+    refreshModalInert();
+    const prev = _focusBeforeShortcuts;
+    _focusBeforeShortcuts = null;
+    if (prev && typeof prev.focus === 'function' && document.contains(prev)) prev.focus();
+    else { try { els.input?.focus(); } catch { /* non-fatal */ } }
+  }
+
+  /** True when the keystroke belongs to a text field, not the panel. */
+  function isTypingTarget(target) {
+    if (!target) return false;
+    const tag = (target.tagName || '').toUpperCase();
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!target.isContentEditable;
+  }
+
+  function wireShortcutsHelp() {
+    const overlay = document.getElementById('shortcutsOverlay');
+    if (overlay) {
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) closeShortcuts(); });
+    }
+    const closeBtn = document.getElementById('closeShortcutsBtn');
+    if (closeBtn) closeBtn.addEventListener('click', closeShortcuts);
+
+    document.addEventListener('keydown', (e) => {
+      // `?` must not fire while the user is typing a question mark in the
+      // composer — that is the whole reason this guard exists.
+      if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingTarget(e.target)) {
+        e.preventDefault();
+        shortcutsOpen() ? closeShortcuts() : openShortcuts();
+        return;
+      }
+      if (e.key === 'Escape' && shortcutsOpen()) { e.preventDefault(); closeShortcuts(); }
+    });
+  }
+
+  // ── Escape dismisses overlays ────────────────────────
+  // The settings and skills drawers are modal (aria-modal) and previously could
+  // only be closed with the mouse or by clicking the scrim.
+  function wireOverlayDismissal() {
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || paletteState.open) return;   // palette handles its own Esc
+      if (shortcutsOpen()) return;                          // handled by wireShortcutsHelp
+      if (els.skillsDrawer && !els.skillsDrawer.classList.contains('hidden')) {
+        e.preventDefault();
+        closeSkillsManager();
+        return;
+      }
+      if (els.drawer && !els.drawer.classList.contains('hidden')) {
+        e.preventDefault();
+        closeDrawer();
+        return;
+      }
+      if (els.modelPopover && !els.modelPopover.classList.contains('hidden')) {
+        e.preventDefault();
+        els.modelPopover.classList.add('hidden');
+        els.modelBtn?.focus?.();
+        return;
+      }
+      // The session picker was the one overlay Esc did not close, even though the
+      // shortcuts help promises "Esc — close a dialog, popover or the palette".
+      if (els.sessionsPopover && !els.sessionsPopover.classList.contains('hidden')) {
+        e.preventDefault();
+        closeSessionsPopover();
+        els.sessionsBtn?.focus?.();
+      }
+    });
   }
 
   // ── Voice: speech-to-text input + read-aloud ─────────
@@ -6917,6 +8220,7 @@
   function applySpeechState(next) {
     speechState = next;
     if (micBtn) micBtn.classList.toggle('listening', !!next.listening);
+    if (micBtn) micBtn.setAttribute('aria-pressed', next.listening ? 'true' : 'false');
     if (micBtn) micBtn.title = next.listening ? 'Listening… click to stop' : 'Voice input (speech-to-text)';
     if (next.error) {
       addMessage('assistant', `_Voice input error: ${next.error}_`, { error: true });
@@ -7410,31 +8714,72 @@
   }
 
   // ── Boot ─────────────────────────────────────────────
+  /** Run a boot step, falling back instead of aborting the whole start-up. */
+  async function bootStep(label, fn, fallback) {
+    try {
+      return await fn();
+    } catch (err) {
+      console.error(`[Kyoto] boot step failed (${label}):`, err);
+      warnPersistFailure(`Kyoto could not ${label}`, err, { sticky: true });
+      return fallback;
+    }
+  }
+
   (async () => {
-    await loadSettings();
-    await loadSpendTotal();
+    // The boot sequence used to be a bare async IIFE: any rejection (a failed
+    // storage read, a tabs.query error) aborted the rest of start-up and left a
+    // half-initialised panel — no settings, no session, no explanation. Each
+    // critical step now degrades instead, and anything that does fail is
+    // reported through the persistent storage bar.
+    await bootStep('read your settings', loadSettings, null);
+    if (!state.settings) {
+      state.settings = { ...defaults };
+      warnPersistFailure('Kyoto started with default settings (your saved settings could not be read)', new Error('storage'), { sticky: true });
+    }
+    await bootStep('restore unsent drafts', loadDrafts, null);
+    await bootStep('read the spend total', loadSpendTotal, null);
     wirePalette();
     wireVoice();
+    wireOverlayDismissal();
+    wireShortcutsHelp();
+    wireModalFocusTrap();
+    renderPersistWarn();
+    document.querySelector('#persistWarnBar .pw-dismiss')?.addEventListener('click', () => {
+      // Dismissing acknowledges everything currently shown.
+      _storageNotice = null;
+      const bar = document.getElementById('persistWarnBar');
+      if (bar) bar.classList.add('hidden');
+    });
+    wireDrawerSections();
+    wireDrawerDirtyTracking();
+    refreshSectionCollapse();
     await openaiOauthLoad();
     applyAppearance();
     compileCustomTools();
     // Kick off models.dev registry load (cached, non-blocking after first run)
     if (window.KyotoModels) window.KyotoModels.init().catch(() => {});
-    state.sessionsIndex = await loadSessionsIndex();
+    state.sessionsIndex = (await bootStep('read your conversations', loadSessionsIndex, [])) || [];
     state.tabToSession = {};
     state.sessionsIndex.forEach(s => { if (s.tabId != null) state.tabToSession[s.tabId] = s.id; });
 
     // Load memory index so the system prompt can list available memories
-    const memGot = await chrome.storage.local.get('kyoto_memory_index');
-    state.memoryIndex = memGot.kyoto_memory_index || [];
+    const memGot = await bootStep('read your saved memories',
+      () => chrome.storage.local.get('kyoto_memory_index'), null);
+    state.memoryIndex = memGot?.kyoto_memory_index || [];
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    await bootStep('tidy closed-tab bindings', pruneStaleTabBindings, 0);
+    const tabArr = await bootStep('read the current tab',
+      () => chrome.tabs.query({ active: true, currentWindow: true }), []);
+    const tab = tabArr?.[0] || null;
     let session = null;
     if (tab) {
       const sid = state.tabToSession[tab.id];
       if (sid) session = await loadFullSession(sid);
     }
-    if (!session) session = await createSession(tab);
+    // A session must exist for the panel to be usable at all, even if storage
+    // refused to persist it.
+    if (!session) session = await bootStep('start a conversation', () => createSession(tab), null);
+    if (!session) session = createSessionObject(tab);
     state.activeSession = session;
 
     reflectProvider(state.settings.provider);
@@ -7450,6 +8795,7 @@
     if (window.KyotoMCP && (state.settings.mcpServers || []).length) {
       const mcpRes = await window.KyotoMCP.init(state.settings.mcpServers);
       state.mcpTools = mcpRes.tools;
+      surfaceMcpErrors(mcpRes);
     }
 
     // Preload models for every provider that has a key — so the header
@@ -7457,6 +8803,17 @@
     // providers in Settings first.
     fetchAllProviderModels({ background: true }).catch(() => {});
 
+    // After the transcript render, so the notice is not wiped by it.
+    surfaceCronHealth().catch(() => {});
+
     els.input.focus();
-  })();
+  })().catch((err) => {
+    // Last resort: never die silently. The panel may be partially usable, so
+    // say what happened rather than leaving an empty window.
+    console.error('[Kyoto] start-up failed:', err);
+    try {
+      warnPersistFailure('Kyoto could not finish starting', err, { sticky: true });
+      announce('Kyoto failed to start. Some features may not work.');
+    } catch { /* nothing more we can do */ }
+  });
 })();

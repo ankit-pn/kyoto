@@ -492,8 +492,20 @@ const HANDLERS = {
   },
 
   async REQUEST_OPTIONAL_PERMISSION({ permissions = [], origins = [] } = {}) {
-    const granted = await chrome.permissions.request({ permissions, origins });
-    return { granted };
+    // This build declares every permission it uses in `permissions` and declares
+    // NO optional_permissions, and Chrome can only grant permissions listed there.
+    // Calling request() for anything else throws a raw "Only permissions specified
+    // in the manifest may be requested" error, which is useless to a model and
+    // implied a capability that did not exist — so report reality instead.
+    const has = await chrome.permissions.contains({ permissions, origins });
+    if (has) return { granted: true, alreadyGranted: true };
+    return {
+      granted: false,
+      error: 'Runtime permission requests are unavailable in this build: it declares ' +
+        'its permissions up front rather than as optional ones, so nothing can be ' +
+        'requested at runtime. The permission you asked for is not granted; use a ' +
+        'capability the extension already has, or ask the user to enable it in Chrome.'
+    };
   },
   async CHECK_PERMISSION({ permissions = [], origins = [] } = {}) {
     const has = await chrome.permissions.contains({ permissions, origins });

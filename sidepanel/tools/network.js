@@ -297,7 +297,9 @@
   T({
     name: 'permission_request',
     group: 'misc',
-    description: 'Request an optional permission at runtime (e.g. "debugger"). Returns granted=true/false.',
+    description: 'Check whether a permission is already granted. NOTE: this build declares its ' +
+      'permissions up front and has no optional_permissions, so nothing can be granted at runtime — ' +
+      'this only ever reports what is already available. Do not call it hoping to gain a new capability.',
     parameters: OBJ({ permissions: { type: 'array', items: STR }, origins: { type: 'array', items: STR } }),
     handler: async (args = {}) => bg('REQUEST_OPTIONAL_PERMISSION', args)
   });

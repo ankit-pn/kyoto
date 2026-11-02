@@ -39,7 +39,22 @@ function makeChrome() {
       for (const k of (Array.isArray(keys) ? keys : [keys])) store.delete(k);
     },
     async clear() { calls.push({ ns: 'storage', method: 'clear', args: [] }); store.clear(); },
+    // Chrome reports JSON-ish byte size; exactness is not what matters here.
+    async getBytesInUse(keys) {
+      calls.push({ ns: 'storage', method: 'getBytesInUse', args: [keys] });
+      const list = keys == null ? [...store.keys()]
+        : (Array.isArray(keys) ? keys : [keys]);
+      let total = 0;
+      for (const k of list) if (store.has(k)) total += JSON.stringify(store.get(k)).length;
+      return total;
+    },
     onChanged: { addListener: record('storage', 'onChanged.addListener'), removeListener() {} }
+  };
+
+  const tabEvents = { onCreated: [], onUpdated: [], onRemoved: [], onActivated: [] };
+  const removeFrom = (arr, fn) => {
+    const i = arr.indexOf(fn);
+    if (i !== -1) arr.splice(i, 1);
   };
 
   // ── tabs: one plausible tab, ids 1..n ──
@@ -76,10 +91,12 @@ function makeChrome() {
     },
     async group(opts) { calls.push({ ns: 'tabs', method: 'group', args: [opts] }); return 7; },
     async ungroup(ids) { calls.push({ ns: 'tabs', method: 'ungroup', args: [ids] }); },
-    onCreated: { addListener: record('tabs', 'onCreated') },
-    onUpdated: { addListener: record('tabs', 'onUpdated'), removeListener() {} },
-    onRemoved: { addListener: record('tabs', 'onRemoved') },
-    onActivated: { addListener: record('tabs', 'onActivated') }
+    // Tab events keep their listeners so tests can fire them (rapid tab
+    // switching is a real user pattern and its ordering matters).
+    onCreated: { addListener: (f) => { calls.push({ ns: 'tabs', method: 'onCreated.addListener', args: [] }); tabEvents.onCreated.push(f); } },
+    onUpdated: { addListener: (f) => { calls.push({ ns: 'tabs', method: 'onUpdated.addListener', args: [] }); tabEvents.onUpdated.push(f); }, removeListener(f) { removeFrom(tabEvents.onUpdated, f); } },
+    onRemoved: { addListener: (f) => { calls.push({ ns: 'tabs', method: 'onRemoved.addListener', args: [] }); tabEvents.onRemoved.push(f); } },
+    onActivated: { addListener: (f) => { calls.push({ ns: 'tabs', method: 'onActivated.addListener', args: [] }); tabEvents.onActivated.push(f); } }
   };
 
   // ── windows ──
@@ -138,6 +155,7 @@ function makeChrome() {
   const chromeStub = {
     __calls: calls,
     __listeners: listeners,
+    __tabEvents: tabEvents,
     __store: store,
     runtime,
     storage: { local: storageArea, session: { ...storageArea, get: storageArea.get, set: storageArea.set }, sync: storageArea, onChanged: storageArea.onChanged },

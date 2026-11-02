@@ -9,27 +9,27 @@
 <body>
   <header class="hdr">
     <div class="hdr-l">
-      <div class="brand">Kyoto</div>
+      <h1 class="brand">Kyoto</h1>
       <button class="model-line" id="modelBtn" type="button" title="Switch model">
         <span id="modelLineText">—</span>
         <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
     </div>
     <div class="hdr-r">
-      <button class="ibtn capture-btn" id="captureBtn" title="Record a skill — capture user actions on this page and save them as a reusable playbook">
+      <button class="ibtn capture-btn" id="captureBtn" title="Record a skill — capture user actions on this page and save them as a reusable playbook" aria-label="Record page actions" aria-pressed="false">
         <span class="capture-dot"></span>
         <span class="capture-count" id="captureCount"></span>
       </button>
-      <button class="ibtn" id="sessionsBtn" title="Sessions">
+      <button class="ibtn" id="sessionsBtn" title="Sessions" aria-label="Conversation history">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
       </button>
-      <button class="ibtn" id="popOutBtn" title="Open in a standalone window">
+      <button class="ibtn" id="popOutBtn" title="Open in a standalone window" aria-label="Open in a separate window">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
       </button>
-      <button class="ibtn" id="newChatBtn" title="New chat">
+      <button class="ibtn" id="newChatBtn" title="New chat" aria-label="New chat">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
       </button>
-      <button class="ibtn" id="settingsBtn" title="Settings">
+      <button class="ibtn" id="settingsBtn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
     </div>
@@ -38,17 +38,22 @@
   <div class="ctxbar">
     <span class="dot" id="ctxDot"></span>
     <span class="ctx-txt" id="ctxTxt">No page</span>
-    <button class="ctx-reload" id="reloadCtxBtn" title="Re-read page">
+    <button class="ctx-reload" id="reloadCtxBtn" title="Re-read page" aria-label="Re-read the current page">
       <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
     </button>
   </div>
 
   <div id="goalBar" class="goal-bar hidden" aria-live="polite"></div>
 
-  <main class="chat" id="chat">
+  <!-- Screen-reader announcements (turn started/finished, errors). Visually
+       hidden; deliberately coarse so streaming does not flood the reader. -->
+  <div id="srStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <main class="chat" id="chat" aria-label="Conversation">
     <div class="empty" id="empty">
       <h2>Your browser, agent-controlled</h2>
       <p>Ask in natural language. Kyoto can read DOM, inspect network, dump cookies, run JS, click buttons, capture screenshots, search history, and call out to MCP servers.</p>
+      <p class="empty-hint">Press <kbd>?</kbd> for keyboard shortcuts · <kbd>Ctrl</kbd>+<kbd>K</kbd> for the command palette</p>
       <div class="chips">
         <button class="chip" data-prompt="Summarize this page in 5 bullet points.">Summarize page</button>
         <button class="chip" data-prompt="List all cookies for this site and tell me which ones look important for the session (likely auth/session tokens).">Analyze cookies</button>
@@ -61,22 +66,39 @@
   </main>
 
   <footer class="composer">
+    <!-- Shown when the user has scrolled up out of the streaming tail, so new
+         output no longer yanks them away from what they are reading. -->
+    <button id="jumpLatestBtn" class="jump-latest hidden" type="button" aria-label="Jump to the latest message">↓ Latest</button>
+    <!-- Follow-ups typed while a reply is still streaming. Without this, Enter
+         mid-stream started a SECOND concurrent loop on the same session. -->
+    <div id="persistWarnBar" class="persist-warn hidden" role="alert">
+      <span class="pw-text"></span>
+      <button class="pw-dismiss" type="button" aria-label="Dismiss the storage warning">×</button>
+    </div>
+    <div id="queueBar" class="queue-bar hidden" aria-live="polite"></div>
     <div class="composer-box">
       <!-- Slash command palette. Anchored to the composer box so it
            always floats just above the input regardless of textarea
            height. -->
       <div id="slashPalette" class="slash-palette hidden" role="listbox" aria-label="Slash commands"></div>
-      <textarea id="input" rows="1" placeholder="Ask about this page… (type / for commands)"></textarea>
+      <textarea id="input" rows="1" placeholder="Ask about this page… (type / for commands)" aria-controls="slashPalette" aria-expanded="false" aria-autocomplete="list" aria-label="Message"></textarea>
       <div class="composer-row">
         <label class="ctx-toggle" title="Include page content as context">
           <input type="checkbox" id="useContext" checked />
           <span>Page context</span>
         </label>
-                <button id="micBtn" class="btn-mini hidden" type="button" title="Voice input (speech-to-text)">🎤</button>
-        <button id="visionBtn" class="btn-mini btn-vision" type="button" title="Attach a screenshot of the current tab with the next message (requires a vision-capable model)">📸</button>
+                <button id="micBtn" class="btn-mini hidden" type="button" title="Voice input (speech-to-text)" aria-label="Voice input" aria-pressed="false">🎤</button>
+        <button id="visionBtn" class="btn-mini btn-vision" type="button" title="Attach a screenshot of the current tab with the next message (requires a vision-capable model)" aria-label="Attach a screenshot to the next message" aria-pressed="false">📸</button>
+        <!-- Discoverable entry point to the command palette. Until now openPalette()
+             had exactly one caller: the Ctrl+K keydown handler. A mouse user had no
+             way to reach the palette — 60 actions, sessions, models, tools — and so
+             could not reach the keyboard-shortcuts help either, since that is an
+             action inside the palette. The shortcut was undiscoverable without
+             already knowing it. -->
+        <button id="paletteBtn" class="btn-mini" type="button" title="Command palette (Ctrl+K)" aria-label="Open the command palette" aria-keyshortcuts="Control+K">⌘K</button>
         <div class="composer-spacer"></div>
         <button id="stopBtn" class="btn-stop hidden" title="Stop generating">Stop</button>
-        <button id="sendBtn" class="btn-send" title="Send (Enter)">
+        <button id="sendBtn" class="btn-send" title="Send (Enter)" aria-label="Send message">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
         </button>
       </div>
@@ -84,36 +106,39 @@
   </footer>
 
   <!-- Inline model picker popover -->
-  <div class="popover hidden" id="modelPopover">
+  <div class="popover hidden" id="modelPopover" aria-keyshortcuts="Escape">
     <div class="popover-hdr">
-      <input type="text" id="popoverSearch" placeholder="Search models…" autocomplete="off" />
+      <input type="text" id="popoverSearch" placeholder="Search models…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="popoverList" aria-autocomplete="list" aria-label="Search models" />
     </div>
-    <div class="popover-body" id="popoverList">
+    <div class="popover-body" id="popoverList" role="listbox" aria-label="Models">
       <p class="popover-empty">No models loaded.</p>
     </div>
   </div>
 
   <!-- Sessions popover -->
-  <div class="popover hidden popover-right" id="sessionsPopover">
+  <div class="popover hidden popover-right" id="sessionsPopover" aria-keyshortcuts="Escape">
     <div class="popover-hdr">
-      <input type="text" id="sessionsSearch" placeholder="Search sessions…" autocomplete="off" />
+      <input type="text" id="sessionsSearch" placeholder="Search sessions…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="sessionsList" aria-autocomplete="list" aria-label="Search conversations" />
     </div>
-    <div class="popover-body" id="sessionsList">
+    <div class="popover-body" id="sessionsList" role="list" aria-label="Conversations">
       <p class="popover-empty">No sessions yet.</p>
     </div>
   </div>
 
   <!-- Settings drawer -->
   <div class="overlay hidden" id="overlay"></div>
-  <aside class="drawer hidden" id="drawer">
+  <aside class="drawer hidden" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-keyshortcuts="Escape">
     <header class="drawer-hdr">
-      <h2>Settings</h2>
-      <button class="ibtn" id="closeDrawerBtn" title="Close">
+      <h2 id="drawerTitle">Settings</h2>
+      <button class="ibtn" id="closeDrawerBtn" title="Close" aria-label="Close settings">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </header>
 
     <div class="drawer-body">
+      <!-- Built at runtime from the .drawer-section headings: 15 sections and
+           41 fields is a long scroll, so give the form a sticky index. -->
+      <nav id="drawerNav" class="drawer-nav" aria-label="Jump to a settings section"></nav>
       <div class="field">
         <label>Provider</label>
         <select id="provider">
@@ -129,7 +154,7 @@
         <label id="keyLabel">OpenRouter API key</label>
         <div class="input-wrap">
           <input type="password" id="apiKey" placeholder="sk-or-v1-…" autocomplete="off" />
-          <button class="reveal" id="revealBtn" type="button" title="Show/hide">
+          <button class="reveal" id="revealBtn" type="button" title="Show/hide" aria-label="Show or hide the API key">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
         </div>
@@ -145,6 +170,9 @@
         </div>
         <select id="model" size="8"></select>
         <p class="hint" id="modelHint">Enter an API key to load models.</p>
+        <!-- Shown only after a failed catalogue fetch: previously the only way
+             to retry was to switch provider back and forth. -->
+        <button class="btn-mini hidden" id="modelRetryBtn" type="button">Retry loading models</button>
       </div>
 
       <div class="field">
@@ -355,7 +383,7 @@
         <div class="perm-row">
           <span>Debugger (CDP / response bodies)</span>
           <span id="debuggerStatus" class="permstatus">Unknown</span>
-          <button class="btn-mini" id="openExtPageBtn" type="button" title="Open chrome://extensions for this extension">⤴</button>
+          <button class="btn-mini" id="openExtPageBtn" type="button" title="Open chrome://extensions for this extension" aria-label="Open the extensions page">⤴</button>
         </div>
         <p class="hint">Granted at install time. Required for response-body capture, network modification, and full DevTools control via <code>debugger_attach</code> / <code>debugger_send</code>. Chrome shows a yellow banner on the tab while attached. If you see "Not granted", reload the extension on <code>chrome://extensions</code> (the ⤴ button takes you there).</p>
       </div>
@@ -367,6 +395,13 @@
         <button class="btn-mini" id="cronRefreshBtn" type="button">Refresh</button>
       </div>
       <div id="cronList" class="cron-list"></div>
+
+      <h3 class="drawer-section">Storage</h3>
+      <p class="hint">Conversations and settings live in <code>chrome.storage.local</code>, which has a fixed quota. When it fills, saving fails and unsaved turns are lost — so the usage is shown here rather than only appearing as an error.</p>
+      <div class="mcp-actions">
+        <span id="storageSummary" class="status">—</span>
+        <button class="btn-mini" id="storageRefreshBtn" type="button">Refresh</button>
+      </div>
 
       <h3 class="drawer-section">Workspace (virtual files)</h3>
       <p class="hint">A scratch filesystem the agent uses to store scraped data outside the conversation context (lives in IndexedDB — GB-scale quota, survives reloads). Tools: <code>fs_write / fs_read / fs_append / fs_list / fs_zip</code>. Slash: <code>/ls</code>, <code>/zip</code>, <code>/clearfs</code>.</p>
@@ -402,7 +437,7 @@
         <label>Your extension ID</label>
         <div class="input-wrap">
           <input type="text" id="shellExtId" readonly />
-          <button class="reveal" id="shellCopyIdBtn" type="button" title="Copy">⧉</button>
+          <button class="reveal" id="shellCopyIdBtn" type="button" title="Copy" aria-label="Copy the bridge id">⧉</button>
         </div>
       </div>
       <div class="field">
@@ -412,7 +447,7 @@
           <button class="btn-mini install-copy" id="shellInstallCopyBtn" type="button" title="Copy to clipboard">Copy</button>
         </div>
         <p class="hint">
-          <a href="#" id="shellInstallToggleAltBtn">Show command for a different OS</a>
+          <button type="button" class="link-btn" id="shellInstallToggleAltBtn" aria-expanded="false" aria-controls="shellInstallAltWrap">Show command for a different OS</button>
         </p>
       </div>
       <div class="field hidden" id="shellInstallAltWrap">
@@ -525,24 +560,30 @@
       <div class="mcp-actions">
         <button class="btn-mini" id="exportSettingsBtn" type="button">Export settings</button>
         <button class="btn-mini" id="importSettingsBtn" type="button">Import settings</button>
-        <input type="file" id="importSettingsInput" accept="application/json" style="display:none" />
+        <input type="file" id="importSettingsInput" accept="application/json" style="display:none" aria-label="Import settings file" />
         <p class="status" id="backupStatus"></p>
       </div>
       <p class="hint">Exports a JSON file with provider keys, custom providers, MCP servers, slash commands, prefs. Import merges keys back. Sessions and memories are NOT included.</p>
 
-      <button class="btn-primary" id="saveBtn">Save</button>
+    </div>
+
+    <!-- Pinned: Save used to sit at the very end of a 15-section, 41-field
+         scroll, so saving a provider or model change meant scrolling through
+         the whole drawer. -->
+    <div class="drawer-footer">
       <p class="status" id="saveStatus"></p>
+      <button class="btn-primary" id="saveBtn" type="button">Save</button>
     </div>
   </aside>
 
   <!-- Skills manager (opens over the Settings drawer; own overlay) -->
   <div class="overlay hidden" id="skillsOverlay"></div>
-  <aside class="drawer skills-drawer hidden" id="skillsDrawer">
+  <aside class="drawer skills-drawer hidden" id="skillsDrawer" role="dialog" aria-modal="true" aria-labelledby="skillsDrawerTitle" aria-keyshortcuts="Escape">
     <header class="drawer-hdr">
-      <h2>Skills hub</h2>
+      <h2 id="skillsDrawerTitle">Skills hub</h2>
       <div class="skills-hdr-actions">
         <button class="btn-mini" id="skillsRefreshBtn" type="button" title="Refresh from hub">Refresh</button>
-        <button class="ibtn" id="closeSkillsDrawerBtn" title="Close">
+        <button class="ibtn" id="closeSkillsDrawerBtn" title="Close" aria-label="Close skill manager">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
@@ -594,12 +635,37 @@
   <script src="tools/finalize.js"></script>
   <script src="mcp.js"></script>
   <script src="sidepanel.js"></script>
+  <!-- Keyboard shortcuts. Every shortcut below is wired in sidepanel.js; this
+       exists because none of them were discoverable. -->
+  <div class="shortcuts hidden" id="shortcutsOverlay" role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle" aria-keyshortcuts="Escape">
+    <div class="shortcuts-box">
+      <div class="shortcuts-hdr">
+        <h2 id="shortcutsTitle">Keyboard shortcuts</h2>
+        <button class="ibtn" id="closeShortcutsBtn" type="button" aria-label="Close keyboard shortcuts">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <dl class="shortcuts-list">
+        <div><dt><kbd>Ctrl</kbd><kbd>K</kbd></dt><dd>Command palette — actions, tools, sessions, models</dd></div>
+        <div><dt><kbd>?</kbd></dt><dd>This help</dd></div>
+        <div><dt><kbd>Enter</kbd></dt><dd>Send message</dd></div>
+        <div><dt><kbd>Shift</kbd><kbd>Enter</kbd></dt><dd>New line without sending</dd></div>
+        <div><dt><kbd>/</kbd></dt><dd>Slash commands (type at the start of the composer)</dd></div>
+        <div><dt><kbd>&uarr;</kbd><kbd>&darr;</kbd></dt><dd>Move through palettes, model and session pickers</dd></div>
+        <div><dt><kbd>Home</kbd><kbd>End</kbd></dt><dd>Jump to the first / last item in a picker</dd></div>
+        <div><dt><kbd>Tab</kbd></dt><dd>Complete the highlighted slash command</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>Close a dialog, popover or the palette</dd></div>
+      </dl>
+      <p class="shortcuts-foot">Press <kbd>?</kbd> any time. On macOS use <kbd>&#8984;</kbd> instead of <kbd>Ctrl</kbd>.</p>
+    </div>
+  </div>
+
   <!-- Command palette (Ctrl/Cmd+K). Fuzzy launcher over actions, tools,
        sessions, models and settings so 147 tools stay discoverable. -->
-  <div class="palette hidden" id="paletteOverlay" role="dialog" aria-label="Command palette">
+  <div class="palette hidden" id="paletteOverlay" role="dialog" aria-modal="true" aria-label="Command palette" aria-keyshortcuts="Escape">
     <div class="palette-box">
-      <input type="text" id="paletteInput" placeholder="Search actions, tools, sessions, models, settings…" autocomplete="off" spellcheck="false" />
-      <div class="palette-list" id="paletteList"></div>
+      <input type="text" id="paletteInput" placeholder="Search actions, tools, sessions, models, settings…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="paletteList" aria-autocomplete="list" aria-label="Command palette" />
+      <div class="palette-list" id="paletteList" role="listbox" aria-label="Commands and tools"></div>
       <div class="palette-foot"><span>↑↓ navigate</span><span>↵ run</span><span>esc close</span></div>
     </div>
   </div>
