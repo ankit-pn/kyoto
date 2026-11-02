@@ -17,7 +17,7 @@ Bring your own key for any OpenAI-compatible provider (OpenRouter, OpenCode Go, 
 - **Council mode.** `/council <question>` asks up to four configured models in parallel and shows the answers side by side with latency and cost — then adopt the winner with one click.
 - **Routines.** Record a workflow once, replay it **with no model calls**: fast, deterministic and free, runnable by the agent or by cron.
 - **Share a session as HTML.** `/share` exports a self-contained, secret-redacted page you can hand to someone else.
-- **Any OpenAI-compatible provider, multiple at once.** Four first-class (OpenRouter / OpenCode Go / DeepSeek / MiniMax) plus an unlimited "custom" slot for Ollama, LM Studio, Groq, Together, Cerebras, Gemini-OAI, Anthropic-via-LiteLLM, your-own-proxy, etc.
+- **Any OpenAI-compatible provider, multiple at once.** Five first-class (OpenRouter / OpenCode Go / DeepSeek / MiniMax / Demon Route) plus an unlimited "custom" slot for Ollama, LM Studio, Groq, Together, Cerebras, Gemini-OAI, Anthropic-via-LiteLLM, your-own-proxy, etc.
 - **Per-tab sessions.** Every tab owns its own conversation. Switching tabs swaps the visible session; in-flight streams keep running for the tabs you left.
 - **Streaming tool-call loop.** Up to 12 round-trips per turn. Captures the reasoning channel — OpenRouter's `reasoning_details` (replayed verbatim, in order, encrypted blocks included), plus `reasoning_content` / `reasoning` from DeepSeek thinking-mode and other reasoning models.
 - **~100 built-in tools** across browser, DOM, cookies, network, storage, devtools, debugger, history, memory, minimax, media, **shell** (with background jobs), **meta** (ask_user), devtools-export groups. Plus your own:
@@ -60,6 +60,7 @@ Click the gear icon. Pick a provider, paste an API key, save. Models load automa
 | **OpenCode Go** | [opencode.ai/console](https://opencode.ai/console) → Account → Personal API keys (`oc_sk_…`) — subscription gateway; the $10/mo Go plan gives per-model monthly allowances across Claude, GPT, Gemini, GLM, Kimi, Qwen and more, all through one OpenAI-compatible endpoint. |
 | **DeepSeek direct** | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) — cheapest path to V3 / Reasoner. |
 | **MiniMax direct** | [minimax.io interface keys](https://www.minimax.io/platform/user-center/basic-information/interface-key) — MiniMax-M2 family + token-plan tools. |
+| **Demon Route** | [demonroute.com/dashboard](https://demonroute.com/dashboard) — OpenAI-compatible gateway for open-weight models, including abliterated and community fine-tunes ([model list](https://demonroute.com/models)). |
 | **Custom (any OpenAI-compatible endpoint)** | Settings → Custom OpenAI-compatible providers → add base URL + optional key. Works for Ollama (`http://localhost:11434/v1`, keyless), LM Studio (`http://localhost:1234/v1`), Groq (`https://api.groq.com/openai/v1`), Together, Fireworks, Cerebras, Cloudflare AI Gateway, Anthropic-via-LiteLLM, Gemini-OAI (`https://generativelanguage.googleapis.com/v1beta/openai`). |
 
 Per-provider keys are stored independently; switching provider in Settings preserves each.

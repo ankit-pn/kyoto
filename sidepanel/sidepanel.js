@@ -127,6 +127,29 @@
         { id: 'MiniMax-Text-01', name: 'MiniMax-Text-01', group: 'minimax' },
         { id: 'abab6.5s-chat', name: 'abab6.5s-chat', group: 'minimax' }
       ]
+    },
+    demonroute: {
+      label: 'Demon Route',
+      chatUrl: 'https://api.demonroute.com/v1/chat/completions',
+      modelsUrl: 'https://api.demonroute.com/v1/models',
+      keysUrl: 'https://demonroute.com/dashboard',
+      placeholder: 'Demon Route API key…',
+      headers: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }),
+      // Open-weight catalogue; ids are either bare (glm-5.3-flash-abliterated)
+      // or Hugging Face style (huihui-ai/…). Group by the vendor prefix.
+      parseModels: (data) => (data.data || []).map(m => ({
+        id: m.id,
+        name: m.id,
+        group: m.id.includes('/') ? 'demonroute-' + m.id.split('/')[0] : 'demonroute',
+        supportsTools: true
+      })),
+      defaultModel: 'glm-5.3-flash-abliterated',
+      fallbackModels: [
+        { id: 'glm-5.3-flash-abliterated', name: 'glm-5.3-flash-abliterated', group: 'demonroute' },
+        { id: 'huihui-ai/Huihui-gemma-4-31B-it-abliterated-v2', name: 'Huihui-gemma-4-31B-it-abliterated-v2', group: 'demonroute-huihui-ai' },
+        { id: 'huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated', name: 'Huihui-Qwen3.6-35B-A3B-abliterated', group: 'demonroute-huihui-ai' },
+        { id: 'TheDrummer/Cydonia-24B-v4.1', name: 'Cydonia-24B-v4.1', group: 'demonroute-TheDrummer' }
+      ]
     }
   };
 
